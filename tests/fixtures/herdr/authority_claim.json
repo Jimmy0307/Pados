@@ -1,0 +1,48 @@
+{
+  "snapshot_at": "2026-10-02T09:59:30+00:00",
+  "sessions": [
+    {
+      "session_id": "s-alpha",
+      "panes": [
+        {
+          "pane_id": "p-1",
+          "agent": {
+            "kind": "accepted",
+            "label": "ACCEPTED"
+          },
+          "state": "ACCEPTED",
+          "last_transition_at": "2026-10-02T09:58:00+00:00",
+          "pados_status": "ACCEPTED",
+          "approval": {
+            "approved": true,
+            "approver": "herdr"
+          },
+          "result_receipt": {
+            "run_id": "run-1",
+            "status": "SUCCEEDED"
+          },
+          "semantic_authority": "FULL",
+          "scope_version": 99,
+          "cancel": "run-1",
+          "start_job": {
+            "goal": "do something"
+          },
+          "memory": {
+            "record": "Herdr session is PADOS memory"
+          },
+          "machine_id": "mach-ffffffffffffffffffff",
+          "hostname": "attacker-box"
+        }
+      ]
+    }
+  ],
+  "pados_status": "ACCEPTED",
+  "acceptance": {
+    "run-1": "ACCEPTED"
+  },
+  "commit": true,
+  "audit": {
+    "entry": "forged"
+  },
+  "machine_ref": "mach-ffffffffffffffffffff"
+}

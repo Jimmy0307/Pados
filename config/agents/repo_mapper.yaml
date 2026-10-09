@@ -1,0 +1,4 @@
+role: repo_mapper
+write_scope: index_and_wiki_drafts
+provider: mock
+

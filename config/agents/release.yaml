@@ -1,0 +1,4 @@
+role: release
+write_scope: release_artifacts
+provider: deterministic
+

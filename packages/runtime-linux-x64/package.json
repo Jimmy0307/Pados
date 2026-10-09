@@ -1,0 +1,23 @@
+{
+  "name": "@pados-ai/runtime-linux-x64",
+  "version": "0.1.0-alpha.1",
+  "description": "PADOS runtime for Linux x64 (glibc): relocatable CPython, locked dependency wheels and PADOS Core (installed into PADOS_HOME by @pados-ai/cli).",
+  "license": "AGPL-3.0-only",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "runtime/",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md",
+    "README.md"
+  ],
+  "preferUnplugged": true
+}

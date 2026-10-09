@@ -1,0 +1,10 @@
+direct_main_write: false
+auto_merge: false
+network_default: deny
+destructive_commands: deny
+secret_access: deny
+isolated_worktree: true
+tests_required: true
+independent_review_required: true
+human_approval_before_merge: true
+

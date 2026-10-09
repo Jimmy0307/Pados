@@ -1,0 +1,4 @@
+# Pins for runtime dependencies that requirements.lock does not yet cover (lock-hygiene residual reported to
+# the integrator). Applied together with requirements.lock when building runtime packages; remove an entry once
+# requirements.lock pins it. Version = the one used by the shared development environment.
+python-multipart==0.0.32

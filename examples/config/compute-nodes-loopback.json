@@ -1,0 +1,19 @@
+{
+  "schema_version": "pados.compute-nodes.registry.v1",
+  "state_dir": "./runtime/local/pados-node-state",
+  "nodes": [
+    {
+      "node_id": "lcn-00000000000000000000",
+      "node_name": "dev-node",
+      "endpoint": "http://127.0.0.1:8765",
+      "auth_ref": "secretref://env/PADOS_NODE_CREDENTIAL",
+      "authorized": false,
+      "allowed_capabilities": [
+        "LOCAL_INFERENCE"
+      ],
+      "max_classification": "INTERNAL",
+      "project_ids": [],
+      "security_profile": "LOCAL_SINGLE_USER"
+    }
+  ]
+}

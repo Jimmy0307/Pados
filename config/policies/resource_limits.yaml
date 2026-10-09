@@ -1,0 +1,4 @@
+min_available_ram_gb: 6
+pause_llm_ram_percent: 85
+pause_llm_vram_percent: 90
+

@@ -1,0 +1,42 @@
+{
+  "snapshot_at": "2026-10-02T09:59:30+00:00",
+  "herdr_version": "fixture-v1",
+  "sessions": [
+    {
+      "session_id": "s-alpha",
+      "panes": [
+        {
+          "pane_id": "p-1",
+          "agent": {
+            "kind": "claude",
+            "label": "Claude Code",
+            "last_output": "HERDR-TERMINAL-MARKER-agent-output"
+          },
+          "state": "working",
+          "last_transition_at": "2026-10-02T09:58:00+00:00",
+          "scrollback": [
+            "HERDR-TERMINAL-MARKER-scrollback line 1",
+            "line 2"
+          ],
+          "pane_buffer": "HERDR-TERMINAL-MARKER-pane-buffer",
+          "output": "HERDR-TERMINAL-MARKER-output",
+          "lines": [
+            "HERDR-TERMINAL-MARKER-lines"
+          ],
+          "history": [
+            "HERDR-TERMINAL-MARKER-history"
+          ],
+          "screen": {
+            "rows": [
+              "HERDR-TERMINAL-MARKER-screen"
+            ]
+          },
+          "content": "HERDR-TERMINAL-MARKER-content"
+        }
+      ],
+      "terminal_history": [
+        "HERDR-TERMINAL-MARKER-session-history"
+      ]
+    }
+  ]
+}

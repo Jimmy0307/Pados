@@ -1,0 +1,58 @@
+{
+  "schema_version": "pados.enterprise.config.v1",
+  "allow_remote_egress": false,
+  "authorized_secret_refs": [],
+  "capabilities": [
+    {
+      "capability_id": "knowledge.local",
+      "capability_type": "KNOWLEDGE_RETRIEVAL",
+      "version": "1",
+      "supported_inputs": [
+        "text/plain",
+        "application/pdf"
+      ],
+      "supported_outputs": [
+        "evidence-package"
+      ],
+      "privacy_classes": [
+        "PUBLIC",
+        "INTERNAL",
+        "CONFIDENTIAL",
+        "RESTRICTED"
+      ],
+      "execution_mode": "IN_PROCESS",
+      "health": "READY",
+      "provenance_support": true,
+      "artifact_contract": {
+        "output_kind": "evidence",
+        "schema_ref": "pados.enterprise.retrieval.v1"
+      },
+      "implementation": "pados.enterprise.pipeline:local_pipeline"
+    },
+    {
+      "capability_id": "ocr.local",
+      "capability_type": "OCR",
+      "version": "1",
+      "supported_inputs": [
+        "image/png"
+      ],
+      "supported_outputs": [
+        "evidence-package"
+      ],
+      "privacy_classes": [
+        "PUBLIC",
+        "INTERNAL",
+        "CONFIDENTIAL",
+        "RESTRICTED"
+      ],
+      "execution_mode": "IN_PROCESS",
+      "health": "READY",
+      "provenance_support": true,
+      "artifact_contract": {
+        "output_kind": "evidence",
+        "schema_ref": "pados.enterprise.ocr.v1"
+      },
+      "implementation": "pados.enterprise.extraction:UnconfiguredOcrExtractor"
+    }
+  ]
+}

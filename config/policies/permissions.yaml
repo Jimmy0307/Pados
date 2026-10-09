@@ -1,0 +1,6 @@
+max_fix_cycles: 3
+max_active_worktrees: 2
+max_local_llm_concurrency: 1
+max_cloud_llm_concurrency: 2
+max_deterministic_workers: 4
+

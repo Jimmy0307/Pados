@@ -1,0 +1,15 @@
+{
+  "name": "pados-npm-workspace",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "npm packaging for PADOS: @pados-ai/cli plus per-platform runtime packages. Never published from CI.",
+  "workspaces": [
+    "cli"
+  ],
+  "scripts": {
+    "test": "node --test cli/test/"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

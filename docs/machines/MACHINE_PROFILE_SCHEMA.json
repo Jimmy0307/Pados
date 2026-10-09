@@ -1,0 +1,277 @@
+{
+  "$defs": {
+    "AuthMethod": {
+      "enum": [
+        "SSH_KEY",
+        "SSH_AGENT",
+        "OS_CREDENTIAL_REF",
+        "PASSWORD_BOOTSTRAP_COMPLETED"
+      ],
+      "title": "AuthMethod",
+      "type": "string"
+    },
+    "ConnectionState": {
+      "enum": [
+        "ONLINE",
+        "DEGRADED",
+        "OFFLINE",
+        "AUTH_REQUIRED",
+        "UNAUTHORIZED",
+        "HERDR_UNAVAILABLE"
+      ],
+      "title": "ConnectionState",
+      "type": "string"
+    },
+    "HerdrMetadata": {
+      "additionalProperties": false,
+      "description": "Optional Herdr link: an enabled flag and an opaque socket/ref string, nothing else.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "maxLength": 217,
+          "pattern": "^[a-z][a-z0-9+.-]{0,15}:[A-Za-z0-9_./+-]{1,200}$",
+          "title": "Ref"
+        }
+      },
+      "title": "HerdrMetadata",
+      "type": "object"
+    },
+    "IdentityAlert": {
+      "description": "Sticky until a human re-pins or acknowledges; forces ``UNAUTHORIZED``.",
+      "enum": [
+        "HOST_KEY_MISMATCH"
+      ],
+      "title": "IdentityAlert",
+      "type": "string"
+    },
+    "MachineProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "auth_method": {
+          "$ref": "#/$defs/AuthMethod"
+        },
+        "auth_ref": {
+          "maxLength": 256,
+          "pattern": "^(secretref://[a-z0-9_-]+/[A-Za-z0-9_./-]+|ssh-agent://[a-z0-9][a-z0-9_-]{0,63}|oscred://[a-z0-9][a-z0-9_-]{0,31}/[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$",
+          "title": "Auth Ref",
+          "type": "string"
+        },
+        "compute_node_id": {
+          "anyOf": [
+            {
+              "pattern": "^lcn-[a-f0-9]{20}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Compute Node Id"
+        },
+        "connection_state": {
+          "$ref": "#/$defs/ConnectionState"
+        },
+        "display_name": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Display Name",
+          "type": "string"
+        },
+        "enrolled_at": {
+          "format": "date-time",
+          "title": "Enrolled At",
+          "type": "string"
+        },
+        "herdr": {
+          "$ref": "#/$defs/HerdrMetadata",
+          "default": {
+            "enabled": false,
+            "ref": null
+          }
+        },
+        "host": {
+          "maxLength": 253,
+          "minLength": 1,
+          "title": "Host",
+          "type": "string"
+        },
+        "host_key_fingerprint": {
+          "pattern": "^SHA256:[A-Za-z0-9+/]{43}$",
+          "title": "Host Key Fingerprint",
+          "type": "string"
+        },
+        "host_public_key": {
+          "maxLength": 2400,
+          "pattern": "^(ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|ssh-rsa) [A-Za-z0-9+/]+={0,2}$",
+          "title": "Host Public Key",
+          "type": "string"
+        },
+        "hostname_confirmed": {
+          "default": false,
+          "title": "Hostname Confirmed",
+          "type": "boolean"
+        },
+        "identity_alert": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdentityAlert"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "key_auth_method": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthMethod"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "last_seen": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Seen"
+        },
+        "machine_id": {
+          "pattern": "^mach-[0-9a-f]{20}$",
+          "title": "Machine Id",
+          "type": "string"
+        },
+        "platform": {
+          "$ref": "#/$defs/Platform"
+        },
+        "port": {
+          "default": 22,
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "roles": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MachineRole"
+          },
+          "maxItems": 4,
+          "title": "Roles",
+          "type": "array"
+        },
+        "state_observed_at": {
+          "format": "date-time",
+          "title": "State Observed At",
+          "type": "string"
+        },
+        "username": {
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$",
+          "title": "Username",
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine_id",
+        "display_name",
+        "host",
+        "username",
+        "auth_method",
+        "auth_ref",
+        "platform",
+        "host_public_key",
+        "host_key_fingerprint",
+        "enrolled_at",
+        "connection_state",
+        "state_observed_at"
+      ],
+      "title": "MachineProfile",
+      "type": "object"
+    },
+    "MachineRole": {
+      "enum": [
+        "HOME_BASE",
+        "LOCAL_COMPUTE_NODE",
+        "HERDR_MACHINE",
+        "SANDBOX_HOST"
+      ],
+      "title": "MachineRole",
+      "type": "string"
+    },
+    "Platform": {
+      "enum": [
+        "MACOS",
+        "LINUX",
+        "WINDOWS"
+      ],
+      "title": "Platform",
+      "type": "string"
+    },
+    "SecurityProfile": {
+      "enum": [
+        "LOCAL_SINGLE_USER",
+        "TRUSTED_LAN",
+        "HARDENED_ENTERPRISE"
+      ],
+      "title": "SecurityProfile",
+      "type": "string"
+    }
+  },
+  "$id": "https://pados.invalid/schemas/machines/inventory.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One operator-owned inventory; one MachineProfile per physical machine. Credentials are references only (secretref://, ssh-agent://, oscred://). No field may hold a plaintext credential and unknown fields are refused. Generated from pados.machines.inventory.MachineInventory.model_json_schema(); the code additionally enforces the per-method reference scheme, canonical host and key forms, the derived machine_id / fingerprint and the shared assert_minimized guard.",
+  "properties": {
+    "machines": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/MachineProfile"
+      },
+      "maxItems": 256,
+      "title": "Machines",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": "pados.machines.inventory.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "security_profile": {
+      "$ref": "#/$defs/SecurityProfile",
+      "default": "TRUSTED_LAN"
+    },
+    "stale_after_seconds": {
+      "default": 300,
+      "exclusiveMinimum": 0,
+      "maximum": 86400,
+      "title": "Stale After Seconds",
+      "type": "integer"
+    }
+  },
+  "title": "MachineInventory",
+  "type": "object"
+}

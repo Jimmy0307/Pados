@@ -1,0 +1,17 @@
+PADOS
+Copyright 2026 The PADOS Authors
+
+PADOS Core (the server, CLI, web workspace and all other PADOS-owned source in
+this repository unless a directory states otherwise) is licensed under the GNU
+Affero General Public License, version 3 only (see LICENSE).
+SPDX-License-Identifier: AGPL-3.0-only
+
+Commercial licensing: the copyright holder may offer PADOS under separate
+commercial license terms as an alternative to the AGPL-3.0. See COMMERCIAL.md.
+
+Trademarks: "PADOS" and the PADOS logo are reserved. The software license grants
+no right to use them. Modified versions and forks must not present themselves
+as the official PADOS product. See LICENSING.md.
+
+Third-party components keep their own licenses and are not relicensed.
+See THIRD_PARTY_NOTICES.md and THIRD_PARTY_LICENSES/.

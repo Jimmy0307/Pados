@@ -1,0 +1,16 @@
+flowchart LR
+  A[Human Intent] --> B[Project Context]
+  E[Enterprise evidence\n(data, not truth)] --> B
+  B --> C[Governed Work Package]
+  C --> D{Provider Router}
+  D --> P[Frontier CLI provider]
+  D --> N[Local Compute Node]
+  P --> R[ExecutionReceipt]
+  N --> R
+  R --> V[Verification]
+  V --> RR[ResultReceipt]
+  RR --> VAL[Validation]
+  VAL --> S[ScopeVersion check]
+  S --> CAS[CAS]
+  CAS --> AU[Immutable Audit]
+  AU --> ST[Updated Project State]

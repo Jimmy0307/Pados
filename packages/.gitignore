@@ -1,0 +1,10 @@
+# Build outputs of packages/scripts (never committed): runtime payloads, copied license files, tarballs.
+runtime-*/runtime/
+runtime-*/LICENSE
+runtime-*/NOTICE
+runtime-*/THIRD_PARTY_NOTICES.md
+cli/LICENSE
+cli/NOTICE
+*.tgz
+node_modules/
+package-lock.json

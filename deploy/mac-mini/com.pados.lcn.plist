@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: replace PADOS_VENV and PADOS_NODE_DIR; the credential comes from the environment, never from this file. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.pados.lcn</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>PADOS_VENV/bin/pados</string><string>node</string><string>serve</string>
+    <string>--config</string><string>PADOS_NODE_DIR/node.json</string>
+  </array>
+  <key>WorkingDirectory</key><string>PADOS_NODE_DIR</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>PADOS_NODE_DIR/node.out.log</string>
+  <key>StandardErrorPath</key><string>PADOS_NODE_DIR/node.err.log</string>
+</dict>
+</plist>

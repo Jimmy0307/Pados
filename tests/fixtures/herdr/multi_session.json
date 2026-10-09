@@ -1,0 +1,48 @@
+{
+  "snapshot_at": "2026-10-02T09:59:30+00:00",
+  "herdr_version": "fixture-v1",
+  "sessions": [
+    {
+      "session_id": "s-alpha",
+      "panes": [
+        {
+          "pane_id": "p-1",
+          "agent": {
+            "kind": "claude",
+            "label": "Claude Code"
+          },
+          "state": "working",
+          "last_transition_at": "2026-10-02T09:58:00+00:00"
+        },
+        {
+          "pane_id": "p-2",
+          "agent": {
+            "kind": "shell",
+            "label": "zsh"
+          },
+          "state": "idle",
+          "last_transition_at": "2026-10-02T09:58:00+00:00"
+        }
+      ]
+    },
+    {
+      "session_id": "s-beta",
+      "panes": [
+        {
+          "id": "p-9",
+          "agent": "codex",
+          "status": "Blocked"
+        },
+        {
+          "pane_id": "p-10",
+          "agent": {
+            "kind": "claude",
+            "label": "Claude Code"
+          },
+          "state": "exited",
+          "last_transition_at": "2026-10-02T09:58:00+00:00"
+        }
+      ]
+    }
+  ]
+}

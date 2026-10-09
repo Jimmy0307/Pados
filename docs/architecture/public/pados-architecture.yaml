@@ -1,0 +1,51 @@
+# Machine-readable architecture source (tool-neutral; intended for later rendering, e.g. Archify).
+schema: pados.architecture.v1
+product: "Intelligent Mindmap-driven Portable Cognitive & Execution Operating System"
+views:
+  system:
+    nodes:
+      - {id: human, kind: actor, label: "Human operator"}
+      - {id: ui, kind: component, label: "Web UI (Mission Control, Decision Inbox)"}
+      - {id: api, kind: component, label: "PADOS API / CLI (loopback)"}
+      - {id: context, kind: component, label: "Context resolver (repository + semantic + extensions)"}
+      - {id: productloop, kind: component, label: "Product loop (work package, validation)"}
+      - {id: router, kind: component, label: "Worker / Provider Router"}
+      - {id: providers, kind: external, label: "Frontier CLI agents (Codex, Claude Code)"}
+      - {id: lip, kind: component, label: "LocalInferenceProvider"}
+      - {id: nodes, kind: external, label: "Local Compute Nodes"}
+      - {id: enterprise, kind: component, label: "Enterprise Capability Pack (evidence)"}
+      - {id: opdb, kind: store, label: "Operational DB (projects, goals, decisions, memory authority)"}
+      - {id: proofdb, kind: store, label: "Proof DB (ScopeVersion/CAS, receipts, semantic audit)"}
+      - {id: objects, kind: store, label: "Content-addressed object store"}
+    edges:
+      - [human, ui, "intent / approvals"]
+      - [ui, api, "HTTP (loopback, control token)"]
+      - [api, productloop, "governed request"]
+      - [productloop, context, "bounded context"]
+      - [enterprise, context, "authorized evidence (data, not truth)"]
+      - [productloop, router, "select provider"]
+      - [router, providers, "isolated workspace execution"]
+      - [router, lip, "local model candidates"]
+      - [lip, nodes, "node protocol v1"]
+      - [productloop, proofdb, "receipts, CAS, audit"]
+      - [productloop, objects, "context/artifact objects"]
+      - [api, opdb, "projects, memory"]
+      - [ui, opdb, "projections (read-only)"]
+  authority_chain:
+    sequence: [human_intent, project_context, governed_work_package, capability_provider_or_node, execution_receipt,
+               verification, result_receipt, validation, scope_version_check, cas, immutable_audit, updated_project_state]
+    invariants: ["MODEL OUTPUT != TRUTH", "EXECUTION COMPLETE != SEMANTIC ACCEPTANCE"]
+  enterprise_pack:
+    pipeline: [source, identity, classification, extraction, normalized_document, chunks, exact_seed, graph_expansion,
+               vector, presentation_authorization, rerank, budget, evidence_package, pados_context]
+    authority: "none (evidence only)"
+  local_compute_node:
+    padOS_side: [registry, prober, local_inference_provider, receipt_ledger, maker]
+    node_side: [identity, service, job_manager, backends, artifact_store]
+    backends: [openai_compatible, ollama, llama_cpp, mlx_openai_compatible_contract, deterministic]
+    identity: {trusted_lan: HMAC_SHARED_SECRET, hardened: ASYMMETRIC_IDENTITY_design_only}
+  deployment_topology:
+    profiles:
+      LOCAL_SINGLE_USER: {hosts: 1, network: loopback}
+      TRUSTED_LAN: {hosts: "PADOS host + private-LAN nodes", network: "private LAN / host-to-host", internet: false}
+      HARDENED_ENTERPRISE: {status: not_supported_yet}

@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+import logging
+import sys
+from typing import Any, cast
+
+import structlog
+
+
+def configure_logging(level: str = "INFO") -> None:
+    logging.basicConfig(format="%(message)s", stream=sys.stdout, level=getattr(logging, level.upper()))
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, level.upper())),
+        cache_logger_on_first_use=True,
+    )
+
+
+def get_logger(name: str, **context: Any) -> structlog.stdlib.BoundLogger:
+    return cast(structlog.stdlib.BoundLogger, structlog.get_logger(name).bind(**context))

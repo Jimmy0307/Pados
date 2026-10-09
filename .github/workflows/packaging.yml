@@ -1,0 +1,139 @@
+# PADOS npm packaging: build the platform runtime payload, run the Node and Python install-glue tests, pack local
+# tarballs and run the install acceptance against them. CI IS NOT PADOS AUTHORITY: no publish step, no secrets,
+# no deploy; tarballs stay on the ephemeral runner (short-lived artifact). The CLI only ever sees a temporary npm
+# prefix, a temporary PADOS_HOME and, on Linux, the disposable service database below.
+name: packaging
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "packages/**"
+      - "src/pados/install/**"
+      - "tests/install/**"
+      - "migrations/**"
+      - "pyproject.toml"
+      - "requirements.lock"
+      - ".github/workflows/packaging.yml"
+  pull_request:
+    paths:
+      - "packages/**"
+      - "src/pados/install/**"
+      - "tests/install/**"
+      - "migrations/**"
+      - "pyproject.toml"
+      - "requirements.lock"
+      - ".github/workflows/packaging.yml"
+permissions: {}
+concurrency:
+  group: packaging-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    name: linux-x64 (build, pack, install acceptance with database)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: pados
+          POSTGRES_USER: pados
+          POSTGRES_PASSWORD: ci-only-disposable
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U pados" --health-interval 5s --health-retries 20
+    env:
+      PADOS_DB_PASSWORD: ci-only-disposable
+      PADOS_DB_HOST: 127.0.0.1
+      PADOS_DB_PORT: "5432"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Node unit tests
+        run: node --test "packages/cli/test/*.test.js"
+      - name: Python install-glue tests
+        run: python -m pip install -c requirements.lock -e ".[dev]" && python -m pytest -q tests/install && ruff check src/pados/install tests/install && mypy src/pados/install
+      - name: Build web UI (base /ui/)
+        working-directory: web
+        env:
+          PADOS_PAGES_BASE: /ui/
+        run: npm ci --ignore-scripts && npm run build
+      - name: Build runtime payload (pinned CPython, locked wheels)
+        run: python packages/scripts/build_runtime.py --platform linux-x64 --web-dist web/dist
+      - name: Pack local tarballs (current and a synthetic next version)
+        run: node packages/scripts/pack.js --out dist-npm --packages cli,runtime-linux-x64 && node packages/scripts/pack.js --out dist-npm --packages cli,runtime-linux-x64 --set-version 0.1.0-alpha.99
+      - name: Install acceptance (tarballs, temp prefix, temp PADOS_HOME, disposable database)
+        env:
+          PADOS_ACCEPTANCE_TARBALLS: dist-npm
+          PADOS_ACCEPTANCE_DATABASE: "1"
+        run: node --test packages/cli/test/acceptance/install.acceptance.js
+      - name: Keep tarballs for inspection (not a release)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-tarballs-linux-x64
+          path: dist-npm/*.tgz*
+          retention-days: 7
+  windows:
+    name: win32-x64 (build, pack, install acceptance without database)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Node unit tests
+        run: node --test "packages/cli/test/*.test.js"
+      - name: Python install-glue tests
+        run: python -m pip install -c requirements.lock -e ".[dev]" && python -m pytest -q tests/install
+      - name: Build web UI (base /ui/)
+        working-directory: web
+        env:
+          PADOS_PAGES_BASE: /ui/
+        run: npm ci --ignore-scripts && npm run build
+      - name: Build runtime payload (pinned CPython, locked wheels)
+        run: python packages/scripts/build_runtime.py --platform win32-x64 --web-dist web/dist
+      - name: Pack local tarballs
+        run: node packages/scripts/pack.js --out dist-npm --packages cli,runtime-win32-x64
+      - name: Install acceptance (tarballs, temp prefix, temp PADOS_HOME; database-unavailable path)
+        env:
+          PADOS_ACCEPTANCE_TARBALLS: dist-npm
+        run: node --test packages/cli/test/acceptance/install.acceptance.js
+  macos-arm64:
+    # Prepared, disabled: @pados-ai/runtime-darwin-arm64 is design-ready (pinned CPython archive in
+    # packages/scripts/build_runtime.py) but not built or accepted on hardware in this release. Enable after
+    # a macOS arm64 acceptance run; the steps mirror the Linux job without the service database.
+    name: darwin-arm64 (disabled; design-ready)
+    if: false
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Node unit tests
+        run: node --test "packages/cli/test/*.test.js"

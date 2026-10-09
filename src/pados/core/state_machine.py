@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+VALID_STATES = {
+    "NEW",
+    "SCOPED",
+    "INDEXING",
+    "INDEXED",
+    "PLANNING",
+    "PLANNED",
+    "APPROVED",
+    "RUNNING",
+    "IMPLEMENTING",
+    "VALIDATING",
+    "QA_RUNNING",
+    "REVIEWING",
+    "COMPLETED",
+    "FIXING",
+    "RELEASE_CANDIDATE",
+    "READY_FOR_RELEASE",
+    "RELEASED",
+    "BLOCKED",
+    "FAILED",
+    "CANCELLED",
+    "ROLLED_BACK",
+}
+
+TERMINAL_STATES = {"RELEASED", "FAILED", "CANCELLED", "ROLLED_BACK"}
+
+VALID_GATES = {f"G{index}" for index in range(9)}
+
+ALLOWED_TRANSITIONS = {
+    "NEW": {"SCOPED", "PLANNING", "PLANNED", "BLOCKED", "CANCELLED"},
+    "SCOPED": {"INDEXING", "PLANNING", "PLANNED", "BLOCKED", "CANCELLED"},
+    "INDEXING": {"INDEXED", "FAILED", "BLOCKED", "CANCELLED"},
+    "INDEXED": {"PLANNING", "PLANNED", "BLOCKED", "CANCELLED"},
+    "PLANNING": {"PLANNED", "BLOCKED", "FAILED", "CANCELLED"},
+    "PLANNED": {"APPROVED", "RUNNING", "IMPLEMENTING", "VALIDATING", "QA_RUNNING", "BLOCKED", "CANCELLED"},
+    "APPROVED": {"RUNNING", "IMPLEMENTING", "BLOCKED", "CANCELLED"},
+    "RUNNING": {"VALIDATING", "QA_RUNNING", "FAILED", "BLOCKED", "CANCELLED"},
+    "IMPLEMENTING": {"VALIDATING", "QA_RUNNING", "REVIEWING", "FIXING", "FAILED", "BLOCKED", "CANCELLED"},
+    "VALIDATING": {"COMPLETED", "REVIEWING", "FIXING", "FAILED", "BLOCKED", "CANCELLED"},
+    "QA_RUNNING": {"COMPLETED", "REVIEWING", "FIXING", "READY_FOR_RELEASE", "FAILED", "BLOCKED", "CANCELLED"},
+    "REVIEWING": {"FIXING", "COMPLETED", "READY_FOR_RELEASE", "BLOCKED", "CANCELLED"},
+    "FIXING": {"IMPLEMENTING", "VALIDATING", "QA_RUNNING", "REVIEWING", "BLOCKED", "FAILED", "CANCELLED"},
+    "COMPLETED": {"RELEASE_CANDIDATE", "READY_FOR_RELEASE", "ROLLED_BACK"},
+    "RELEASE_CANDIDATE": {"READY_FOR_RELEASE", "ROLLED_BACK", "BLOCKED"},
+    "READY_FOR_RELEASE": {"RELEASED", "ROLLED_BACK", "BLOCKED"},
+    "BLOCKED": {"PLANNED", "FIXING", "CANCELLED"},
+    "FAILED": {"FIXING", "ROLLED_BACK"},
+    "CANCELLED": set(),
+    "ROLLED_BACK": set(),
+    "RELEASED": set(),
+}
+
+
+def validate_transition(current_status: str, new_status: str, new_gate: str) -> None:
+    if current_status not in VALID_STATES:
+        raise ValueError(f"UNKNOWN_CURRENT_STATE:{current_status}")
+    if new_status not in VALID_STATES:
+        raise ValueError(f"UNKNOWN_TARGET_STATE:{new_status}")
+    if new_gate not in VALID_GATES:
+        raise ValueError(f"UNKNOWN_GATE:{new_gate}")
+    if new_status not in ALLOWED_TRANSITIONS[current_status]:
+        raise ValueError(f"ILLEGAL_TASK_TRANSITION:{current_status}->{new_status}")
+
