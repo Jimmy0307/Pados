@@ -9,6 +9,14 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from pados.control.approval_subject import (
+    APPROVAL_ACTOR_MISMATCH,
+    APPROVAL_REQUEST_MISMATCH,
+    APPROVAL_SCOPE_MISMATCH,
+    WorkRouteSubject,
+    find_operation,
+    load_bound_subject,
+)
 from pados.loop import scope_authority
 from pados.loop.amendments import reconcile_residual_work, record_p6_10_execution_result
 from pados.loop.engine import (
@@ -28,8 +36,11 @@ from pados.loop.schemas import (
     TaskPlanCreate,
 )
 from pados.work_protocol.models import TaskEnvelope
-from pados.worker.schemas import RouteRequest
+from pados.worker.schemas import RISK_ORDER, RouteRequest
 from pados.worker.service import route_work_request
+
+
+_MAX_RESIDUAL_DEPTH = 64
 
 
 def _stable_json(payload: Any) -> str:
@@ -62,6 +73,55 @@ def _approved_approval(session: Session, approval_id: str, project_id: str) -> d
     if row["status"] != "APPROVED":
         raise PermissionError("approval is not approved")
     return dict(row)
+
+
+def _bound_subject(approval: dict[str, Any]) -> WorkRouteSubject:
+    """The approval's verified WORK_ROUTE subject; unbound or tampered approvals fail closed."""
+    return load_bound_subject(approval.get("subject_kind"), approval.get("subject_json"), approval["proposal_hash"])
+
+
+def _assert_plan_covered(subject: WorkRouteSubject, *, request_id: str, steps: list[Any]) -> None:
+    """Every plan step must be an operation the approval subject names (defense in depth)."""
+    if subject.request_id != request_id:
+        raise PermissionError(APPROVAL_REQUEST_MISMATCH)
+    if "TASK_LOOP" not in subject.actor.surfaces:
+        raise PermissionError(APPROVAL_ACTOR_MISMATCH)
+    for step in steps:
+        operation = find_operation(
+            subject,
+            step_sequence=step.sequence,
+            capability_id=step.required_capability,
+            command_id=step.command_id,
+        )
+        if operation is None or RISK_ORDER[step.risk_level] > RISK_ORDER[operation.max_risk_level]:
+            raise PermissionError(APPROVAL_SCOPE_MISMATCH)
+
+
+def _root_step_sequence(session: Session, plan_id: str, step: dict[str, Any]) -> int:
+    """Follow residual amendments to the root plan step; residual children inherit its operation."""
+    current_id = str(step["id"])
+    sequence = int(step["sequence"])
+    visited = {current_id}
+    for _ in range(_MAX_RESIDUAL_DEPTH):
+        parent = session.execute(
+            text(
+                """
+                SELECT s.id::text AS id, s.sequence
+                FROM residual_plan_amendments a
+                JOIN task_plan_steps s ON s.id = a.parent_step_id AND s.task_plan_id = a.plan_id
+                WHERE a.plan_id = CAST(:plan_id AS uuid) AND a.step_id = CAST(:step_id AS uuid)
+                """
+            ),
+            {"plan_id": plan_id, "step_id": current_id},
+        ).mappings().first()
+        if parent is None:
+            return sequence
+        current_id = str(parent["id"])
+        if current_id in visited:
+            raise ValueError("RESIDUAL_STEP_LINEAGE_CYCLE")
+        visited.add(current_id)
+        sequence = int(parent["sequence"])
+    raise ValueError("RESIDUAL_STEP_LINEAGE_TOO_DEEP")
 
 
 def _task_envelope_for_request(
@@ -144,7 +204,8 @@ def create_task_plan(
     goal = get_task_goal(session, payload.task_goal_id)
     if goal["status"] not in {"APPROVED", "ACTIVE"}:
         raise PermissionError("goal must be approved before planning")
-    _approved_approval(session, payload.approval_id, str(goal["project_id"]))
+    approval = _approved_approval(session, payload.approval_id, str(goal["project_id"]))
+    _assert_plan_covered(_bound_subject(approval), request_id=str(goal["request_id"]), steps=payload.steps)
     ensure_stop_policy_is_bounded(payload.stop_policy)
     product_goal_ids = [step.product_goal_id for step in payload.steps if step.product_goal_id is not None]
     if len(product_goal_ids) != len(set(product_goal_ids)):
@@ -302,7 +363,9 @@ def create_loop(session: Session, payload: LoopCreate) -> dict[str, Any]:
         raise PermissionError("plan does not belong to goal")
     if goal["status"] != "APPROVED" or plan["status"] != "APPROVED":
         raise PermissionError("goal and plan must be approved")
-    _approved_approval(session, payload.approval_id, str(goal["project_id"]))
+    approval = _approved_approval(session, payload.approval_id, str(goal["project_id"]))
+    if "TASK_LOOP" not in _bound_subject(approval).actor.surfaces:
+        raise PermissionError(APPROVAL_ACTOR_MISMATCH)
     row = session.execute(
         text(
             """
@@ -508,6 +571,8 @@ def run_one_iteration(
         command_id=step["command_id"],
         timeout_seconds=int(step["timeout_seconds"]),
         idempotency_key=f"loop-{iteration_id}",
+        surface="TASK_LOOP",
+        step_sequence=_root_step_sequence(session, str(loop["active_plan_id"]), step),
     )
     session.execute(
         text("UPDATE task_plan_steps SET status = 'ROUTING', attempt_count = attempt_count + 1 WHERE id = :id"),

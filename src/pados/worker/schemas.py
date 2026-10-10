@@ -135,6 +135,10 @@ class RouteRequest(BaseModel):
     command_id: str | None = Field(default=None, max_length=80)
     timeout_seconds: int | None = Field(default=None, gt=0, le=600)
     idempotency_key: str = Field(min_length=1, max_length=120)
+    # Requesting surface and plan step the approval subject must cover (RC2 D1). The control
+    # API forces CONTROL_API / None; only the P6.10 loop sets TASK_LOOP and a root step.
+    surface: Literal["CONTROL_API", "TASK_LOOP"] = "CONTROL_API"
+    step_sequence: int | None = Field(default=None, gt=0)
 
     @field_validator("allowed_actions", "prohibited_actions")
     @classmethod

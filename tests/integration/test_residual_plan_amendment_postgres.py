@@ -47,6 +47,8 @@ from pados.worker.schemas import (
     WorkerType,
 )
 
+from tests.integration.approval_subjects import work_route_subject
+
 _TEST_DATABASE_ENV = "PADOS_RESIDUAL_AMENDMENT_TEST_DATABASE_URL"
 
 
@@ -72,14 +74,31 @@ def disposable_session() -> Iterator[Session]:
         engine.dispose()
 
 
-def _approve(session: object, project_id: str, suffix: str) -> str:
+# The approval names exactly the plan steps it authorizes (RC2 D1); residual children run
+# under their root step's operation.
+LOOP_OPERATIONS: tuple[dict[str, object], ...] = tuple(
+    {"step_sequence": sequence, "capability_id": "READ_REPOSITORY", "command_id": "python_version",
+     "max_risk_level": "LOW"}
+    for sequence in (1, 2)
+)
+
+
+def _approve(
+    session: object,
+    project_id: str,
+    suffix: str,
+    *,
+    request_id: str,
+    operations: tuple[dict[str, object], ...] = LOOP_OPERATIONS,
+) -> str:
+    subject = work_route_subject(project_id, request_id, operations)
     row = control_service.create_approval(
         session,
         {
             "project_id": project_id,
-            "proposal_hash": "a" * 64,
             "proposal_summary": suffix,
             "idempotency_key": f"residual-approval-{suffix}",
+            "subject": subject,
         },
     )  # type: ignore[arg-type]
     approved = control_service.decide_approval(
@@ -145,7 +164,7 @@ def _seed_runtime(session: object, root: Path, *, child_capability: str) -> tupl
             "idempotency_key": f"residual-request-{uuid4()}",
         },
     )
-    approval_id = _approve(session, project_id, uuid4().hex)
+    approval_id = _approve(session, project_id, uuid4().hex, request_id=str(request["id"]))
     goal = loop_service.create_task_goal(
         session,  # type: ignore[arg-type]
         TaskGoalCreate(

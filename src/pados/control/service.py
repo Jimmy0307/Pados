@@ -1,11 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from pados.control.approval_subject import (
+    APPROVAL_PROJECT_MISMATCH,
+    APPROVAL_REQUEST_MISMATCH,
+    APPROVAL_SUBJECT_HASH_MISMATCH,
+    WorkRouteSubject,
+    subject_hash,
+)
 
 
 def list_projects(session: Session) -> list[dict[str, object]]:
@@ -117,18 +126,65 @@ def get_work_request(session: Session, request_id: str) -> dict[str, object]:
     return dict(row)
 
 
-def create_approval(session: Session, payload: Mapping[str, object]) -> dict[str, object]:
-    row = session.execute(
+_INSERT_UNBOUND_APPROVAL = """
+    INSERT INTO control_approvals(project_id, proposal_hash, proposal_summary, idempotency_key)
+    VALUES (:project_id, :proposal_hash, :proposal_summary, :idempotency_key)
+    ON CONFLICT (project_id, idempotency_key) DO UPDATE SET proposal_hash = control_approvals.proposal_hash
+    RETURNING *
+"""
+
+_INSERT_BOUND_APPROVAL = """
+    INSERT INTO control_approvals(
+      project_id, proposal_hash, proposal_summary, idempotency_key, subject_kind, subject_json
+    )
+    VALUES (
+      :project_id, :proposal_hash, :proposal_summary, :idempotency_key, :subject_kind,
+      CAST(:subject_json AS jsonb)
+    )
+    ON CONFLICT (project_id, idempotency_key) DO UPDATE SET proposal_hash = control_approvals.proposal_hash
+    RETURNING *
+"""
+
+
+def _bound_subject_values(session: Session, values: dict[str, Any], raw_subject: object) -> dict[str, Any]:
+    """Validate a WORK_ROUTE subject and derive proposal_hash from it (RC2 D1)."""
+    subject = WorkRouteSubject.model_validate(raw_subject)
+    derived = subject_hash(subject)
+    supplied = values.get("proposal_hash")
+    if supplied is not None and str(supplied).lower() != derived:
+        raise ValueError(APPROVAL_SUBJECT_HASH_MISMATCH)
+    if subject.project_id != str(values["project_id"]):
+        raise PermissionError(APPROVAL_PROJECT_MISMATCH)
+    request = session.execute(
         text(
             """
-            INSERT INTO control_approvals(project_id, proposal_hash, proposal_summary, idempotency_key)
-            VALUES (:project_id, :proposal_hash, :proposal_summary, :idempotency_key)
-            ON CONFLICT (project_id, idempotency_key) DO UPDATE SET proposal_hash = control_approvals.proposal_hash
-            RETURNING *
+            SELECT 1 FROM control_work_requests
+            WHERE id::text = :request_id AND project_id::text = :project_id
             """
         ),
-        dict(payload),
-    ).mappings().one()
+        {"request_id": subject.request_id, "project_id": subject.project_id},
+    ).first()
+    if request is None:
+        raise PermissionError(APPROVAL_REQUEST_MISMATCH)
+    return {
+        **values,
+        "proposal_hash": derived,
+        "subject_kind": subject.kind,
+        "subject_json": json.dumps(subject.model_dump(mode="json"), sort_keys=True),
+    }
+
+
+def create_approval(session: Session, payload: Mapping[str, object]) -> dict[str, object]:
+    """Create an approval; one with a WORK_ROUTE subject is the only kind that can route work."""
+    values: dict[str, Any] = {key: value for key, value in payload.items() if key != "subject"}
+    raw_subject = payload.get("subject")
+    if raw_subject is None:
+        row = session.execute(text(_INSERT_UNBOUND_APPROVAL), values).mappings().one()
+    else:
+        values = _bound_subject_values(session, values, raw_subject)
+        row = session.execute(text(_INSERT_BOUND_APPROVAL), values).mappings().one()
+        if str(row["proposal_hash"]) != values["proposal_hash"]:
+            raise ValueError("APPROVAL_IDEMPOTENCY_CONTENT_CONFLICT")
     append_sync_event(session, str(row["project_id"]), "APPROVAL_CREATED", {"approval_id": str(row["id"])})
     return dict(row)
 
@@ -199,7 +255,7 @@ def append_sync_event(
             VALUES (:project_id, :event_type, CAST(:payload_json AS jsonb))
             """
         ),
-        {"project_id": project_id, "event_type": event_type, "payload_json": __import__("json").dumps(payload_json)},
+        {"project_id": project_id, "event_type": event_type, "payload_json": json.dumps(payload_json)},
     )
 
 

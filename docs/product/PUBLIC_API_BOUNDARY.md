@@ -40,11 +40,58 @@ Before 1.0 nothing is frozen by semver, but PUBLIC_STABLE items change only with
 | `/api/graph/*`, `/api/corpus/*`, `/memory/*`, `/context/assemble`, other `/api/*` | INTERNAL until reviewed individually (used by the bundled UI) |
 | `/docs`, `/redoc`, `/openapi.json` | INTERNAL (developer aids) |
 
+### Control approvals and work routing (approval subject binding)
+
+A control approval authorizes routing work only when it is bound to an immutable `WORK_ROUTE`
+subject (`pados.approval-subject.v1`). `POST /control/approvals` accepts an optional `subject`:
+
+- `project_id`, `request_id`: the subject's project must equal the approval's, and the work request
+  must exist in that project.
+- `actor.surfaces` (`CONTROL_API`, `TASK_LOOP`) and `actor.worker_types`: the requesting surface and
+  the worker types that may execute. Only the named worker types are routing candidates, so an
+  unapproved worker type, including a cloud one, is never selected.
+- `operations[]`: `(step_sequence, capability_id, command_id, max_risk_level)`. A route must match one
+  operation exactly and must not exceed its risk level. The control API always routes with
+  `step_sequence = null`. The P6.10 loop routes with the plan step's root sequence (residual steps
+  inherit their parent's operation).
+- `scope_version_ref` (`scope:N`, optional): when set, the route is refused unless the current
+  ScopeVersion is exactly `N`, and also when no scope head can be read.
+
+The server sets `proposal_hash` to the canonical hash of the subject. A different client-supplied
+`proposal_hash` gets 409 `APPROVAL_SUBJECT_HASH_MISMATCH`. Once written, the subject, its hash and the
+approval's project cannot be changed (a database trigger rejects the UPDATE). Approvals without a
+subject are still accepted for non-routing uses, such as result candidates and gates, but they can
+never route work.
+
+`CONTROL_API` is a structural binding to the requesting surface, not a user identity: the control API
+has no authenticated user. `POST /control/work-requests/{id}/route` always routes as
+`CONTROL_API` with no step, whatever the client sends.
+
+The route endpoint refuses with 403 and one of these codes, checked in this order before any worker is
+selected or any job is created:
+
+| Code | Meaning |
+|---|---|
+| `APPROVAL_PROJECT_MISMATCH` | The approval is missing or belongs to another project |
+| `APPROVAL_NOT_APPROVED` | The approval status is not `APPROVED` |
+| `APPROVAL_SUBJECT_UNBOUND` | The approval has no `WORK_ROUTE` subject (legacy approvals fail closed) |
+| `APPROVAL_SUBJECT_TAMPERED` | The stored subject is invalid or does not hash to `proposal_hash` |
+| `APPROVAL_REQUEST_MISMATCH` | The subject names another work request, or the request is already bound to another approval |
+| `APPROVAL_ACTOR_MISMATCH` | The requesting surface is not in `actor.surfaces` |
+| `APPROVAL_SCOPE_MISMATCH` | No operation matches the step, capability and command, or the risk exceeds `max_risk_level` |
+| `APPROVAL_SCOPE_VERSION_STALE` | `scope_version_ref` does not equal the current ScopeVersion, or none can be read |
+
+The project-busy check (`BLOCKED_PROJECT_BUSY`) runs only after all of these, so a denied route always
+reports its own code. Every refusal is recorded as a `ROUTE_REFUSED` event in `control_sync_events`.
+The event is written on an independent transaction, so it survives the rollback of the refused
+request. Approvals stay reusable within their subject (loop retries re-route the same step).
+
 ## Contracts and schemas
 
 | Contract | Class |
 |---|---|
 | ExecutionReceipt (`schema_version "1"`), ResultReceipt, ScopeVersion/CAS semantics, semantic audit chain | PUBLIC_STABLE (semantics); storage layout INTERNAL |
+| `pados.approval-subject.v1` (`WORK_ROUTE` control approval subject) | PUBLIC_EXPERIMENTAL |
 | `pados.enterprise.capability-manifest.v1` | PUBLIC_EXPERIMENTAL |
 | `pados.enterprise.retrieval.v1` request/response | PUBLIC_EXPERIMENTAL |
 | `pados.enterprise.config.v1` | PUBLIC_EXPERIMENTAL |

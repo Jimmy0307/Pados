@@ -22,10 +22,13 @@ from pados.project_goal.service import (
     ProjectPlanService,
     ProjectTaskService,
 )
+from tests.integration.approval_subjects import work_route_subject
 
 
-def _approval(session: object, project_id: str, key: str) -> str:
-    row = control_service.create_approval(session, {"project_id": project_id, "proposal_hash": "a" * 64, "proposal_summary": key, "idempotency_key": key})  # type: ignore[arg-type]
+def _approval(session: object, project_id: str, key: str, request_id: str | None = None) -> str:
+    # A task approval that launches P6.10 must name the step it authorizes (RC2 D1).
+    binding = {"proposal_hash": "a" * 64} if request_id is None else {"subject": work_route_subject(project_id, request_id)}
+    row = control_service.create_approval(session, {"project_id": project_id, "proposal_summary": key, "idempotency_key": key, **binding})  # type: ignore[arg-type]
     return str(control_service.decide_approval(session, str(row["id"]), version=1, status="APPROVED", reason="integration", idempotency_key=f"decide-{key}")["id"])  # type: ignore[arg-type]
 
 
@@ -52,7 +55,7 @@ def _approved_gate_scenario(session: Session, *, suffix: str, valid_until: str |
     plan = ProjectPlanService().create(session, ProjectPlanCreate(project_goal_id=str(goal["id"]), planning_horizon="one", strategy_summary=suffix, idempotency_key=f"plan-{uuid4()}"))
     ProjectPlanService().approve(session, str(plan["id"]), approval_id=_approval(session, project_id, f"plan-{uuid4()}"), idempotency_key=f"plan-approve-{uuid4()}")
     task = ProjectTaskService().propose(session, ProjectTaskCreate(project_plan_id=str(plan["id"]), project_goal_id=str(goal["id"]), project_id=project_id, title=suffix, objective=suffix, success_criteria=["pass"], scope_paths=["src"], priority=1, risk_level="HIGH", estimated_cost=1, estimated_duration_seconds=60, task_goal_template={"request_id": str(request["id"])}, task_plan_template={"steps": [{"sequence": 1, "title": "version", "step_type": "INSPECT", "required_capability": "READ_REPOSITORY", "command_id": "python_version"}]}, idempotency_key=f"task-{uuid4()}"))
-    ProjectTaskService().approve(session, str(task["id"]), project_id=project_id, approval_id=_approval(session, project_id, f"task-{uuid4()}"), idempotency_key=f"task-approve-{uuid4()}")
+    ProjectTaskService().approve(session, str(task["id"]), project_id=project_id, approval_id=_approval(session, project_id, f"task-{uuid4()}", str(request["id"])), idempotency_key=f"task-approve-{uuid4()}")
     persisted_task = repository.get_task(session, str(task["id"]), project_id=project_id)
     risk = evaluate_task_risk(task=persisted_task, goal_risk_budget=dict(goal["risk_budget"]), plan_risk_controls=dict(plan.get("risk_controls", {})), active_tasks=[])
     evidence = stable_hash({"task": str(task["id"]), "goal": int(goal["version"]), "plan": int(plan["version"]), "scope": persisted_task["scope_paths"], "risk": risk.risk_score})
@@ -103,7 +106,7 @@ def test_human_gate_blocks_wrong_approval_then_launches_once_and_replays(tmp_pat
         plan = ProjectPlanService().create(session, ProjectPlanCreate(project_goal_id=str(goal["id"]), planning_horizon="one cycle", strategy_summary="gate then launch", idempotency_key=f"plan-{uuid4()}"))
         ProjectPlanService().approve(session, str(plan["id"]), approval_id=_approval(session, project_id, f"plan-{uuid4()}"), idempotency_key=f"plan-approve-{uuid4()}")
         task = ProjectTaskService().propose(session, ProjectTaskCreate(project_plan_id=str(plan["id"]), project_goal_id=str(goal["id"]), project_id=project_id, title="Inspect", objective="Inspect repository", success_criteria=["command passes"], scope_paths=["src"], priority=1, risk_level="HIGH", estimated_cost=1, estimated_duration_seconds=60, task_goal_template={"request_id": str(request["id"])}, task_plan_template={"steps": [{"sequence": 1, "title": "Version", "step_type": "INSPECT", "required_capability": "READ_REPOSITORY", "command_id": "python_version"}]}, idempotency_key=f"task-{uuid4()}"))
-        ProjectTaskService().approve(session, str(task["id"]), project_id=project_id, approval_id=_approval(session, project_id, f"task-{uuid4()}"), idempotency_key=f"task-approve-{uuid4()}")
+        ProjectTaskService().approve(session, str(task["id"]), project_id=project_id, approval_id=_approval(session, project_id, f"task-{uuid4()}", str(request["id"])), idempotency_key=f"task-approve-{uuid4()}")
         controller = ProjectControllerService()
         blocked = controller.run_cycle(session, goal_id=str(goal["id"]), project_id=project_id, owner_instance="integration", idempotency_key="blocked")
         assert blocked["activated_task_id"] is None

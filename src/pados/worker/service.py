@@ -3,12 +3,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
-from sqlalchemy import text
+from sqlalchemy import Engine, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from pados.control.approval_subject import (
+    APPROVAL_NOT_APPROVED,
+    APPROVAL_PROJECT_MISMATCH,
+    APPROVAL_REQUEST_MISMATCH,
+    APPROVAL_SCOPE_MISMATCH,
+    APPROVAL_SCOPE_VERSION_STALE,
+    ApprovalOperation,
+    WorkRouteSubject,
+    find_operation,
+    load_bound_subject,
+    match_route,
+    scope_version_is_current,
+)
+from pados.loop import scope_authority
 from pados.memory import packet as context_packet
 from pados.memory.retrieval import RetrievalRequest
 from pados.worker.command import run_registered_command
@@ -23,6 +41,8 @@ from pados.worker.schemas import (
     WorkerAvailability,
     WorkerType,
 )
+
+LOGGER = logging.getLogger("pados.worker.service")
 
 
 def _event(session: Session, job_id: str, project_id: str, event_type: str, payload: dict[str, Any]) -> None:
@@ -71,7 +91,121 @@ def cancel_job(session: Session, job_id: str) -> dict[str, Any]:
     return dict(row)
 
 
-def _assert_ready(session: Session, request_id: str, route: RouteRequest) -> dict[str, Any]:
+@dataclass(frozen=True)
+class RouteAuthorization:
+    """A route the approval subject covers: the locked request and the matched operation."""
+
+    request: dict[str, Any]
+    subject: WorkRouteSubject
+    operation: ApprovalOperation
+
+
+def _record_route_refusal(
+    session: Session,
+    code: str,
+    *,
+    request_id: str,
+    route: RouteRequest,
+    project_id: str | None,
+    subject_hash: str | None,
+) -> None:
+    """Commit a ROUTE_REFUSED audit row on an independent transaction.
+
+    The caller's transaction is rolled back after the refusal, so the audit row
+    must not depend on it. ``project_id`` is kept in the payload only: the row's
+    project column stays NULL so the independent insert never waits on a project
+    row that the caller's own uncommitted transaction may hold.
+    """
+    payload = {
+        "code": code,
+        "approval_id": route.approval_id,
+        "request_id": request_id,
+        "project_id": project_id,
+        "capability_id": route.capability_id.value,
+        "command_id": route.command_id,
+        "surface": route.surface,
+        "step_sequence": route.step_sequence,
+        "subject_hash": subject_hash,
+    }
+    bind = session.get_bind()
+    engine = bind if isinstance(bind, Engine) else bind.engine
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("SET LOCAL lock_timeout = '2s'"))
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO control_sync_events(project_id, event_type, payload_json)
+                    VALUES (NULL, 'ROUTE_REFUSED', CAST(:payload_json AS jsonb))
+                    """
+                ),
+                {"payload_json": json.dumps(payload, sort_keys=True)},
+            )
+    except SQLAlchemyError:
+        # The route is refused regardless; a lost audit row must be visible to operators.
+        LOGGER.exception("ROUTE_REFUSED audit row could not be committed (code=%s)", code)
+
+
+def _refuse(
+    session: Session,
+    code: str,
+    *,
+    request_id: str,
+    route: RouteRequest,
+    project_id: str | None,
+    subject_hash: str | None,
+) -> NoReturn:
+    _record_route_refusal(
+        session, code, request_id=request_id, route=route, project_id=project_id, subject_hash=subject_hash
+    )
+    raise PermissionError(code)
+
+
+def _authorize_subject(
+    approval: Mapping[str, Any],
+    request: Mapping[str, Any],
+    *,
+    request_id: str,
+    route: RouteRequest,
+    settings: Any,
+) -> tuple[WorkRouteSubject, ApprovalOperation]:
+    """Checks 1-8 of the RC2 D1 binding, in order; raises PermissionError(<code>)."""
+    project_id = str(request["project_id"])
+    if str(approval["project_id"]) != project_id:
+        raise PermissionError(APPROVAL_PROJECT_MISMATCH)
+    if approval["status"] != "APPROVED":
+        raise PermissionError(APPROVAL_NOT_APPROVED)
+    subject = load_bound_subject(approval["subject_kind"], approval["subject_json"], approval["proposal_hash"])
+    bound_approval = request.get("approval_id")
+    if bound_approval is not None and str(bound_approval) != route.approval_id:
+        raise PermissionError(APPROVAL_REQUEST_MISMATCH)
+    code = match_route(
+        subject,
+        project_id=project_id,
+        request_id=request_id,
+        surface=route.surface,
+        step_sequence=route.step_sequence,
+        capability_id=route.capability_id,
+        command_id=route.command_id,
+        risk_level=route.risk_level,
+    )
+    if code is not None:
+        raise PermissionError(code)
+    operation = find_operation(
+        subject, step_sequence=route.step_sequence, capability_id=route.capability_id, command_id=route.command_id
+    )
+    if operation is None:  # pragma: no cover - match_route already refused this route
+        raise PermissionError(APPROVAL_SCOPE_MISMATCH)
+    if subject.scope_version_ref is not None and not scope_version_is_current(
+        subject, scope_authority.read_current_scope_version(settings, project_id)
+    ):
+        raise PermissionError(APPROVAL_SCOPE_VERSION_STALE)
+    return subject, operation
+
+
+def _assert_ready(
+    session: Session, request_id: str, route: RouteRequest, *, settings: Any = None
+) -> RouteAuthorization:
     request = session.execute(
         text(
             """
@@ -87,13 +221,21 @@ def _assert_ready(session: Session, request_id: str, route: RouteRequest) -> dic
     approval = session.execute(
         text("SELECT * FROM control_approvals WHERE id = CAST(:approval_id AS uuid)"),
         {"approval_id": route.approval_id},
-    ).mappings().one()
-    if approval["project_id"] != request["project_id"]:
-        raise PermissionError("cross-project approval rejected")
-    if approval["status"] != "APPROVED":
-        raise PermissionError("unapproved request rejected")
+    ).mappings().first()
+    project_id = str(request["project_id"])
+    if approval is None:
+        _refuse(session, APPROVAL_PROJECT_MISMATCH, request_id=request_id, route=route,
+                project_id=project_id, subject_hash=None)
+    try:
+        subject, operation = _authorize_subject(
+            dict(approval), dict(request), request_id=request_id, route=route, settings=settings
+        )
+    except PermissionError as exc:
+        _refuse(session, str(exc), request_id=request_id, route=route, project_id=project_id,
+                subject_hash=str(approval["proposal_hash"]))
     if route.capability_id not in capability_registry():
         raise PermissionError("capability mismatch")
+    # The busy check runs after every binding check, so a denied route reports its own code.
     active: Any = session.execute(
         text(
             """
@@ -103,21 +245,15 @@ def _assert_ready(session: Session, request_id: str, route: RouteRequest) -> dic
               AND status IN ('ROUTED', 'QUEUED', 'RUNNING', 'VALIDATING')
             """
         ),
-        {"project_id": str(request["project_id"])},
+        {"project_id": project_id},
     ).scalar_one()
     if int(active) > 0:
         raise PermissionError("BLOCKED_PROJECT_BUSY")
-    return dict(request)
+    return RouteAuthorization(request=dict(request), subject=subject, operation=operation)
 
 
-def route_work_request(
-    session: Session,
-    *,
-    request_id: str,
-    route: RouteRequest,
-    settings: Any,
-    artifact_root: Path,
-) -> dict[str, Any]:
+def _idempotent_job(session: Session, request_id: str, route: RouteRequest) -> dict[str, Any] | None:
+    """Return an existing job only when it was routed under the same approval and operation."""
     existing = session.execute(
         text(
             """
@@ -128,12 +264,42 @@ def route_work_request(
         ),
         {"request_id": request_id, "idempotency_key": route.idempotency_key},
     ).mappings().first()
-    if existing is not None:
-        return {"job": dict(existing), "routing": {"status": "idempotent"}}
+    if existing is None:
+        return None
+    payload = existing["route_payload"]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    same_route = (
+        str(existing["approval_id"]) == route.approval_id
+        and str(existing["capability_id"]) == route.capability_id.value
+        and isinstance(payload, dict)
+        and payload.get("command_id") == route.command_id
+    )
+    return dict(existing) if same_route else None
 
-    request = _assert_ready(session, request_id, route)
+
+def route_work_request(
+    session: Session,
+    *,
+    request_id: str,
+    route: RouteRequest,
+    settings: Any,
+    artifact_root: Path,
+) -> dict[str, Any]:
+    existing = _idempotent_job(session, request_id, route)
+    if existing is not None:
+        return {"job": existing, "routing": {"status": "idempotent"}}
+
+    authorization = _assert_ready(session, request_id, route, settings=settings)
+    request = authorization.request
     workers = discover_workers(settings)
-    decision = select_worker(workers, capability_id=route.capability_id, risk_level=route.risk_level)
+    # Only worker types the approval names are candidates; an unapproved (cloud) worker never is.
+    decision = select_worker(
+        workers,
+        capability_id=route.capability_id,
+        risk_level=route.risk_level,
+        allowed_worker_types=frozenset(authorization.subject.actor.worker_types),
+    )
     if decision.selected_worker_id is None:
         session.execute(
             text("UPDATE control_work_requests SET status = 'BLOCKED', updated_at = now() WHERE id = CAST(:id AS uuid)"),

@@ -177,7 +177,7 @@ def _run_task(live: Live, monkeypatch: pytest.MonkeyPatch, *, child_capability: 
             "body": json.dumps({"task_envelope": envelope.model_dump(mode="json"),
                                 "task_envelope_hash": envelope.content_hash}, sort_keys=True),
             "idempotency_key": f"fc-request-{uuid4()}"})
-        approval_id = _approve(session, live.project_id, uuid4().hex)
+        approval_id = _approve(session, live.project_id, uuid4().hex, request_id=str(request["id"]))
         goal = loop_service.create_task_goal(session, TaskGoalCreate(
             project_id=live.project_id, request_id=str(request["id"]),
             objective="Execute the approved task plan and report discrete goal outcomes.",

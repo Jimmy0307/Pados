@@ -298,13 +298,16 @@ def create_app() -> FastAPI:
     @app.post("/control/work-requests/{request_id}/route")
     def control_route_work_request(request_id: str, payload: WorkRequestRoute, _: ControlAuth) -> object:
         control_security.assert_request_safe(payload.model_dump(), max_bytes=settings.control_request_max_bytes)
+        # The control API is structurally the CONTROL_API surface and never a plan step:
+        # a client cannot claim TASK_LOOP or a step sequence (RC2 D1 actor binding).
+        route = payload.model_copy(update={"surface": "CONTROL_API", "step_sequence": None})
 
         def _route() -> dict[str, Any]:
             with session_scope(settings) as session:
                 return worker_service.route_work_request(
                     session,
                     request_id=request_id,
-                    route=payload,
+                    route=route,
                     settings=settings,
                     artifact_root=__import__("pathlib").Path("runtime/artifacts"),
                 )

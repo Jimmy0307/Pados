@@ -14,10 +14,13 @@ from pados.project_goal.service import (
     ProjectPlanService,
     ProjectTaskService,
 )
+from tests.integration.approval_subjects import work_route_subject
 
 
-def approval(session: object, project_id: str, key: str) -> str:
-    row = control_service.create_approval(session, {"project_id": project_id, "proposal_hash": "a" * 64, "proposal_summary": key, "idempotency_key": key})  # type: ignore[arg-type]
+def approval(session: object, project_id: str, key: str, request_id: str | None = None) -> str:
+    # A task approval that launches P6.10 must name the step it authorizes (RC2 D1).
+    binding = {"proposal_hash": "a" * 64} if request_id is None else {"subject": work_route_subject(project_id, request_id)}
+    row = control_service.create_approval(session, {"project_id": project_id, "proposal_summary": key, "idempotency_key": key, **binding})  # type: ignore[arg-type]
     approved = control_service.decide_approval(session, str(row["id"]), version=1, status="APPROVED", reason="integration", idempotency_key=f"decide-{key}")  # type: ignore[arg-type]
     return str(approved["id"])
 
@@ -33,7 +36,7 @@ def test_controller_creates_one_p6_10_lineage_and_replays_idempotently() -> None
         plan_approval = approval(session, project_id, f"plan-{uuid4()}")
         plan = ProjectPlanService().create(session, ProjectPlanCreate(project_goal_id=str(goal["id"]), planning_horizon="one cycle", strategy_summary="launch exactly one deterministic inspection", idempotency_key=f"plan-{uuid4()}"))
         ProjectPlanService().approve(session, str(plan["id"]), approval_id=plan_approval, idempotency_key=f"plan-approve-{uuid4()}")
-        task_approval = approval(session, project_id, f"task-{uuid4()}")
+        task_approval = approval(session, project_id, f"task-{uuid4()}", str(request["id"]))
         task = ProjectTaskService().propose(session, ProjectTaskCreate(project_plan_id=str(plan["id"]), project_goal_id=str(goal["id"]), project_id=project_id, title="Inspect", objective="Inspect repository", success_criteria=["command passes"], scope_paths=["src"], priority=1, risk_level="LOW", estimated_cost=1, estimated_duration_seconds=60, task_goal_template={"request_id": str(request["id"])}, task_plan_template={"steps": [{"sequence": 1, "title": "Version", "step_type": "INSPECT", "required_capability": "READ_REPOSITORY", "command_id": "python_version"}]}, idempotency_key=f"task-{uuid4()}"))
         ProjectTaskService().approve(session, str(task["id"]), project_id=project_id, approval_id=task_approval, idempotency_key=f"task-approve-{uuid4()}")
         controller = ProjectControllerService()
