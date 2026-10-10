@@ -726,6 +726,8 @@ def init(
         "# Optional extensions (unset = not configured; never affects Core readiness):",
         "# PADOS_ENTERPRISE_CONFIG=examples/config/enterprise-synthetic.json",
         "# PADOS_COMPUTE_NODES_CONFIG=examples/config/compute-nodes-loopback.json",
+        "# PADOS_MODEL_CATALOG=<operator model catalog holding accepted measured profiles>",
+        "# PADOS_LOCAL_INFERENCE_TIMEOUT_SECONDS=30",
     ]
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     typer.echo(json.dumps({"env": str(env_path), "control_token_file": str(token_file),

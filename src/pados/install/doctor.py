@@ -236,6 +236,32 @@ def check_readiness(settings: Any, db_ok: bool) -> tuple[dict[str, Any], dict[st
                               reasons=list(health.get("reasons", [])))
 
 
+def check_measured_binding(settings: Any, providers: dict[str, Any]) -> dict[str, Any]:
+    """For a local chat model, the providers area reports when the measured execution binding refuses (the same
+    resolver the consumer path uses; it observes the device and the loopback runtime, and never calls a model)."""
+    from pados.providers.execution_binding import (
+        ExecutionBindingRefused,
+        ExecutionIntent,
+        resolve_bound_execution,
+    )
+
+    if str(settings.chat_provider).casefold() != "ollama" or not settings.chat_model:
+        return providers
+    try:
+        resolve_bound_execution(settings, ExecutionIntent.STRUCTURED_OUTPUT, project_id="*")
+    except ExecutionBindingRefused as exc:
+        return finding("providers", Level.WARNING, "MEASURED_BINDING_UNAVAILABLE",
+                       f"Local chat model calls are refused: {exc.refusal.code}.",
+                       "import an accepted measured profile into PADOS_MODEL_CATALOG and authorize its model "
+                       "reference in the compute-node registry",
+                       refusal_code=exc.refusal.code, reasons=list(exc.refusal.reasons),
+                       previous_code=providers.get("code"))
+    except Exception as exc:  # noqa: BLE001 - doctor reports, never raises
+        return finding("providers", Level.WARNING, "MEASURED_BINDING_UNAVAILABLE", type(exc).__name__,
+                       previous_code=providers.get("code"))
+    return providers
+
+
 def check_security(home: Path, settings: Any) -> dict[str, Any]:
     from pados.security_posture import security_posture
 
@@ -273,7 +299,10 @@ def run(home: Path, *, include_device: bool = True,
         if include_device:
             areas += check_device_and_runtimes(home, settings)
         areas.append(check_network(settings, port_probe))
-        areas += list(check_readiness(settings, db_ok))
+        providers, readiness_item = check_readiness(settings, db_ok)
+        if include_device:  # the binding observes the device and runtime like the device area does
+            providers = check_measured_binding(settings, providers)
+        areas += [providers, readiness_item]
         areas.append(check_security(home, settings))
     statuses = {item["status"] for item in areas}
     overall = Level.BLOCKED if Level.BLOCKED.value in statuses else (

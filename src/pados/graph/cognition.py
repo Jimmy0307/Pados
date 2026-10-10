@@ -35,6 +35,40 @@ _MAX_GAPS = 8
 _MAX_CLAIMS = 12
 _MAX_PROPOSED_CHANGES = 3
 _MAX_LIMITATIONS = 8
+_MAX_EVIDENCE_REFS = 12
+
+
+def _string(max_length: int, *, min_length: int = 0) -> dict[str, Any]:
+    return {"type": "string", "minLength": min_length, "maxLength": max_length}
+
+
+def _array(items: Mapping[str, Any], max_items: int) -> dict[str, Any]:
+    return {"type": "array", "items": dict(items), "maxItems": max_items}
+
+
+def _object(properties: Mapping[str, Any], required: Sequence[str]) -> dict[str, Any]:
+    return {"type": "object", "properties": dict(properties), "required": list(required),
+            "additionalProperties": False}
+
+
+# The ONE cognitive response schema (same bounds as ``parse_cognitive_response``, which stays the validator).
+COGNITIVE_RESPONSE_SCHEMA: dict[str, Any] = _object(
+    {
+        "title": _string(240),
+        "answer": _string(_MAX_ANSWER_CHARS, min_length=1),
+        "subquestions": _array(_object({"id": _string(120), "question": _string(500, min_length=1)},
+                                       ["question"]), _MAX_SUBQUESTIONS),
+        "gaps": _array(_object({"code": _string(80, min_length=1), "message": _string(500, min_length=1)},
+                               ["code", "message"]), _MAX_GAPS),
+        "claims": _array(_object({"claim": _string(1_000, min_length=1),
+                                  "evidence_refs": _array(_string(160, min_length=1), _MAX_EVIDENCE_REFS)},
+                                 ["claim"]), _MAX_CLAIMS),
+        "evidence_refs": _array(_string(160, min_length=1), _MAX_EVIDENCE_REFS),
+        "proposed_graph_changes": _array({"type": "object"}, _MAX_PROPOSED_CHANGES),
+        "limitations": _array(_string(500, min_length=1), _MAX_LIMITATIONS),
+    },
+    ["answer"],
+)
 
 
 class ChatCognitiveProvider:
@@ -45,7 +79,8 @@ class ChatCognitiveProvider:
         self.operation = operation
 
     async def synthesize(self, specification: Mapping[str, Any]) -> str:
-        return cast(str, await self.provider.chat(build_prompt(self.operation, {"synthesis_spec": specification})))
+        prompt = build_prompt(self.operation, {"synthesis_spec": specification})
+        return cast(str, await self.provider.chat(prompt, response_schema=COGNITIVE_RESPONSE_SCHEMA))
 
 
 def build_prompt(operation: CognitiveOperation, context: Mapping[str, Any]) -> str:

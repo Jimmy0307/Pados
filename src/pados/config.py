@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     ollama_base_url: str = Field(default="http://127.0.0.1:11434", alias="OLLAMA_BASE_URL")
     chat_provider: str = Field(default="mock", alias="PADOS_CHAT_PROVIDER")
     chat_model: str = Field(default="", alias="PADOS_CHAT_MODEL")
+    # Measured execution binding of the consumer inference path: the operator ModelCatalog document holding the
+    # REGISTERED measured profiles (empty = not configured; local model calls are then refused, never run unbound).
+    model_catalog_path: str = Field(default="", alias="PADOS_MODEL_CATALOG")
+    # Wall-clock bound of one local model call; recorded in measured-execution evidence (not re-tuned yet).
+    local_inference_timeout_seconds: int = Field(
+        default=30, ge=1, le=600, alias="PADOS_LOCAL_INFERENCE_TIMEOUT_SECONDS"
+    )
     fast_provider: str = Field(default="", alias="PADOS_FAST_PROVIDER")
     fast_model: str = Field(default="", alias="PADOS_FAST_MODEL")
     embed_provider: str = Field(default="mock", alias="PADOS_EMBED_PROVIDER")

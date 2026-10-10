@@ -38,7 +38,12 @@ def register_graph_routes(app: FastAPI, settings: Settings) -> None:
     def fail(exc: service.GraphError) -> HTTPException:
         return HTTPException(
             status_code=exc.status_code,
-            detail={"code": exc.code, "message": exc.message, "write_occurred": exc.write_occurred},
+            detail={
+                "code": exc.code,
+                "message": exc.message,
+                "write_occurred": exc.write_occurred,
+                **({"details": exc.details} if exc.details else {}),
+            },
         )
 
     def has_control_authority(request: Request) -> bool:

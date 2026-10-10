@@ -52,7 +52,13 @@ from pados.graph.schemas import (
 from pados.graph.source_discovery import SourceDiscoveryError, UnconfiguredSourceDiscovery
 from pados.loop import service as loop_service
 from pados.providers.discovery import MOCK_MODEL_CHOICES, ai_runtime_catalog
-from pados.providers.factory import ProviderNotConfiguredError, build_chat_provider
+from pados.providers.base import LLMProvider
+from pados.providers.execution_binding import ExecutionBindingRefused, ExecutionIntent, ExecutionRefusal
+from pados.providers.factory import (
+    ProviderNotConfiguredError,
+    build_chat_provider,
+    check_chat_provider_configured,
+)
 from pados.worker.registry import capability_registry
 
 
@@ -64,12 +70,14 @@ class GraphError(RuntimeError):
         *,
         status_code: int = 409,
         write_occurred: bool = False,
+        details: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code
         self.write_occurred = write_occurred
+        self.details = dict(details or {})
 
 
 _REVIEW_WORKSPACE_MARKERS = ("qa", "acceptance", "demo", "fixture", "validation", "review", "p6.16", "test")
@@ -100,7 +108,63 @@ def _provider_failure_message(code: str) -> str:
         "INVALID_SCHEMA": "認知模型回傳的結構不符合 PADOS 認知合約。",
         "CONTEXT_LIMIT": "認知模型拒絕了目前的脈絡大小。",
         "GENERATION_FAILED": "認知模型生成失敗。",
+        "MEASURED_EXECUTION_REFUSED": "認知模型沒有相符的實測執行綁定，已拒絕執行。",
     }.get(code, "認知模型處理失敗。")
+
+
+_ALLOW_MOCK_ENVS = {"local", "test", "validation"}
+
+
+def _measured_refusal_error(refusal: ExecutionRefusal, *, write_occurred: bool) -> GraphError:
+    return GraphError(
+        "MEASURED_EXECUTION_REFUSED",
+        f"{_provider_failure_message('MEASURED_EXECUTION_REFUSED')}（{refusal.code}）",
+        status_code=409,
+        write_occurred=write_occurred,
+        details={"refusal_code": refusal.code, "reasons": list(refusal.reasons)},
+    )
+
+
+def _workspace_project_scope(workspace: Mapping[str, Any], workspace_id: str) -> str:
+    """The project scope the compute-node registration must admit (an unbound workspace is its own scope)."""
+    return str(workspace.get("project_id") or f"workspace:{workspace_id}")
+
+
+def _inference_project_id(settings: Settings, workspace_id: str) -> str:
+    with session_scope(settings) as session:
+        workspace = _workspace(session, workspace_id)
+    return _workspace_project_scope(workspace, workspace_id)
+
+
+def _cognitive_provider(
+    settings: Settings,
+    effective_settings: Settings,
+    workspace_id: str,
+    *,
+    project_id: str | None = None,
+) -> LLMProvider:
+    """Mock only when explicitly selected; a real model only under a measured STRUCTURED_OUTPUT binding."""
+    allow_mock = effective_settings.env in _ALLOW_MOCK_ENVS
+    check_chat_provider_configured(effective_settings, allow_mock=allow_mock)
+    if effective_settings.chat_provider.casefold() == "mock":
+        return build_chat_provider(effective_settings, allow_mock=allow_mock)
+    return build_chat_provider(
+        effective_settings,
+        allow_mock=allow_mock,
+        intent=ExecutionIntent.STRUCTURED_OUTPUT,
+        project_id=project_id or _inference_project_id(settings, workspace_id),
+    )
+
+
+def _measured_evidence(provider: object) -> dict[str, Any] | None:
+    evidence = getattr(provider, "last_evidence", None)
+    return dict(evidence) if isinstance(evidence, Mapping) else None
+
+
+def _cognitive_runtime_status(effective_settings: Settings, measured: Mapping[str, Any] | None) -> str:
+    if effective_settings.chat_provider.casefold() == "mock":
+        return "MOCK_CONTRACT_TEST_ONLY"
+    return "MEASURED_BINDING_APPLIED" if measured is not None else "REAL_MODEL_UNVALIDATED"
 
 
 def _cognitive_source_ids(assembly: Mapping[str, Any]) -> tuple[list[str], list[str]]:
@@ -822,7 +886,7 @@ def selection_context(
 
 def _provider_reason(settings: Settings) -> ActionDisabledReason | None:
     try:
-        build_chat_provider(settings, allow_mock=settings.env in {"local", "test", "validation"})
+        check_chat_provider_configured(settings, allow_mock=settings.env in _ALLOW_MOCK_ENVS)
     except ProviderNotConfiguredError:
         return ActionDisabledReason(
             code="COGNITIVE_PROVIDER_NOT_CONFIGURED",
@@ -1363,17 +1427,15 @@ async def process_cognitive_item(
                 write_occurred=True,
             ) from exc
     try:
-        provider = build_chat_provider(
-            effective_settings,
-            allow_mock=effective_settings.env in {"local", "test", "validation"},
-        )
+        provider = _cognitive_provider(settings, effective_settings, str(item["workspace_id"]))
         specification = context.get("synthesis_spec")
         if not isinstance(specification, Mapping):
             specification = context
         prompt = cognition.build_prompt(operation, {"synthesis_spec": specification})
         estimated_provider_tokens = await provider.estimate_context(prompt)
         _enforce_provider_context_budget(specification, int(estimated_provider_tokens))
-        response = await provider.chat(prompt)
+        response = await provider.chat(prompt, response_schema=cognition.COGNITIVE_RESPONSE_SCHEMA)
+        measured_execution = _measured_evidence(provider)
         provider_response = cognition.parse_cognitive_response(response)
         cognition.validate_evidence_refs(
             provider_response,
@@ -1383,6 +1445,10 @@ async def process_cognitive_item(
                 if isinstance(item, Mapping) and item.get("evidence_id")
             ],
         )
+    except ExecutionBindingRefused as exc:
+        with session_scope(settings) as session:
+            repository.fail_cognitive_item(session, item_id, error_code=exc.refusal.code, status="BLOCKED")
+        raise _measured_refusal_error(exc.refusal, write_occurred=True) from exc
     except Exception as exc:
         failure_code = _provider_failure_code(exc)
         failure_status = "BLOCKED" if failure_code == "PROVIDER_UNAVAILABLE" else "FAILED"
@@ -1438,11 +1504,7 @@ async def process_cognitive_item(
                     "created_by": "AI",
                     "provider": effective_settings.chat_provider.casefold(),
                     "model": effective_settings.chat_model,
-                    "cognitive_runtime_status": (
-                        "MOCK_CONTRACT_TEST_ONLY"
-                        if effective_settings.chat_provider.casefold() == "mock"
-                        else "REAL_MODEL_UNVALIDATED"
-                    ),
+                    "cognitive_runtime_status": _cognitive_runtime_status(effective_settings, measured_execution),
                     "source_node_ids": used_source_ids or assembled_node_ids,
                     "reference_source_ids": reference_source_ids,
                     "evidence_ids": [
@@ -1458,6 +1520,8 @@ async def process_cognitive_item(
                     "creation_timestamp": datetime.now(UTC).isoformat(),
                     "lifecycle": "PROVISIONAL",
                 }
+                if measured_execution is not None:
+                    metadata["measured_execution"] = measured_execution
                 scope = specification.get("scope")
                 scope = scope if isinstance(scope, Mapping) else {}
                 if scope:
@@ -1546,7 +1610,14 @@ async def process_cognitive_item(
                 session,
                 item_id,
                 provider=provider_name,
-                candidates=[{"node_id": node["id"], "status": "PROVISIONAL"} for node in created],
+                candidates=[
+                    {
+                        "node_id": node["id"],
+                        "status": "PROVISIONAL",
+                        **({"measured_execution": measured_execution} if measured_execution is not None else {}),
+                    }
+                    for node in created
+                ],
             )
     except Exception as exc:
         with session_scope(settings) as session:
@@ -1609,7 +1680,7 @@ async def refresh_living_synthesis(
     """Create the next immutable synthesis version when the semantic context is stale."""
 
     with session_scope(settings) as session:
-        _workspace(session, workspace_id)
+        workspace = _workspace(session, workspace_id)
         try:
             requested = repository.get_node(session, workspace_id, node_id)
         except LookupError as exc:
@@ -1690,14 +1761,17 @@ async def refresh_living_synthesis(
     if model_selection is not None:
         effective_settings = resolve_model_selection(settings, model_selection)
     try:
-        provider = build_chat_provider(
+        provider = _cognitive_provider(
+            settings,
             effective_settings,
-            allow_mock=effective_settings.env in {"local", "test", "validation"},
+            workspace_id,
+            project_id=_workspace_project_scope(workspace, workspace_id),
         )
         prompt = cognition.build_prompt(CognitiveOperation.THINK, {"synthesis_spec": synthesis_spec})
         estimated_provider_tokens = await provider.estimate_context(prompt)
         _enforce_provider_context_budget(synthesis_spec, int(estimated_provider_tokens))
-        response = await provider.chat(prompt)
+        response = await provider.chat(prompt, response_schema=cognition.COGNITIVE_RESPONSE_SCHEMA)
+        measured_execution = _measured_evidence(provider)
         provider_response = cognition.parse_cognitive_response(response)
         cognition.validate_evidence_refs(
             provider_response,
@@ -1707,6 +1781,8 @@ async def refresh_living_synthesis(
                 if isinstance(item, Mapping) and item.get("evidence_id")
             ],
         )
+    except ExecutionBindingRefused as exc:
+        raise _measured_refusal_error(exc.refusal, write_occurred=False) from exc
     except Exception as exc:
         failure_code = _provider_failure_code(exc)
         raise GraphError(
@@ -1731,11 +1807,7 @@ async def refresh_living_synthesis(
         "created_by": "AI",
         "provider": effective_settings.chat_provider.casefold(),
         "model": effective_settings.chat_model,
-        "cognitive_runtime_status": (
-            "MOCK_CONTRACT_TEST_ONLY"
-            if effective_settings.chat_provider.casefold() == "mock"
-            else "REAL_MODEL_UNVALIDATED"
-        ),
+        "cognitive_runtime_status": _cognitive_runtime_status(effective_settings, measured_execution),
         "operation": CognitiveOperation.THINK.value,
         "synthesis_mode": str(synthesis_spec.get("intent") or CognitiveOperation.THINK.value),
         "synthesis_id": synthesis_id,
@@ -1777,6 +1849,8 @@ async def refresh_living_synthesis(
         "expected_structure": synthesis_spec.get("expected_structure", []),
         "creation_timestamp": datetime.now(UTC).isoformat(),
     }
+    if measured_execution is not None:
+        metadata["measured_execution"] = measured_execution
     with session_scope(settings) as session:
         created = create_node(
             session,

@@ -261,7 +261,7 @@ def test_backends_that_cannot_apply_the_configuration_refuse_it() -> None:
 # --- 6: planner-facing contracts stay model- and runtime-agnostic ------------------------------------------------
 
 PLANNER_FACING = ("resources/capability_profile.py", "capability/inference.py", "capability/planner.py",
-                  "packs/local_inference/adapter.py")
+                  "packs/local_inference/adapter.py", "providers/execution_binding.py", "graph/cognition.py")
 
 
 def test_planner_facing_contracts_name_no_model_or_runtime_parameter() -> None:

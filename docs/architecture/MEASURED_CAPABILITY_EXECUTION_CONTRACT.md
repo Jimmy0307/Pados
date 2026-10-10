@@ -95,6 +95,87 @@ supports no requirement.
 The placement is the one the benchmark used against the installed runtime (0.34.3). The benchmark produced
 the evidence, so its request shape is authoritative for this runtime.
 
+## Consumer binding (graph cognition and other chat callers, RC2 D2)
+
+The consumer path (`build_chat_provider` used by `process_cognitive_item` and `refresh_living_synthesis`)
+no longer calls the runtime with its own defaults. A local chat model is built only as a
+`MeasuredChatProvider` over a `BoundExecution` from `pados.providers.execution_binding.resolve_bound_execution`.
+The resolver lives in `pados.providers`, not in `pados.local_intelligence`, because that package must not
+import the authorization modules: it measures and is never an authority.
+
+### Resolver steps (each refusal is typed; nothing falls back to runtime defaults)
+
+| # | Step | Refusal code |
+|---|---|---|
+| 1 | `PADOS_MODEL_CATALOG` is set | `MEASURED_PROFILE_STORE_NOT_CONFIGURED` |
+| 2 | `ModelCatalogStore.load()` re-validates every profile, including the recomputed `profile_id` | `MODEL_CATALOG_STORE_INVALID` |
+| 3 | Exactly one profile has `artifact.runtime_family == PADOS_CHAT_PROVIDER` and `artifact.artifact_ref == PADOS_CHAT_MODEL`. The tag is only a lookup key. | `MODEL_PROFILE_NOT_REGISTERED`, `MODEL_PROFILE_AMBIGUOUS` (reasons: the profile ids) |
+| 4 | `LiveLocalState` + `bind_live`: manifest digest present, measured runtime version, measured device, fresh state | `LIVE_BINDING_REFUSED` (reasons: the binding reasons, for example `MODEL_ARTIFACT_NOT_PRESENT`, `RUNTIME_VERSION_NOT_MEASURED`, `DEVICE_NOT_MEASURED`) |
+| 5 | `PADOS_COMPUTE_NODES_CONFIG` is set and loads | `MODEL_AUTHORIZATION_NOT_CONFIGURED`, `MODEL_AUTHORIZATION_STORE_INVALID` |
+| 6 | `registration_authorizes` over those registrations, for the project and `INTERNAL` classification; the registration must name the profile's immutable `model_ref` | `MODEL_NOT_AUTHORIZED` |
+| 7 | Intent to requirement through one table (`STRUCTURED_OUTPUT` to `STRUCTURED_JSON`, `TEXT_SUMMARY` to `SUMMARIZATION`), then `required_execution` | `MEASURED_EXECUTION_CONFIG_MISSING` (reason: the capability), `MEASURED_EXECUTION_CONFIG_INCONSISTENT` |
+| 8 | `assess` must be eligible (DEGRADED is not accepted) | `MEASURED_INELIGIBLE` (reasons: assessment and binding reasons) |
+| 9 | `check_execution(measured, measured.config)` must be `COMPATIBLE` | `MEASURED_EXECUTION_CONFIG_MISMATCH` |
+
+`required_execution` runs before `assess` so that a missing or inconsistent condition has its own code
+instead of being folded into `MEASURED_INELIGIBLE`.
+
+At call time the provider adds three refusals:
+- `MEASURED_EXECUTION_CONFIG_MISMATCH:output_constraint` when a schema-constrained condition gets no schema,
+  or an unconstrained condition gets one. The request is never sent.
+- `MEASURED_EXECUTION_CONFIG_NOT_APPLIED` when the backend's `execution_requested` echo differs from the
+  bound configuration.
+- `MEASURED_EXECUTION_INTENT_REQUIRED` when a caller asks for a real model without an intent and a project.
+
+Translation stays in `OllamaBackend.run` / `ollama_chat_body`. The provider reuses it and does not
+duplicate it.
+
+### Graph behaviour
+
+The graph sends the one `COGNITIVE_RESPONSE_SCHEMA` (`pados.graph.cognition`) with intent
+`STRUCTURED_OUTPUT`. The project scope is the workspace's project. A workspace without a project is its own
+scope (`workspace:<id>`). On a refusal, the work item becomes `BLOCKED` with `error_code` set to the refusal
+code. The API answers 409 `MEASURED_EXECUTION_REFUSED`, with `details.refusal_code` and `details.reasons`.
+A backend timeout maps to the existing `TIMEOUT` failure.
+
+On success, `measured_execution` evidence is stored in the candidate node `metadata_json` and in the work
+item's `candidate_outputs`, and `cognitive_runtime_status` is `MEASURED_BINDING_APPLIED`. The mock provider
+is used only when `PADOS_CHAT_PROVIDER=mock`, and it keeps `MOCK_CONTRACT_TEST_ONLY`.
+
+### Evidence fields
+
+The evidence has schema `pados.providers.measured-execution.v1`. It holds:
+- the binding: `intent`, `profile_id`, `model_ref`, `manifest_digest`, `runtime_ref`, `runtime_version`,
+  `device_profile_id`, `binding_hash`, `requirement_hash`;
+- the configuration: `execution` (the generic `ExecutionConfig`), `config_hash`;
+- the call: `endpoint` (scheme://host:port only), `authorization` (`COMPUTE_NODE_REGISTRATION`),
+  `timeout_seconds`;
+- the runtime counters reported by the backend: `done_reason`, `eval_count`, `prompt_eval_count`,
+  `total_duration`, `response_schema_sha256`.
+
+It contains no prompt, content or credential.
+
+### Operator steps
+
+1. **Import.** Add an accepted measured profile to the catalog file named by `PADOS_MODEL_CATALOG`. Use
+   `ModelCatalogStore(path).update(lambda c: c.register(profile_from_capability(p, license=...)).register_capability_profile(p))`.
+   That is the existing store and catalog API. Importing only registers the profile and never authorizes it.
+2. **Authorize.** In the compute-node registry named by `PADOS_COMPUTE_NODES_CONFIG`, a registration must
+   have `authorized: true` and `LOCAL_INFERENCE` in `allowed_capabilities`. Its `project_ids` must admit the
+   project (or `*`), and `allowed_models` must contain the profile's exact `model_ref`
+   (`<runtime_family>/<artifact_ref>@<manifest digest>`).
+3. **Revoke.** Remove the `model_ref` from `allowed_models`, or set `authorized: false`. The next call is
+   refused with `MODEL_NOT_AUTHORIZED`.
+4. **Check.** `pados doctor` (with device checks) reports `providers: MEASURED_BINDING_UNAVAILABLE` with the
+   refusal code. The doctor checks with project scope `*`, so only a wildcard registration counts as
+   authorized there.
+
+### Timeout (not re-tuned)
+
+The per-call bound is `PADOS_LOCAL_INFERENCE_TIMEOUT_SECONDS`. It defaults to 30 s, the previous fixed value,
+and is bounded to 1..600. It is recorded in the evidence. It has **not** been re-tuned. It will be
+re-evaluated only with the evidence from RC2 gate 2.
+
 ## Failure evidence
 
 A node job that does not succeed raises `NodeExecutionError` with `failure` (schema

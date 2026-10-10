@@ -15,7 +15,8 @@ from typing import Any
 
 
 class MockProvider:
-    async def chat(self, prompt: str) -> str:
+    async def chat(self, prompt: str, *, response_schema: Mapping[str, Any] | None = None) -> str:
+        del response_schema  # the mock reflects the cognitive contract; it is never schema-constrained
         specification = _specification_from_prompt(prompt)
         goal = specification.get("goal")
         goal = goal if isinstance(goal, Mapping) else {}
