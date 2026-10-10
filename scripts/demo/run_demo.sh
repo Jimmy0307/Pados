@@ -21,7 +21,7 @@ export PADOS_DB_NAME=pados_demo_operational PADOS_OPERATIONAL_DATABASE_NAME=pado
 export PADOS_PRODUCT_DATABASE_NAME=pados_demo_proof PADOS_CORPUS_DATABASE_NAME=pados_demo_corpus
 export PADOS_PRODUCT_WORKSPACE_ROOT="$ROOT/workspace" PADOS_PRODUCT_OBJECT_ROOT="$ROOT/objects"
 # Documented lane migrations (explicit revisions; never "upgrade heads").
-PADOS_DB_NAME=pados_demo_operational alembic upgrade 20261010_0018 >/dev/null
+PADOS_DB_NAME=pados_demo_operational alembic upgrade 20261010_0019 >/dev/null
 PADOS_DB_NAME=pados_demo_proof alembic upgrade 20260730_0011 >/dev/null
 PADOS_DB_NAME=pados_demo_proof alembic upgrade 20260808_0013 >/dev/null
 PADOS_DB_NAME=pados_demo_proof alembic -c alembic_p6_19b.ini upgrade head >/dev/null

@@ -87,6 +87,26 @@ reports its own code. Every refusal is recorded as a `ROUTE_REFUSED` event in `c
 The event is written on an independent transaction, so it survives the rollback of the refused
 request. Approvals stay reusable within their subject (loop retries re-route the same step).
 
+### P6.10 model handoff and waiting
+
+P6.10 `TaskLoop` remains the sole scheduler, and `pados.worker.router.select_worker` remains the sole router.
+An `OLLAMA` job executes only after D2 resolves a measured binding for the request's project and the
+measured chat provider completes one bounded call. `SUMMARIZE` uses `TEXT_SUMMARY`; `CLASSIFY_REQUEST`
+uses `STRUCTURED_OUTPUT`. Binding refusals finish the job as `BLOCKED`; no approval is inferred or granted.
+The loop sends a blocked step to `WAITING_HUMAN` before applying the negative-progress pause threshold.
+`CLAUDE_CODE` and `CODEX_CLI` jobs have no executor and remain `ROUTED` until cancelled or expired.
+
+When a routed job remains `ROUTED`, `QUEUED`, `RUNNING` or `VALIDATING`, `step()` returns
+`status=RUNNING`, `decision=WAIT_FOR_JOB` with the same iteration and job IDs. The loop stores that
+iteration as `RUNNING` and waits for a later `step()` call; it writes no progress delta, execution
+receipt or loop decision while waiting. On a terminal job, the same iteration continues through the
+existing receipt and decision path: `SUCCEEDED` maps to `PASSED`, `TIMED_OUT` to `TIMED_OUT`, `BLOCKED`
+to `BLOCKED`, and `FAILED` or `CANCELLED` to `FAILED`.
+
+Before route admission and while resuming a waiting iteration, P6.10 expires active jobs whose
+`queued_at + timeout_seconds` deadline has passed. Expiry records `TIMED_OUT` with
+`JOB_DEADLINE_EXCEEDED`, allowing the existing project-busy gate to admit later work.
+
 ## Contracts and schemas
 
 | Contract | Class |

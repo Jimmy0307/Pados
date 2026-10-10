@@ -119,42 +119,52 @@ def _version(command: str) -> tuple[WorkerAvailability, str | None, str]:
     return WorkerAvailability.AVAILABLE, output[0] if output else command, ""
 
 
-def _ollama_spec(settings: Settings) -> WorkerSpec:
+def _ollama_unavailable(reason: str) -> WorkerSpec:
+    return WorkerSpec(
+        worker_id="ollama-local",
+        worker_type=WorkerType.OLLAMA,
+        display_name="Ollama Local Worker",
+        availability=WorkerAvailability.UNAVAILABLE,
+        capabilities=[CapabilityId.SUMMARIZE, CapabilityId.CLASSIFY_REQUEST],
+        risk_ceiling=RiskLevel.LOW,
+        supports_structured_output=True,
+        supports_file_changes=False,
+        supports_tool_calls=False,
+        supports_streaming=False,
+        max_context_tokens=4096,
+        default_timeout_seconds=60,
+        reason=reason,
+    )
+
+
+def _ollama_spec(settings: Settings, *, project_id: str | None) -> WorkerSpec:
+    # Local import: execution_binding -> capability.inference -> worker.router -> this module.
+    from pados.providers.execution_binding import (
+        ExecutionBindingRefused,
+        ExecutionIntent,
+        resolve_bound_execution,
+    )
+
+    try:
+        resolve_bound_execution(
+            settings,
+            ExecutionIntent.TEXT_SUMMARY,
+            project_id=project_id or "",
+        )
+    except ExecutionBindingRefused as exc:
+        return _ollama_unavailable(exc.refusal.code)
+    except Exception:  # noqa: BLE001 - discovery failures never make a model appear eligible
+        return _ollama_unavailable("MEASURED_EXECUTION_DISCOVERY_FAILED")
     try:
         response = httpx.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags", timeout=2.0)
-    except httpx.HTTPError as exc:
-        return WorkerSpec(
-            worker_id="ollama-local",
-            worker_type=WorkerType.OLLAMA,
-            display_name="Ollama Local Worker",
-            availability=WorkerAvailability.UNAVAILABLE,
-            capabilities=[CapabilityId.SUMMARIZE, CapabilityId.CLASSIFY_REQUEST],
-            risk_ceiling=RiskLevel.LOW,
-            supports_structured_output=True,
-            supports_file_changes=False,
-            supports_tool_calls=False,
-            supports_streaming=False,
-            max_context_tokens=4096,
-            default_timeout_seconds=60,
-            reason=str(exc),
-        )
+    except httpx.HTTPError:
+        return _ollama_unavailable("OLLAMA_ENDPOINT_UNAVAILABLE")
     if response.status_code != 200:
-        return WorkerSpec(
-            worker_id="ollama-local",
-            worker_type=WorkerType.OLLAMA,
-            display_name="Ollama Local Worker",
-            availability=WorkerAvailability.UNAVAILABLE,
-            capabilities=[CapabilityId.SUMMARIZE, CapabilityId.CLASSIFY_REQUEST],
-            risk_ceiling=RiskLevel.LOW,
-            supports_structured_output=True,
-            supports_file_changes=False,
-            supports_tool_calls=False,
-            supports_streaming=False,
-            max_context_tokens=4096,
-            default_timeout_seconds=60,
-            reason=f"endpoint returned {response.status_code}",
-        )
-    models = [str(item.get("name", "")) for item in response.json().get("models", [])]
+        return _ollama_unavailable("OLLAMA_ENDPOINT_UNAVAILABLE")
+    try:
+        models = [str(item.get("name", "")) for item in response.json().get("models", [])]
+    except (AttributeError, TypeError, ValueError):
+        return _ollama_unavailable("OLLAMA_MODEL_LIST_INVALID")
     if settings.chat_model and settings.chat_model not in models:
         availability = WorkerAvailability.UNAVAILABLE
         reason = "configured model not in allowlist"
@@ -179,7 +189,7 @@ def _ollama_spec(settings: Settings) -> WorkerSpec:
     )
 
 
-def discover_workers(settings: Settings) -> dict[str, WorkerSpec]:
+def discover_workers(settings: Settings, *, project_id: str | None = None) -> dict[str, WorkerSpec]:
     codex_availability, codex_version, codex_reason = _version("codex")
     claude_availability, claude_version, claude_reason = _version("claude")
     return {
@@ -206,7 +216,7 @@ def discover_workers(settings: Settings) -> dict[str, WorkerSpec]:
             max_context_tokens=2000,
             default_timeout_seconds=120,
         ),
-        "ollama-local": _ollama_spec(settings),
+        "ollama-local": _ollama_spec(settings, project_id=project_id),
         "claude-code-runtime": WorkerSpec(
             worker_id="claude-code-runtime",
             worker_type=WorkerType.CLAUDE_CODE,

@@ -102,7 +102,7 @@ def router(monkeypatch: pytest.MonkeyPatch) -> Router:
         del project_root
         return {"stdout": "Python 3.12", "stderr": "", "status": "SUCCEEDED", "exit_code": 0, "error_code": None}
 
-    monkeypatch.setattr(worker_service, "discover_workers", lambda _settings: workers)
+    monkeypatch.setattr(worker_service, "discover_workers", lambda _settings, **_kwargs: workers)
     monkeypatch.setattr(worker_service, "select_worker", select)
     monkeypatch.setattr(worker_service, "run_registered_command", run_command)
     return recorded
@@ -353,7 +353,9 @@ def test_busy_project_still_reports_scope_mismatch(session: Session, router: Rou
     summarize = {"step_sequence": None, "capability_id": "SUMMARIZE", "command_id": None, "max_risk_level": "LOW"}
     approval_id = _approval(session, project_id, _subject(project_id, request_id, [summarize, API_STATIC]))
     pending = _do_route(session, request_id, _route(approval_id, "SUMMARIZE"), tmp_path)
-    assert pending["job"]["status"] == "ROUTED"  # no model executor: the project is now busy
+    # Model jobs now run (or refuse) synchronously (RC2 D4); hold the job non-terminal to make the project busy.
+    session.execute(text("UPDATE worker_jobs SET status = 'ROUTED', completed_at = NULL WHERE id = CAST(:id AS uuid)"),
+                    {"id": str(pending["job"]["id"])})
     _assert_refused(session, router, tmp_path, request_id, _route(approval_id, "BUILD_RELEASE", risk="MEDIUM"),
                     "APPROVAL_SCOPE_MISMATCH")
     with pytest.raises(PermissionError, match="BLOCKED_PROJECT_BUSY"):
@@ -396,7 +398,7 @@ def test_subjectless_approval_on_schema_0018_never_authorizes_routing(
     session: Session, router: Router, tmp_path: Path
 ) -> None:
     versions = set(session.execute(text("SELECT version_num FROM alembic_version")).scalars())
-    assert "20261010_0018" in versions
+    assert any(version >= "20261010_0018" for version in versions)  # 0018 or a later operational head
     columns = set(session.execute(text(
         "SELECT column_name FROM information_schema.columns WHERE table_name = 'control_approvals'")).scalars())
     assert {"subject_kind", "subject_json"} <= columns

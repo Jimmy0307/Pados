@@ -13,7 +13,7 @@ bash scripts/demo/run_demo.sh --local-ai # optional: a local Ollama; the model i
 pados init                               # writes .env with a unique control token (runtime/local/control.token)
 docker compose up -d postgres            # or any PostgreSQL 16+ with pgvector; set PADOS_DB_PORT/PASSWORD in .env
 # create databases pados_local_runtime, pados_proof_runtime, pados_corpus_runtime, then:
-PADOS_DB_NAME=pados_local_runtime alembic upgrade 20261010_0018
+PADOS_DB_NAME=pados_local_runtime alembic upgrade 20261010_0019
 PADOS_DB_NAME=pados_proof_runtime alembic upgrade 20260730_0011
 PADOS_DB_NAME=pados_proof_runtime alembic upgrade 20260808_0013
 PADOS_DB_NAME=pados_proof_runtime alembic -c alembic_p6_19b.ini upgrade head

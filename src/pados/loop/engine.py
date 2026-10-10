@@ -110,6 +110,8 @@ def decide_next_action(payload: DecisionInput) -> tuple[LoopDecision, str, LoopS
         return LoopDecision.WAIT_FOR_HUMAN, "approval expired", LoopStatus.WAITING_HUMAN
     if payload.external_dependency_missing:
         return LoopDecision.WAIT_FOR_HUMAN, "external dependency missing", LoopStatus.WAITING_HUMAN
+    if payload.step_status == StepStatus.BLOCKED:
+        return LoopDecision.WAIT_FOR_HUMAN, "blocked step requires human review", LoopStatus.WAITING_HUMAN
     if payload.current_iteration >= policy.max_iterations:
         return LoopDecision.FAIL_RECOVERABLE, "max iterations exhausted", LoopStatus.FAILED_RECOVERABLE
     if payload.worker_failures > policy.max_worker_failures:

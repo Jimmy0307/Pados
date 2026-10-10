@@ -242,7 +242,7 @@ def _install_deterministic_router(monkeypatch: pytest.MonkeyPatch, outcomes: lis
         max_context_tokens=1000,
         default_timeout_seconds=30,
     )
-    monkeypatch.setattr(worker_service, "discover_workers", lambda _settings: {worker.worker_id: worker})
+    monkeypatch.setattr(worker_service, "discover_workers", lambda _settings, **_kwargs: {worker.worker_id: worker})
     iterator = iter(outcomes)
 
     def run_command(_invocation: object, *, project_root: Path) -> dict[str, object]:

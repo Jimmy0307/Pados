@@ -30,6 +30,7 @@ from pados.loop.schemas import (
     LoopCreate,
     LoopDecision,
     LoopStatus,
+    ProgressDelta,
     ProgressSnapshot,
     StepStatus,
     TaskGoalCreate,
@@ -37,7 +38,12 @@ from pados.loop.schemas import (
 )
 from pados.work_protocol.models import TaskEnvelope
 from pados.worker.schemas import RISK_ORDER, RouteRequest
-from pados.worker.service import route_work_request
+from pados.worker.service import (
+    NON_TERMINAL_JOB_STATUSES,
+    expire_overdue_jobs,
+    record_job_event,
+    route_work_request,
+)
 
 
 _MAX_RESIDUAL_DEPTH = 64
@@ -473,19 +479,62 @@ def run_one_iteration(
 ) -> dict[str, Any]:
     loop = get_loop_for_update(session, loop_id)
     if loop["status"] != "RUNNING":
+        previous = session.execute(
+            text(
+                """
+                SELECT * FROM task_loop_iterations
+                WHERE loop_id = CAST(:loop_id AS uuid) AND idempotency_key = :idempotency_key
+                """
+            ),
+            {"loop_id": loop_id, "idempotency_key": idempotency_key},
+        ).mappings().first()
+        if previous is not None and previous["status"] in {"DECIDED", "FAILED"}:
+            return _replay_decided_iteration(session, loop, dict(previous))
         raise ValueError("loop must be RUNNING to step")
-    active_iteration: Any = session.execute(
+    active_iteration = session.execute(
         text(
             """
-            SELECT count(*) FROM task_loop_iterations
+            SELECT * FROM task_loop_iterations
             WHERE loop_id = CAST(:loop_id AS uuid)
               AND status IN ('CREATED', 'ROUTING', 'RUNNING', 'VALIDATING')
+            ORDER BY iteration_number DESC
+            LIMIT 1
+            FOR UPDATE
             """
         ),
         {"loop_id": loop_id},
-    ).scalar_one()
-    if int(active_iteration) > 0:
+    ).mappings().first()
+    if active_iteration is not None:
+        active = dict(active_iteration)
+        if active["status"] == "RUNNING" and active.get("job_id") is not None:
+            job_id = str(active["job_id"])
+            expire_overdue_jobs(session, str(loop["project_id"]))
+            job_row = session.execute(
+                text("SELECT * FROM worker_jobs WHERE id = CAST(:id AS uuid)"), {"id": job_id}
+            ).mappings().one()
+            job = dict(job_row)
+            if str(job["status"]) in NON_TERMINAL_JOB_STATUSES:
+                return _waiting_for_job(session, loop, active, job)
+            return _complete_routed_iteration(
+                session,
+                loop=loop,
+                iteration=active,
+                job=job,
+                settings=settings,
+                artifact_root=artifact_root,
+            )
         raise PermissionError("duplicate active iteration rejected")
+    previous = session.execute(
+        text(
+            """
+            SELECT * FROM task_loop_iterations
+            WHERE loop_id = CAST(:loop_id AS uuid) AND idempotency_key = :idempotency_key
+            """
+        ),
+        {"loop_id": loop_id, "idempotency_key": idempotency_key},
+    ).mappings().first()
+    if previous is not None:
+        return _replay_decided_iteration(session, loop, dict(previous))
     step = _select_ready_step(session, str(loop["active_plan_id"]))
     if step is None:
         states: Any = session.execute(
@@ -588,19 +637,96 @@ def run_one_iteration(
     )
     job = routed["job"]
     job_status = str(job["status"])
-    step_status = StepStatus.PASSED if job_status == "SUCCEEDED" else StepStatus.FAILED
-    validation_status = "PASSED" if job_status == "SUCCEEDED" else "FAILED"
-    session.execute(
+    _event(session, loop_id, str(loop["project_id"]), "JOB_ROUTED", {"job_id": str(job["id"])})
+    if job_status in NON_TERMINAL_JOB_STATUSES:
+        session.execute(
+            text("UPDATE task_plan_steps SET status = 'RUNNING' WHERE id = CAST(:id AS uuid)"),
+            {"id": str(step["id"])},
+        )
+        session.execute(
+            text(
+                "UPDATE task_loop_iterations SET status = 'RUNNING', job_id = CAST(:job_id AS uuid) "
+                "WHERE id = CAST(:id AS uuid)"
+            ),
+            {"id": iteration_id, "job_id": str(job["id"])},
+        )
+        _event(
+            session,
+            loop_id,
+            str(loop["project_id"]),
+            "JOB_WAITING",
+            {"iteration_id": iteration_id, "job_id": str(job["id"]), "job_status": job_status},
+        )
+        return _waiting_for_job(session, loop, dict(iteration), job)
+    return _complete_routed_iteration(
+        session,
+        loop=loop,
+        iteration=dict(iteration),
+        job=job,
+        settings=settings,
+        artifact_root=artifact_root,
+    )
+
+
+def _waiting_for_job(
+    session: Session, loop: dict[str, Any], iteration: dict[str, Any], job: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "loop": get_loop(session, str(loop["id"])),
+        "status": LoopStatus.RUNNING.value,
+        "decision": "WAIT_FOR_JOB",
+        "iteration_id": str(iteration["id"]),
+        "job_id": str(job["id"]),
+        "job_status": str(job["status"]),
+    }
+
+
+def _load_snapshot(session: Session, snapshot_id: str) -> ProgressSnapshot:
+    row = session.execute(
         text(
             """
-            UPDATE task_plan_steps
-            SET status = :status
-            WHERE id = CAST(:id AS uuid)
+            SELECT acceptance_criteria_total, acceptance_criteria_met, tests_total, tests_passed,
+                   tests_failed, blocker_count, artifact_count, validation_status, scope_hash, state_hash
+            FROM task_progress_snapshots WHERE id = CAST(:id AS uuid)
             """
         ),
+        {"id": snapshot_id},
+    ).mappings().one()
+    return ProgressSnapshot.model_validate(dict(row))
+
+
+def _complete_routed_iteration(
+    session: Session,
+    *,
+    loop: dict[str, Any],
+    iteration: dict[str, Any],
+    job: dict[str, Any],
+    settings: Any,
+    artifact_root: Path,
+) -> dict[str, Any]:
+    """Finish a terminal worker result through the normal receipt and decision path."""
+    loop_id = str(loop["id"])
+    iteration_id = str(iteration["id"])
+    iteration_number = int(iteration["iteration_number"])
+    job_id = str(job["id"])
+    job_status = str(job["status"])
+    step = dict(
+        session.execute(
+            text("SELECT * FROM task_plan_steps WHERE id = CAST(:id AS uuid)"),
+            {"id": str(iteration["step_id"])},
+        ).mappings().one()
+    )
+    step["attempt_count"] = max(0, int(step["attempt_count"]) - 1)
+    step_status = {
+        "SUCCEEDED": StepStatus.PASSED,
+        "TIMED_OUT": StepStatus.TIMED_OUT,
+        "BLOCKED": StepStatus.BLOCKED,
+    }.get(job_status, StepStatus.FAILED)
+    validation_status = "PASSED" if job_status == "SUCCEEDED" else "FAILED"
+    session.execute(
+        text("UPDATE task_plan_steps SET status = :status WHERE id = CAST(:id AS uuid)"),
         {"id": str(step["id"]), "status": step_status.value},
     )
-    _event(session, loop_id, str(loop["project_id"]), "JOB_ROUTED", {"job_id": str(job["id"])})
     _event(session, loop_id, str(loop["project_id"]), "JOB_COMPLETED", {"status": job_status})
     task_envelope = _task_envelope_for_request(
         session,
@@ -612,31 +738,32 @@ def run_one_iteration(
         session,
         loop=loop,
         step=step,
-        iteration=dict(iteration),
+        iteration=iteration,
         job=job,
         artifact_root=artifact_root,
         task_envelope=task_envelope,
     )
-    amendment_records = (
+    amendments = (
         reconcile_residual_work(session, loop_id, settings=settings)
         if capability_result is not None
         else ()
     )
-    reapproval_required = any(
-        str(item.get("authority_decision")) == "REAPPROVAL_REQUIRED" for item in amendment_records
-    )
+    reapproval_required = any(str(item.get("authority_decision")) == "REAPPROVAL_REQUIRED" for item in amendments)
+    before_id = iteration.get("before_snapshot_id")
+    if before_id is None:
+        raise ValueError("active iteration is missing its before snapshot")
+    before = _load_snapshot(session, str(before_id))
     after = _snapshot_from_db(session, loop, iteration_id=iteration_id, validation_status=validation_status)
     after_id = _insert_snapshot(session, loop_id, iteration_id, after)
     delta = calculate_progress_delta(before, after)
     delta_id = _insert_delta(session, iteration_id, delta)
     no_progress, negative = _current_streaks(session, loop_id, delta.classification.value)
-    all_done = _all_steps_passed(session, str(loop["active_plan_id"]))
     decision, reason, next_status = decide_next_action(
         DecisionInput(
             validation_status=validation_status,
             step_status=step_status,
             delta=delta,
-            all_success_criteria_met=all_done,
+            all_success_criteria_met=_all_steps_passed(session, str(loop["active_plan_id"])),
             unresolved_blockers=after.blocker_count,
             attempt_number=int(step["attempt_count"]) + 1,
             worker_failures=_worker_failures(session, loop_id),
@@ -650,15 +777,17 @@ def run_one_iteration(
         )
     )
     if reapproval_required:
-        decision = LoopDecision.WAIT_FOR_HUMAN
-        reason = "residual plan amendment requires renewed approval"
-        next_status = LoopStatus.WAITING_HUMAN
+        decision, reason, next_status = (
+            LoopDecision.WAIT_FOR_HUMAN,
+            "residual plan amendment requires renewed approval",
+            LoopStatus.WAITING_HUMAN,
+        )
     _persist_decision(
         session,
         loop=loop,
         iteration_id=iteration_id,
         iteration_number=iteration_number,
-        job_id=str(job["id"]),
+        job_id=job_id,
         after_id=after_id,
         delta_id=delta_id,
         decision=decision,
@@ -673,6 +802,80 @@ def run_one_iteration(
         "decision": decision.value,
         "decision_reason": reason,
         "status": next_status.value,
+    }
+
+
+def _replay_decided_iteration(
+    session: Session, loop: dict[str, Any], iteration: dict[str, Any]
+) -> dict[str, Any]:
+    decision = iteration.get("decision")
+    reason = iteration.get("decision_reason")
+    decision_status = {
+        "CONTINUE": LoopStatus.RUNNING.value,
+        "ADVANCE_STEP": LoopStatus.RUNNING.value,
+        "RETRY_SAME_STEP": LoopStatus.RUNNING.value,
+        "WAIT_FOR_HUMAN": LoopStatus.WAITING_HUMAN.value,
+        "PAUSE": LoopStatus.PAUSED.value,
+        "BLOCK": LoopStatus.BLOCKED.value,
+        "COMPLETE": LoopStatus.COMPLETED.value,
+        "PARTIAL_COMPLETE": LoopStatus.PARTIALLY_COMPLETED.value,
+        "FAIL_RECOVERABLE": LoopStatus.FAILED_RECOVERABLE.value,
+        "FAIL_TERMINAL": LoopStatus.FAILED_TERMINAL.value,
+        "CANCEL": LoopStatus.CANCELLED.value,
+    }.get(str(decision), str(loop["status"]))
+    loop_result = get_loop(session, str(loop["id"]))
+    loop_result.update(
+        status=decision_status,
+        current_iteration=int(iteration["iteration_number"]),
+        final_result={"decision": decision, "reason": reason},
+    )
+    loop_result["completed_at"] = iteration.get("completed_at") if decision_status in {
+        LoopStatus.COMPLETED.value,
+        LoopStatus.PARTIALLY_COMPLETED.value,
+        LoopStatus.CANCELLED.value,
+        LoopStatus.FAILED_TERMINAL.value,
+        LoopStatus.TIMED_OUT.value,
+    } else None
+    job = None
+    if iteration.get("job_id") is not None:
+        row = session.execute(
+            text("SELECT * FROM worker_jobs WHERE id = CAST(:id AS uuid)"),
+            {"id": str(iteration["job_id"])},
+        ).mappings().first()
+        job = dict(row) if row is not None else None
+    delta = None
+    if iteration.get("progress_delta_id") is not None:
+        row = session.execute(
+            text(
+                """
+                SELECT criteria_met_delta, tests_passed_delta, tests_failed_delta, blocker_delta,
+                       artifact_delta, scope_changed, state_changed, progress_score, classification
+                FROM task_progress_deltas WHERE id = CAST(:id AS uuid)
+                """
+            ),
+            {"id": str(iteration["progress_delta_id"])},
+        ).mappings().first()
+        if row is not None:
+            values = dict(row)
+            delta = ProgressDelta(
+                criteria_met_delta=values["criteria_met_delta"],
+                tests_passed_delta=values["tests_passed_delta"],
+                tests_failed_delta=values["tests_failed_delta"],
+                blocker_delta=values["blocker_delta"],
+                artifact_delta=values["artifact_delta"],
+                scope_changed=values["scope_changed"],
+                state_changed=values["state_changed"],
+                progress_score=values["progress_score"],
+                classification=values["classification"],
+            ).model_dump(mode="json")
+    return {
+        "loop": loop_result,
+        "iteration_id": str(iteration["id"]),
+        "job": job,
+        "progress_delta": delta,
+        "decision": decision,
+        "decision_reason": reason,
+        "status": decision_status,
     }
 
 
@@ -1104,7 +1307,7 @@ def cancel_loop(session: Session, loop_id: str) -> dict[str, Any]:
         text("UPDATE task_loops SET status = 'CANCELLED', completed_at = now() WHERE id = CAST(:id AS uuid) RETURNING *"),
         {"id": loop_id},
     ).mappings().one()
-    session.execute(
+    cancelled_jobs = session.execute(
         text(
             """
             UPDATE worker_jobs
@@ -1115,9 +1318,45 @@ def cancel_loop(session: Session, loop_id: str) -> dict[str, Any]:
                 WHERE loop_id = CAST(:id AS uuid) AND job_id IS NOT NULL
             )
               AND status IN ('ROUTED', 'QUEUED', 'RUNNING', 'VALIDATING')
+            RETURNING id, project_id
+            """
+        ),
+        {"id": loop_id},
+    ).mappings().all()
+    for job in cancelled_jobs:
+        record_job_event(
+            session,
+            str(job["id"]),
+            str(job["project_id"]),
+            "JOB_CANCELLED",
+            {"reason": "governing_task_loop_cancelled"},
+        )
+    cancelled_steps = session.execute(
+        text(
+            """
+            SELECT step_id FROM task_loop_iterations
+            WHERE loop_id = CAST(:id AS uuid)
+              AND status IN ('CREATED', 'ROUTING', 'RUNNING', 'VALIDATING')
+            """
+        ),
+        {"id": loop_id},
+    ).scalars().all()
+    session.execute(
+        text(
+            """
+            UPDATE task_loop_iterations
+            SET status = 'DECIDED', decision = 'CANCEL',
+                decision_reason = 'governing task loop cancelled', completed_at = now()
+            WHERE loop_id = CAST(:id AS uuid)
+              AND status IN ('CREATED', 'ROUTING', 'RUNNING', 'VALIDATING')
             """
         ),
         {"id": loop_id},
     )
+    for step_id in cancelled_steps:
+        session.execute(
+            text("UPDATE task_plan_steps SET status = 'CANCELLED' WHERE id = CAST(:id AS uuid)"),
+            {"id": str(step_id)},
+        )
     _event(session, loop_id, str(row["project_id"]), "LOOP_CANCELLED", {})
     return dict(row)

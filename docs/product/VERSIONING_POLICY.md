@@ -11,7 +11,7 @@ Versions are independent axes. Public version numbers are **not** tied to intern
 | Enterprise retrieval contract | `pados.enterprise.retrieval.v1` | Integer major | Breaking request or response change |
 | ExecutionReceipt schema | `schema_version: "1"` | Integer | Any change to hashed fields (receipts are integrity-bound) |
 | Node execution receipt | `pados.compute-node.execution-receipt.v1` | Integer major | Any change to hashed fields |
-| Database | Alembic revisions: operational `20261010_0018`; proof `p6_21p_0015` on formal main heads `20260730_0011` + `20260808_0013` | Forward-only revisions | Schema changes. Revision ids are internal; the upgrade procedure is public |
+| Database | Alembic revisions: operational `20261010_0019`; proof `p6_21p_0015` on formal main heads `20260730_0011` + `20260808_0013` | Forward-only revisions | Schema changes. Revision ids are internal; the upgrade procedure is public |
 
 **Rules**
 

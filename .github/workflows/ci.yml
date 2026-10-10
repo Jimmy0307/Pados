@@ -89,7 +89,7 @@ jobs:
       - name: Migrate PostgreSQL test databases
         run: |
           python -m alembic upgrade heads
-          PADOS_DB_NAME=pados_local_runtime python -m alembic upgrade 20261010_0018
+          PADOS_DB_NAME=pados_local_runtime python -m alembic upgrade 20261010_0019
           PADOS_DB_NAME=pados_corpus_runtime python -m alembic upgrade 20260730_0011
       - name: Tests
         run: python -m pytest -q tests --ignore=tests/integration
