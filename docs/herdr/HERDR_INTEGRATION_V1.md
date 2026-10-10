@@ -81,10 +81,14 @@ stale_after_seconds=...)`:
   - `CommandHerdrSource()`: defined, never invoked by tests, and its argv is UNVERIFIED.
     - It runs the fixed allowlisted argv `herdr status --json`, resolved on `PATH`, and never
       uses `shell=True`.
-    - **POSIX:** one monotonic deadline covers reading and waiting (default 5 s, maximum 30 s).
+    - **Linux:** one monotonic deadline covers reading and waiting (default 5 s, maximum 30 s).
       The output cap is 256 KiB. The child runs in its own session and process group, and the
       whole group is killed on timeout, on crossing the cap and after the leader exits, so
-      descendants never outlive a collection. The child gets a minimal environment.
+      descendants never outlive a collection. The child gets a minimal environment. This requires
+      non-reaping `waitid(..., WNOWAIT)` to keep the process-group id reserved until cleanup.
+    - **macOS / other POSIX:** the primitive is feature-detected. Where the runtime does not expose
+      it (CPython 3.12 on macOS) the command source fails closed with `HERDR_SOURCE_UNAVAILABLE`
+      before spawning. Live command-source support is not claimed on macOS.
     - **Windows:** disabled (`HERDR_COMMAND_SOURCE_UNSUPPORTED_ON_WINDOWS`, fail closed) until
       bounded streaming with a job object exists. `installed()` is false there.
 - **Bounds.** A raw document is limited to 256 KiB, a nesting depth of 16, 64 sessions and 256
@@ -239,7 +243,7 @@ evidence before the mapping is marked verified.
    variables). If it needs more, add only the named, non-secret variables.
 10. **Windows.** The command source is disabled on Windows
     (`HERDR_COMMAND_SOURCE_UNSUPPORTED_ON_WINDOWS`). Enabling it requires a bounded streaming
-    reader plus a job object that kills descendants, tested like the POSIX CR-06 M04 tests.
+    reader plus a job object that kills descendants, tested like the Linux CR-06 M04 tests.
 
 ## 9. Residual risks
 
@@ -251,7 +255,7 @@ evidence before the mapping is marked verified.
   states are labelled telemetry-only, and no source-controlled free text is shown.
 - **Key protection.** The digest key protects ids only against offline guessing by someone who has
   the store file but not the key file. Both sit in the same 0600 directory.
-- **Process-group reuse.** On POSIX the process group is killed while the unreaped leader still
+- **Process-group reuse.** On Linux the process group is killed while the unreaped leader still
   reserves its id. Descendants that call `setsid()` themselves escape the group.
 - **Over-counting.** Terminal-content key detection is substring-based, so it may over-count
   unrelated keys (for example `deadlines`). Those keys are never copied in any case.

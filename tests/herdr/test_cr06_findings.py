@@ -12,6 +12,7 @@ import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -58,6 +59,8 @@ from tests.herdr.herdr_support import (
 )
 
 POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups / permission bits")
+WAITID_ONLY = pytest.mark.skipif(adapter_module._waitid_primitives() is None,
+                                reason="non-reaping waitid is unavailable")
 _DIGESTS = itertools.count(1000)
 
 
@@ -478,6 +481,52 @@ def test_cr06_m03_source_error_never_carries_free_text() -> None:
 
 # --- M04: one deadline, process-group cleanup ------------------------------------------------------
 
+def test_cr06_m04_waitid_path_is_non_reaping_and_uses_all_required_primitives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(adapter_module.os, "P_PID", 11, raising=False)
+    monkeypatch.setattr(adapter_module.os, "WEXITED", 2, raising=False)
+    monkeypatch.setattr(adapter_module.os, "WNOHANG", 4, raising=False)
+    monkeypatch.setattr(adapter_module.os, "WNOWAIT", 8, raising=False)
+
+    def fake_waitid(idtype: int, pid: int, options: int) -> SimpleNamespace:
+        calls.append((idtype, pid, options))
+        return SimpleNamespace(si_pid=pid)
+
+    monkeypatch.setattr(adapter_module.os, "waitid", fake_waitid, raising=False)
+    assert adapter_module._exited_unreaped(123, time.monotonic() + 1)
+    assert calls == [(11, 123, 14)]
+
+
+@pytest.mark.parametrize("missing", ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT"))
+def test_cr06_m04_missing_waitid_primitive_fails_closed_with_source_unavailable(
+    missing: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(adapter_module.os, "waitid", lambda *args: None, raising=False)
+    monkeypatch.setattr(adapter_module.os, "P_PID", 11, raising=False)
+    monkeypatch.setattr(adapter_module.os, "WEXITED", 2, raising=False)
+    monkeypatch.setattr(adapter_module.os, "WNOHANG", 4, raising=False)
+    monkeypatch.setattr(adapter_module.os, "WNOWAIT", 8, raising=False)
+    monkeypatch.setattr(adapter_module.os, missing, None, raising=False)
+    assert adapter_module._waitid_primitives() is None
+    with pytest.raises(HerdrSourceError) as caught:
+        adapter_module._exited_unreaped(123, time.monotonic() + 1)
+    assert caught.value.code is HerdrDiagnostic.SOURCE_UNAVAILABLE
+
+
+@POSIX_ONLY
+def test_cr06_m04_missing_waitid_fails_before_spawning(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("must not spawn without non-reaping waitid")
+
+    monkeypatch.setattr(adapter_module, "_waitid_primitives", lambda: None)
+    monkeypatch.setattr(subprocess, "Popen", refuse)
+    with pytest.raises(HerdrSourceError) as caught:
+        bounded_run((sys.executable, "-c", "pass"), timeout_seconds=1, max_bytes=100)
+    assert caught.value.code is HerdrDiagnostic.SOURCE_UNAVAILABLE
+
 def _gone(pid: int, budget: float = 5.0) -> bool:
     deadline = time.monotonic() + budget
     while time.monotonic() < deadline:
@@ -505,7 +554,7 @@ def _spawner(pid_file: Path, *, after: str, grandchild_stdout: str = "None") -> 
     )
 
 
-@POSIX_ONLY
+@WAITID_ONLY
 def test_cr06_m04_timeout_kills_descendants(tmp_path: Path) -> None:
     pid_file = tmp_path / "grandchild.pid"
     script = _spawner(pid_file, after="time.sleep(60)")
@@ -515,7 +564,7 @@ def test_cr06_m04_timeout_kills_descendants(tmp_path: Path) -> None:
     assert _gone(int(pid_file.read_text()))
 
 
-@POSIX_ONLY
+@WAITID_ONLY
 def test_cr06_m04_descendants_die_after_a_normal_exit_and_on_the_output_cap(tmp_path: Path) -> None:
     pid_file = tmp_path / "grandchild.pid"
     script = _spawner(pid_file, after="print('{}')", grandchild_stdout="subprocess.DEVNULL")
@@ -527,7 +576,7 @@ def test_cr06_m04_descendants_die_after_a_normal_exit_and_on_the_output_cap(tmp_
     assert _gone(int(capped.read_text()))
 
 
-@POSIX_ONLY
+@WAITID_ONLY
 def test_cr06_m04_one_deadline_covers_reading_and_waiting() -> None:
     script = "import os, time\nos.close(1)\ntime.sleep(30)"  # EOF at once, then never exits
     started = time.monotonic()
@@ -542,7 +591,7 @@ def test_cr06_m04_one_deadline_covers_reading_and_waiting() -> None:
     assert time.monotonic() - started < 1.5 + 1.0
 
 
-@POSIX_ONLY
+@WAITID_ONLY
 def test_cr06_m04_bounded_run_caps_output_and_reports_exit_status() -> None:
     script = "import sys\nwhile True: sys.stdout.write('x' * 65536)"
     assert len(bounded_run((sys.executable, "-c", script), timeout_seconds=10, max_bytes=1000)) == 1001
@@ -552,7 +601,7 @@ def test_cr06_m04_bounded_run_caps_output_and_reports_exit_status() -> None:
     assert bounded_run((sys.executable, "-c", "print('{}')"), timeout_seconds=10, max_bytes=100).strip() == b"{}"
 
 
-@POSIX_ONLY
+@WAITID_ONLY
 def test_cr06_m04_child_gets_a_minimal_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PADOS_DATABASE_URL", "postgresql://example.invalid/db")
     script = "import os, json; print(json.dumps(sorted(os.environ)))"

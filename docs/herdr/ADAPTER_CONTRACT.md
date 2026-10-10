@@ -188,13 +188,18 @@ never echoed.
 
 `CommandHerdrSource` runs `herdr status --json` (UNVERIFIED), an allowlisted argv with no shell.
 
-- **POSIX.**
+- **Linux.**
   - One monotonic deadline covers reading and waiting.
   - The output cap is 256 KiB; the read stops at the cap plus one byte.
   - The child runs in its own session (`start_new_session=True`). Its whole process group is
     killed (`os.killpg`, SIGKILL) on timeout, on crossing the cap and after the leader exits; the
     unreaped leader keeps the group id reserved until then.
   - The child gets a minimal environment.
+- **Other POSIX (macOS).** The bounded runner needs the non-reaping `os.waitid(..., WNOWAIT)` primitive
+  to keep the process-group id reserved until group cleanup and feature-detects it. Where the
+  runtime does not expose it (CPython 3.12 on macOS) the command source fails closed with
+  `HERDR_SOURCE_UNAVAILABLE` before spawning. Live Herdr command-source support is not claimed on
+  macOS: CI proves only static checks and the fail-closed contract there.
 - **Windows.** The source is disabled. `installed()` is false and `fetch()` and `bounded_run` raise
   `HERDR_COMMAND_SOURCE_UNSUPPORTED_ON_WINDOWS`. It stays disabled until bounded streaming with a
   job object exists.

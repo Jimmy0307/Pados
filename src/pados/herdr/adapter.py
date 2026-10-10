@@ -25,8 +25,10 @@ closed enum (CR-06 M03).
 ``CommandHerdrSource`` is defined for the live integration (fixed allowlisted
 argv, no shell, one monotonic deadline, output cap, isolated process group that
 is killed on timeout/cap/exit) but its wire format is unverified
-(HERDR_LIVE_UAT = PENDING) and no test invokes it. On Windows it is disabled
-(HERDR_COMMAND_SOURCE_UNSUPPORTED_ON_WINDOWS) until bounded streaming exists.
+(HERDR_LIVE_UAT = PENDING). The bounded runner is supported on Linux, where
+``waitid(..., WNOWAIT)`` keeps the leader unreaped until group cleanup. The primitive
+is feature-detected: runtimes without it (CPython 3.12 on macOS) fail closed,
+and Windows is disabled until bounded streaming exists.
 """
 from __future__ import annotations
 
@@ -45,7 +47,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
@@ -178,19 +180,47 @@ def _child_env() -> dict[str, str]:
 def bounded_run(argv: Sequence[str], *, timeout_seconds: float, max_bytes: int) -> bytes:
     """Run ``argv`` without a shell; return at most ``max_bytes + 1`` bytes of stdout.
 
-    One monotonic deadline covers reading and waiting. The child runs in its own
-    session / process group; the whole group is killed on timeout, on crossing
-    the output cap and after the leader exits, so descendants never outlive the
-    call. Windows is unsupported (fail closed) until bounded streaming exists.
+    One monotonic deadline covers reading and waiting. On supported Linux, the
+    child runs in its own session / process group; the whole group is killed on
+    timeout, on crossing the output cap and after the leader exits, so
+    descendants never outlive the call. Platforms without non-reaping waitid
+    fail closed. Windows is explicitly unsupported until bounded streaming
+    exists.
     """
     if sys.platform == "win32":
         raise HerdrSourceError(HerdrDiagnostic.COMMAND_SOURCE_UNSUPPORTED_ON_WINDOWS)
     else:
-        return _run_posix(argv, timeout_seconds=timeout_seconds, max_bytes=max_bytes)
+        waitid_primitives = _waitid_primitives()
+        if waitid_primitives is None:
+            raise HerdrSourceError(HerdrDiagnostic.SOURCE_UNAVAILABLE)
+        return _run_posix(argv, timeout_seconds=timeout_seconds, max_bytes=max_bytes,
+                          waitid_primitives=waitid_primitives)
+
+
+class _WaitIdInfo(Protocol):
+    si_pid: int
+
+
+_WaitId = Callable[[int, int, int], _WaitIdInfo | None]
+_WaitIdPrimitives = tuple[_WaitId, int, int, int, int]
+
+
+def _waitid_primitives() -> _WaitIdPrimitives | None:
+    """Return the non-reaping wait primitive only when the runtime exposes all of it."""
+    waitid = getattr(os, "waitid", None)
+    p_pid = getattr(os, "P_PID", None)
+    w_exited = getattr(os, "WEXITED", None)
+    w_nohang = getattr(os, "WNOHANG", None)
+    w_nowait = getattr(os, "WNOWAIT", None)
+    if not callable(waitid) or not all(isinstance(value, int) for value in
+                                      (p_pid, w_exited, w_nohang, w_nowait)):
+        return None
+    return (cast(_WaitId, waitid), cast(int, p_pid), cast(int, w_exited), cast(int, w_nohang), cast(int, w_nowait))
 
 
 if sys.platform != "win32":
-    def _run_posix(argv: Sequence[str], *, timeout_seconds: float, max_bytes: int) -> bytes:
+    def _run_posix(argv: Sequence[str], *, timeout_seconds: float, max_bytes: int,
+                   waitid_primitives: _WaitIdPrimitives) -> bytes:
         deadline = time.monotonic() + timeout_seconds
         process = subprocess.Popen(list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL, shell=False, close_fds=True, env=_child_env(),
@@ -199,7 +229,7 @@ if sys.platform != "win32":
             data = _read_bounded(process, deadline, max_bytes)
             if len(data) > max_bytes:
                 return data
-            if not _exited_unreaped(process.pid, deadline):
+            if not _exited_unreaped(process.pid, deadline, waitid_primitives):
                 raise HerdrSourceError(HerdrDiagnostic.SOURCE_TIMEOUT)
         finally:
             _kill_group(process.pid)  # the unreaped leader keeps the group id reserved
@@ -230,19 +260,6 @@ if sys.platform != "win32":
                 if size > max_bytes:
                     return b"".join(chunks)[:max_bytes + 1]
 
-    def _exited_unreaped(pid: int, deadline: float) -> bool:
-        """Wait (same deadline) until the leader exits, without reaping it."""
-        while True:
-            try:
-                info = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-            except ChildProcessError:
-                return True
-            if info is not None and info.si_pid == pid:
-                return True
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(_EXIT_POLL_SECONDS)
-
     def _kill_group(pgid: int) -> None:
         try:
             os.killpg(pgid, signal.SIGKILL)
@@ -257,6 +274,24 @@ if sys.platform != "win32":
             process.wait()
         if process.stdout is not None:
             process.stdout.close()
+
+
+def _exited_unreaped(pid: int, deadline: float, waitid_primitives: _WaitIdPrimitives | None = None) -> bool:
+    """Wait (same deadline) until the leader exits, without reaping it."""
+    primitives = waitid_primitives if waitid_primitives is not None else _waitid_primitives()
+    if primitives is None:
+        raise HerdrSourceError(HerdrDiagnostic.SOURCE_UNAVAILABLE)
+    waitid, p_pid, w_exited, w_nohang, w_nowait = primitives
+    while True:
+        try:
+            info = waitid(p_pid, pid, w_exited | w_nohang | w_nowait)
+        except ChildProcessError:
+            return True
+        if info is not None and info.si_pid == pid:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_EXIT_POLL_SECONDS)
 
 
 class CommandHerdrSource:
