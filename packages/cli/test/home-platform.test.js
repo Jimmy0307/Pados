@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const { spawnSync } = require('node:child_process');
-const { resolveHome, ensureLayout, LAYOUT, restrictToOwner } = require('../lib/home');
+const { resolveHome, ensureLayout, LAYOUT, restrictToOwner, classifyWindowsAcl } = require('../lib/home');
 const { platformKey, runtimePackageFor, resolveRuntimePackage, RUNTIME_PACKAGES } = require('../lib/platform');
 const { PadosError } = require('../lib/errors');
 const { tempDir, fakeRuntimePackage } = require('./helpers');
@@ -35,6 +35,14 @@ test('layout is created with an owner-only config directory', () => {
   }
 });
 
+const OWNER = 'HOST\\runneradmin';
+
+// The fully qualified current account (DOMAIN\user) from the system whoami, never a PATH lookup.
+function windowsAccount() {
+  const whoami = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'whoami.exe');
+  return spawnSync(whoami, [], { encoding: 'utf8', windowsHide: true }).stdout.trim();
+}
+
 // R-6: the whole home is owner-only, including an existing home whose subdirectories predate the ACL.
 function aclEntries(target) {
   const out = spawnSync('icacls', [target], { encoding: 'utf8' }).stdout;
@@ -42,20 +50,64 @@ function aclEntries(target) {
     .filter((line) => /^[^:]+:\(/.test(line));
 }
 
-test('whole PADOS_HOME is owner-only on Windows (root, data, logs, state, runtime, cache)', { skip: process.platform !== 'win32' }, () => {
+test('whole PADOS_HOME satisfies the Windows ACL contract (root, data, logs, state, runtime, cache)', { skip: process.platform !== 'win32' }, () => {
   const home = path.join(tempDir(), 'home');
   fs.mkdirSync(path.join(home, 'data', 'objects'), { recursive: true }); // pre-existing content inherits the old ACL
   fs.writeFileSync(path.join(home, 'data', 'objects', 'x.bin'), 'x');
   ensureLayout(home);
-  const me = require('node:os').userInfo().username.toLowerCase();
+  const me = windowsAccount();
   for (const target of [home, ...['data', 'logs', 'state', 'runtime', 'cache', 'config'].map((n) => path.join(home, n)),
     path.join(home, 'data', 'objects', 'x.bin')]) {
     const entries = aclEntries(target);
     assert.ok(entries.length >= 1, `${target}: no ACL entries parsed`);
-    for (const entry of entries) {
-      const principal = entry.slice(0, entry.indexOf(':(')).split('\\').pop().toLowerCase();
-      assert.equal(principal, me, `${target}: foreign ACL entry ${entry}`);
-    }
+    const verdict = classifyWindowsAcl(entries.map((entry) => entry.slice(0, entry.indexOf(':('))), me);
+    assert.deepEqual(verdict, { OWNER_PRESENT: 'YES', BROAD_PRINCIPAL_PRESENT: 'NO', ONLY_ALLOWED_TRUSTED_PRINCIPALS: 'YES' },
+      `${target}: ACL violates the owner(+SYSTEM) contract: ${entries.join(' | ')}`);
+  }
+});
+
+// The Windows ACL contract itself, on synthetic icacls principals (runs on every platform).
+test('Windows ACL contract: owner, optionally SYSTEM, nothing else', () => {
+  const ok = { OWNER_PRESENT: 'YES', BROAD_PRINCIPAL_PRESENT: 'NO', ONLY_ALLOWED_TRUSTED_PRINCIPALS: 'YES' };
+  assert.deepEqual(classifyWindowsAcl(['HOST\\runneradmin'], OWNER), ok);
+  assert.deepEqual(classifyWindowsAcl(['HOST\\runneradmin', 'NT AUTHORITY\\SYSTEM'], OWNER), ok);
+  assert.deepEqual(classifyWindowsAcl(['host\\RunnerAdmin', '*S-1-5-18'], OWNER), ok);
+  // The owner is the exact account: a same-named account of another domain/host is not the owner.
+  assert.deepEqual(classifyWindowsAcl(['EVIL\\runneradmin'], OWNER),
+    { OWNER_PRESENT: 'NO', BROAD_PRINCIPAL_PRESENT: 'NO', ONLY_ALLOWED_TRUSTED_PRINCIPALS: 'NO' });
+  assert.equal(classifyWindowsAcl(['HOST\\runneradmin', 'EVIL\\runneradmin'], OWNER).ONLY_ALLOWED_TRUSTED_PRINCIPALS, 'NO');
+  assert.equal(classifyWindowsAcl(['runneradmin'], 'runneradmin').OWNER_PRESENT, 'NO'); // unqualified owner fails closed
+  // SYSTEM alone (owner missing) is not an owner-only home.
+  assert.equal(classifyWindowsAcl(['NT AUTHORITY\\SYSTEM'], OWNER).OWNER_PRESENT, 'NO');
+  assert.equal(classifyWindowsAcl([], OWNER).ONLY_ALLOWED_TRUSTED_PRINCIPALS, 'NO');
+});
+
+for (const broad of ['Everyone', 'BUILTIN\\Users', 'NT AUTHORITY\\Authenticated Users', 'BUILTIN\\Guests',
+  'NT AUTHORITY\\ANONYMOUS LOGON', 'NT AUTHORITY\\INTERACTIVE', '*S-1-1-0', '*S-1-5-32-545', '*S-1-5-11']) {
+  test(`Windows ACL contract rejects broad principal ${broad}`, () => {
+    const verdict = classifyWindowsAcl(['HOST\\runneradmin', 'NT AUTHORITY\\SYSTEM', broad], OWNER);
+    assert.equal(verdict.BROAD_PRINCIPAL_PRESENT, 'YES');
+    assert.equal(verdict.ONLY_ALLOWED_TRUSTED_PRINCIPALS, 'NO');
+  });
+}
+
+test('Windows ACL contract catches a broad grant re-added to a real PADOS_HOME', { skip: process.platform !== 'win32' }, () => {
+  const home = path.join(tempDir(), 'home');
+  ensureLayout(home);
+  const data = path.join(home, 'data');
+  for (const sid of ['*S-1-5-32-545', '*S-1-1-0', '*S-1-5-11']) {
+    assert.equal(spawnSync('icacls', [data, '/grant', `${sid}:R`], { encoding: 'utf8' }).status, 0);
+  }
+  const principals = aclEntries(data).map((entry) => entry.slice(0, entry.indexOf(':(')));
+  const verdict = classifyWindowsAcl(principals, windowsAccount());
+  assert.equal(verdict.BROAD_PRINCIPAL_PRESENT, 'YES', principals.join(' | '));
+  assert.equal(verdict.ONLY_ALLOWED_TRUSTED_PRINCIPALS, 'NO');
+});
+
+test('Windows ACL contract rejects unknown principals (fail closed), including Administrators', () => {
+  for (const other of ['HOST\\someone-else', 'BUILTIN\\Administrators', 'CREATOR OWNER', '*S-1-5-21-1-2-3-1001',
+    'SYSTEM', 'HOST\\SYSTEM']) {
+    assert.equal(classifyWindowsAcl(['HOST\\runneradmin', other], OWNER).ONLY_ALLOWED_TRUSTED_PRINCIPALS, 'NO', other);
   }
 });
 

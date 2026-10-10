@@ -63,8 +63,40 @@ function windowsPrincipal() {
   return cachedWindowsPrincipal;
 }
 
-// Owner-only: POSIX modes (0700 directories, 0600 files); on Windows an explicit ACL granting only the
-// current user (inheritance removed). Returns a description of what was applied.
+// Windows ACL contract for PADOS_HOME (review R-6). PADOS grants only the current account; the effective ACL
+// may additionally hold NT AUTHORITY\SYSTEM (S-1-5-18), which Windows and hosted images keep on user profile
+// paths and which already has full control of the machine. Nothing else is acceptable: broad identities are
+// named explicitly and any other or unrecognised principal fails closed too.
+// Only the qualified name or the well-known SID: a bare "SYSTEM" could be an ordinary account of that name.
+const WINDOWS_TRUSTED_SYSTEM = Object.freeze(['nt authority\\system', '*s-1-5-18']);
+const WINDOWS_BROAD_PRINCIPALS = Object.freeze([
+  'everyone', '*s-1-1-0',
+  'builtin\\users', 'users', '*s-1-5-32-545',
+  'nt authority\\authenticated users', 'authenticated users', '*s-1-5-11',
+  'builtin\\guests', 'guests', '*s-1-5-32-546', 'guest',
+  'nt authority\\anonymous logon', 'anonymous logon', '*s-1-5-7',
+  'nt authority\\interactive', 'interactive', '*s-1-5-4',
+  'nt authority\\network', 'network', '*s-1-5-2',
+]);
+
+// Classifies icacls principals (e.g. "NT AUTHORITY\SYSTEM", "HOST\user", "*S-1-5-18") against the contract.
+// `owner` is the fully qualified account PADOS grants (windowsPrincipal(), i.e. `whoami`: "DOMAIN\user"); it is
+// matched exactly, so a same-named account of another domain or host ("OTHER\user") is not the owner.
+function classifyWindowsAcl(principals, owner) {
+  const me = String(owner).trim().toLowerCase();
+  const names = principals.map((p) => String(p).trim().toLowerCase());
+  const isOwner = (n) => me.includes('\\') && n === me;
+  const isBroad = (n) => WINDOWS_BROAD_PRINCIPALS.includes(n);
+  const isTrusted = (n) => isOwner(n) || WINDOWS_TRUSTED_SYSTEM.includes(n);
+  return {
+    OWNER_PRESENT: names.some(isOwner) ? 'YES' : 'NO',
+    BROAD_PRINCIPAL_PRESENT: names.some(isBroad) ? 'YES' : 'NO',
+    ONLY_ALLOWED_TRUSTED_PRINCIPALS: names.length > 0 && names.every(isTrusted) ? 'YES' : 'NO',
+  };
+}
+
+// Owner-only: POSIX modes (0700 directories, 0600 files); on Windows an explicit ACL granting the current
+// user (inheritance removed; see the Windows ACL contract above). Returns a description of what was applied.
 function restrictToOwner(target, { directory = false, platform = process.platform } = {}) {
   if (platform !== 'win32') {
     fs.chmodSync(target, directory ? 0o700 : 0o600);
@@ -78,7 +110,8 @@ function restrictToOwner(target, { directory = false, platform = process.platfor
 
 // The whole PADOS_HOME is owner-only on every platform (review R-6). On Windows the root gets an explicit,
 // non-inherited ACL for the current user that its subdirectories (data, logs, state, runtime, cache) inherit,
-// wherever PADOS_HOME is; config/ additionally gets its own explicit ACL.
+// wherever PADOS_HOME is; config/ additionally gets its own explicit ACL. "Owner-only" on Windows means the
+// contract enforced by classifyWindowsAcl: the owner, optionally SYSTEM, and no other principal.
 function ensureLayout(home, { platform = process.platform } = {}) {
   fs.mkdirSync(home, { recursive: true });
   restrictToOwner(home, { directory: true, platform });
@@ -86,4 +119,4 @@ function ensureLayout(home, { platform = process.platform } = {}) {
   restrictToOwner(path.join(home, 'config'), { directory: true, platform });
 }
 
-module.exports = { LAYOUT, resolveHome, layout, ensureLayout, restrictToOwner };
+module.exports = { LAYOUT, resolveHome, layout, ensureLayout, restrictToOwner, classifyWindowsAcl };

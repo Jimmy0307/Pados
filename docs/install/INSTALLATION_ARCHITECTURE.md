@@ -109,13 +109,18 @@ implemented in `build_runtime.py` and `packages/cli/lib/runtime.js`.
 `PADOS_HOME` overrides the default and must be absolute. The whole home is owner-only on every platform: POSIX
 `0700` on the root and `config/`; on Windows `pados init` gives the root an explicit, non-inherited ACL for the
 current user (`icacls /inheritance:r /grant:r <user>:(OI)(CI)F`) that `data/`, `logs/`, `state/`, `runtime/` and
-`cache/` inherit, wherever `PADOS_HOME` points, and `config/` gets its own explicit ACL. The drive-root `pados` directory of the system drive
+`cache/` inherit, wherever `PADOS_HOME` points, and `config/` gets its own explicit ACL. On Windows "owner-only"
+is the explicit contract in `packages/cli/lib/home.js` (`classifyWindowsAcl`): the current account must be present;
+`NT AUTHORITY\SYSTEM` (S-1-5-18) may also be present, because Windows and hosted images keep it on user paths and
+it already controls the machine; every other principal fails, and broad identities (`Everyone`, `BUILTIN\Users`,
+`Authenticated Users`, `Guests`, `ANONYMOUS LOGON`, `INTERACTIVE`, `NETWORK`) are rejected by name and SID.
+PADOS itself grants only the current account. The drive-root `pados` directory of the system drive
 (the developer checkout location) is always refused. The Node and Python resolvers are tested against the same
 vectors (`packages/cli/test/fixtures/home-vectors.json`).
 
 ```
 PADOS_HOME/
-  config/     pados.env (PADOS_* keys), control.token, storage-profile.json   owner-only (0700/0600; Windows ACL)
+  config/     pados.env (PADOS_* keys), control.token, storage-profile.json   owner-only (0700/0600; Windows ACL: owner [+SYSTEM])
   runtime/    <version>/ (verified copy of the runtime package), current.json (active + previous + history)
   data/       workspace/, objects/ (PADOS_PRODUCT_WORKSPACE_ROOT / PADOS_PRODUCT_OBJECT_ROOT)
   logs/       api-<timestamp>.out.log / .err.log
