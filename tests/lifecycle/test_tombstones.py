@@ -184,3 +184,22 @@ def test_cr02b_n03_pending_binds_reserved_identity() -> None:
         validate_tombstone({**record, "reserved_sha256": "0" * 64})
     with pytest.raises(TombstoneError, match="RESERVED_IDENTITY_INVALID"):
         validate_tombstone({**record, "reserved_ino": -1})
+
+
+# Windows reports st_dev as a 64-bit volume serial (hosted runners exceed 2**63) and st_ino as a file id of
+# up to 128 bits (ReFS). The reserved identity must persist and round-trip; nothing else gets the wider bound.
+@pytest.mark.parametrize("reserved", [(2**64 - 1, 2**64 - 1, 24), (2**63 + 5, 2**128 - 1, 24), (0, 0, 0)])
+def test_reserved_identity_accepts_windows_filesystem_ids(tmp_path: Path, reserved: tuple[int, int, int]) -> None:
+    record = _record(0, Phase.PENDING, reserved=reserved)
+    assert (record["reserved_dev"], record["reserved_ino"], record["reserved_size"]) == reserved
+    ledger = TombstoneLedger(tmp_path / "t" / "tombstones.jsonl")
+    ledger.append(record)
+    assert ledger.verify()
+    latest = ledger.latest(record["artifact_hash"])
+    assert latest is not None and (latest["reserved_dev"], latest["reserved_ino"]) == reserved[:2]
+
+
+@pytest.mark.parametrize("reserved", [(2**128, 1, 24), (1, 2**128, 24), (-1, 1, 24), (1, 1, 2**63 + 1)])
+def test_reserved_identity_out_of_range_fails_closed(reserved: tuple[int, int, int]) -> None:
+    with pytest.raises((TombstoneError, DataMinimizationViolation)):
+        _record(0, Phase.PENDING, reserved=reserved)

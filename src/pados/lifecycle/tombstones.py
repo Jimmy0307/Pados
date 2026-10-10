@@ -41,7 +41,7 @@ from typing import Any
 from pados.execution.context import canonical_hash
 from pados.lifecycle.fswalk import fsync_directory
 from pados.lifecycle.locking import ensure_durable_dir, exclusive_lock
-from pados.lifecycle.minimization import DataMinimizationViolation, assert_minimized
+from pados.lifecycle.minimization import FILESYSTEM_ID_BOUND, DataMinimizationViolation, assert_minimized
 from pados.lifecycle.retention import DataKind, PayloadState
 
 GENESIS = "0" * 64
@@ -52,6 +52,8 @@ TOMBSTONE_KEYS_V2 = frozenset({
     "schema", "phase", "artifact_hash", "data_kind", "status", "timestamp", "receipt_ref",
     "decision_evidence_ref", "recorded_at", "purged_at", "reason", "payload_state", "plan_hash",
 })
+# st_dev / st_ino of the reserved inode: unsigned, up to 128 bits on Windows (volume serial, ReFS file id).
+_RESERVED_FS_ID_PATHS = ("reserved_dev", "reserved_ino")
 TOMBSTONE_KEYS = TOMBSTONE_KEYS_V2 | frozenset({"reserved_dev", "reserved_ino", "reserved_size", "reserved_sha256"})
 _KEYS_BY_SCHEMA = {TOMBSTONE_SCHEMA: TOMBSTONE_KEYS, LEGACY_TOMBSTONE_SCHEMA_V2: TOMBSTONE_KEYS_V2}
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -143,13 +145,14 @@ def validate_tombstone(record: Mapping[str, Any]) -> None:
     if not legacy:
         for key in ("reserved_dev", "reserved_ino", "reserved_size"):
             value = record[key]
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < FILESYSTEM_ID_BOUND:
                 raise TombstoneError("TOMBSTONE_RESERVED_IDENTITY_INVALID")
         if record["reserved_sha256"] != record["artifact_hash"]:
             raise TombstoneError("TOMBSTONE_RESERVED_IDENTITY_INVALID")
     if record["data_kind"] != DataKind.REJECTED_ARTIFACT_PAYLOAD.value:
         raise TombstoneError("TOMBSTONE_DATA_KIND_INVALID")
-    assert_minimized(record, allowed_keys=keys, max_string=256, max_items=24, max_total_bytes=4096)
+    assert_minimized(record, allowed_keys=keys, max_string=256, max_items=24, max_total_bytes=4096,
+                     filesystem_id_paths=_RESERVED_FS_ID_PATHS)
 
 
 class TombstoneLedger:

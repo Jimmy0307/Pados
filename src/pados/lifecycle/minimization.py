@@ -64,6 +64,8 @@ DEFAULT_MAX_ITEMS = 256
 DEFAULT_MAX_TOTAL_BYTES = 64 * 1024
 _MAX_DEPTH = 8
 _INT_BOUND = 2**63
+# Filesystem identities: Windows reports a 64-bit volume serial as st_dev and up to 128-bit file ids as st_ino.
+FILESYSTEM_ID_BOUND = 2**128
 
 
 class DataMinimizationViolation(ValueError):
@@ -94,6 +96,7 @@ def assert_minimized(
     max_string: int = DEFAULT_MAX_STRING,
     max_items: int = DEFAULT_MAX_ITEMS,
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+    filesystem_id_paths: Iterable[str] = (),
 ) -> None:
     """Raise ``DataMinimizationViolation`` unless ``record`` is safe to persist.
 
@@ -101,11 +104,15 @@ def assert_minimized(
     ``allow_paths`` lists exact dotted paths a writer reviewed (for example a
     bounded ``context_summary``-style field literally named ``context``); the
     value at such a path must be a single bounded string, never a structure.
+    ``filesystem_id_paths`` lists exact dotted paths holding an ``st_dev``/``st_ino``
+    value; there an integer must be in ``[0, FILESYSTEM_ID_BOUND)`` instead of the
+    generic signed 64-bit bound. Every other integer keeps the generic bound.
     """
     if not isinstance(record, Mapping):
         raise DataMinimizationViolation("RECORD_MUST_BE_MAPPING", "")
     schema = frozenset(allowed_keys) if allowed_keys is not None else None
     reviewed = frozenset(allow_paths)
+    filesystem_ids = frozenset(filesystem_id_paths)
     total = 0
 
     def account(size: int, path: str) -> None:
@@ -158,7 +165,10 @@ def assert_minimized(
         elif value is None or isinstance(value, bool):
             account(8, path)
         elif isinstance(value, int):
-            if not -_INT_BOUND <= value <= _INT_BOUND:
+            if path in filesystem_ids:
+                if not 0 <= value < FILESYSTEM_ID_BOUND:
+                    raise DataMinimizationViolation("NUMBER_OUT_OF_RANGE", path)
+            elif not -_INT_BOUND <= value <= _INT_BOUND:
                 raise DataMinimizationViolation("NUMBER_OUT_OF_RANGE", path)
             account(8, path)
         elif isinstance(value, float):

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 from pados.compute_node.registry import NodeProber, NodeRegistration, NodeRegistry
 from pados.connectivity.state import ConnectivityMonitor, Link
@@ -183,3 +184,16 @@ def test_object_store_is_content_addressed_without_duplicates(tmp_path: Path) ->
     point = inventory()["product_object_store"]
     assert point.guard is Guard.NONE and point.may_hold_prohibited
     assert DataKind.REJECTED_ARTIFACT_PAYLOAD in point.data_kinds
+
+
+def test_filesystem_id_bound_applies_only_to_declared_paths() -> None:
+    from pados.lifecycle.minimization import FILESYSTEM_ID_BOUND, DataMinimizationViolation, assert_minimized
+
+    big = 2**64 - 1
+    assert_minimized({"dev": big, "ino": FILESYSTEM_ID_BOUND - 1}, filesystem_id_paths=("dev", "ino"))
+    with pytest.raises(DataMinimizationViolation, match="NUMBER_OUT_OF_RANGE"):
+        assert_minimized({"dev": big, "count": big}, filesystem_id_paths=("dev",))
+    with pytest.raises(DataMinimizationViolation, match="NUMBER_OUT_OF_RANGE"):
+        assert_minimized({"dev": FILESYSTEM_ID_BOUND}, filesystem_id_paths=("dev",))
+    with pytest.raises(DataMinimizationViolation, match="NUMBER_OUT_OF_RANGE"):
+        assert_minimized({"dev": -1}, filesystem_id_paths=("dev",))
