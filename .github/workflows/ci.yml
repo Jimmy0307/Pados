@@ -32,6 +32,9 @@ jobs:
       PADOS_DB_PASSWORD: ci-only-disposable
       PADOS_DB_HOST: 127.0.0.1
       PADOS_DB_PORT: "5432"
+      PADOS_DB_NAME: pados_p6_7_validation
+      PADOS_OPERATIONAL_DATABASE_NAME: pados_local_runtime
+      PADOS_CORPUS_DATABASE_NAME: pados_corpus_runtime
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,6 +54,43 @@ jobs:
         run: mypy src && mypy --platform win32 src/pados/execution src/pados/product_loop src/pados/enterprise src/pados/compute_node src/pados/release
       - name: Compile
         run: python -m compileall -q src tests
+      - name: Provision isolated PostgreSQL test databases
+        run: |
+          python - <<'PY'
+          import os
+
+          import psycopg
+          from psycopg import sql
+
+          connection_settings = {
+              "host": os.environ["PADOS_DB_HOST"],
+              "port": int(os.environ["PADOS_DB_PORT"]),
+              "user": "pados",
+              "password": os.environ["PADOS_DB_PASSWORD"],
+          }
+          databases = (
+              "pados_p6_7_validation",
+              "pados_local_runtime",
+              "pados_corpus_runtime",
+          )
+
+          with psycopg.connect(dbname="postgres", autocommit=True, **connection_settings) as admin:
+              for database in databases:
+                  exists = admin.execute(
+                      "SELECT 1 FROM pg_database WHERE datname = %s", (database,)
+                  ).fetchone()
+                  if exists is None:
+                      admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
+
+          for database in databases:
+              with psycopg.connect(dbname=database, autocommit=True, **connection_settings) as connection:
+                  connection.execute("CREATE EXTENSION IF NOT EXISTS vector")
+          PY
+      - name: Migrate PostgreSQL test databases
+        run: |
+          python -m alembic upgrade heads
+          PADOS_DB_NAME=pados_local_runtime python -m alembic upgrade 20261007_0017
+          PADOS_DB_NAME=pados_corpus_runtime python -m alembic upgrade 20260730_0011
       - name: Tests
         run: python -m pytest -q tests --ignore=tests/integration
       - name: Public export hygiene

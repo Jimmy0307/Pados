@@ -1,3 +1,4 @@
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import UUID
@@ -7,6 +8,8 @@ from typer.testing import CliRunner
 
 import pados.cli.main as cli_main
 from pados.cli.main import app
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def test_uuid_boundary_rejects_invalid_project_id_without_traceback() -> None:
@@ -22,12 +25,14 @@ def test_uuid_boundary_rejects_invalid_project_id_without_traceback() -> None:
 
 
 def test_event_help_lists_allowlist_and_payload_file() -> None:
-    result = CliRunner().invoke(app, ["memory", "event-add", "--help"])
+    runner = CliRunner(env={"NO_COLOR": "1", "TERM": "dumb", "COLUMNS": "120", "FORCE_COLOR": ""})
+    result = runner.invoke(app, ["memory", "event-add", "--help"])
+    output = _ANSI_ESCAPE.sub("", result.output)
 
     assert result.exit_code == 0
-    assert "ARTIFACT_CREATED" in result.output
-    assert "WORKER_STARTED" in result.output
-    assert "--payload-file" in result.output
+    assert "ARTIFACT_CREATED" in output
+    assert "WORKER_STARTED" in output
+    assert "--payload-file" in output
 
 
 def test_event_payload_file_is_a_stable_cli_boundary(

@@ -38,7 +38,7 @@ class ContextTests(unittest.TestCase):
     def test_utf8_budgets_and_truncation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "README.md").write_text("界" * 10000)
+            (root / "README.md").write_text("界" * 10000, encoding="utf-8")
             context = ProjectContextLoader(root, max_source_bytes=80, max_total_bytes=128).load(
                 scope_id="project", semantic={"scope_version": 0})
             self.assertLessEqual(sum(s.bytes_read for s in context.sources), 128)
