@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from pados.control.approval_subject import (
     APPROVAL_NOT_APPROVED,
     APPROVAL_PROJECT_MISMATCH,
+    APPROVAL_REF_NOT_FOUND,
     APPROVAL_REQUEST_MISMATCH,
     APPROVAL_SCOPE_MISMATCH,
     APPROVAL_SCOPE_VERSION_STALE,
@@ -224,7 +225,7 @@ def _assert_ready(
     ).mappings().first()
     project_id = str(request["project_id"])
     if approval is None:
-        _refuse(session, APPROVAL_PROJECT_MISMATCH, request_id=request_id, route=route,
+        _refuse(session, APPROVAL_REF_NOT_FOUND, request_id=request_id, route=route,
                 project_id=project_id, subject_hash=None)
     try:
         subject, operation = _authorize_subject(

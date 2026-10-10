@@ -72,7 +72,8 @@ selected or any job is created:
 
 | Code | Meaning |
 |---|---|
-| `APPROVAL_PROJECT_MISMATCH` | The approval is missing or belongs to another project |
+| `APPROVAL_REF_NOT_FOUND` | No approval exists with that id |
+| `APPROVAL_PROJECT_MISMATCH` | The approval belongs to another project |
 | `APPROVAL_NOT_APPROVED` | The approval status is not `APPROVED` |
 | `APPROVAL_SUBJECT_UNBOUND` | The approval has no `WORK_ROUTE` subject (legacy approvals fail closed) |
 | `APPROVAL_SUBJECT_TAMPERED` | The stored subject is invalid or does not hash to `proposal_hash` |

@@ -24,6 +24,8 @@ from sqlalchemy.orm import Session
 from pados.control import service as control_service
 from pados.control.approval_subject import WorkRouteSubject, subject_hash
 from pados.loop import scope_authority
+from pados.loop import service as loop_service
+from pados.loop.schemas import LoopCreate, PlanStepCreate, StepType, TaskGoalCreate, TaskPlanCreate
 from pados.memory.service import bootstrap_project
 from pados.worker import router as worker_router
 from pados.worker import service as worker_service
@@ -377,3 +379,145 @@ def test_happy_path_and_idempotency_is_bound_to_the_operation(
     hijack = route.model_copy(update={"capability_id": CapabilityId.BUILD_RELEASE, "command_id": None})
     _assert_refused(session, router, tmp_path, request_id, hijack, "APPROVAL_SCOPE_MISMATCH")
     assert _jobs(session, request_id) == 1
+
+
+def test_missing_approval_is_refused_with_the_precise_diagnostic(
+    session: Session, router: Router, tmp_path: Path
+) -> None:
+    project_id = _project(session, tmp_path / "ws")
+    request_id = _request(session, project_id)
+    event = _assert_refused(session, router, tmp_path, request_id,
+                            _route(str(uuid4()), "RUN_STATIC_ANALYSIS", command_id="python_version"),
+                            "APPROVAL_REF_NOT_FOUND")
+    assert event["subject_hash"] is None
+
+
+def test_subjectless_approval_on_schema_0018_never_authorizes_routing(
+    session: Session, router: Router, tmp_path: Path
+) -> None:
+    versions = set(session.execute(text("SELECT version_num FROM alembic_version")).scalars())
+    assert "20261010_0018" in versions
+    columns = set(session.execute(text(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'control_approvals'")).scalars())
+    assert {"subject_kind", "subject_json"} <= columns
+    project_id = _project(session, tmp_path / "ws")
+    request_id = _request(session, project_id)
+    legacy = _approval(session, project_id, None)
+    stored = session.execute(text("SELECT subject_kind, subject_json FROM control_approvals WHERE id::text = :id"),
+                             {"id": legacy}).one()
+    assert tuple(stored) == (None, None)
+    for capability, command, risk, surface, step in (
+        ("RUN_STATIC_ANALYSIS", "python_version", "LOW", "CONTROL_API", None),
+        ("SUMMARIZE", None, "LOW", "CONTROL_API", None),
+        ("BUILD_RELEASE", None, "MEDIUM", "CONTROL_API", None),
+        ("MODIFY_CODE", None, "MEDIUM", "CONTROL_API", None),
+        ("RUN_STATIC_ANALYSIS", "python_version", "LOW", "TASK_LOOP", 1),
+    ):
+        event = _assert_refused(
+            session, router, tmp_path, request_id,
+            _route(legacy, capability, command_id=command, risk=risk, surface=surface, step_sequence=step),
+            "APPROVAL_SUBJECT_UNBOUND")
+        assert event["project_id"] == project_id
+        assert event["subject_hash"] == "a" * 64
+    assert router.calls == []
+    assert _jobs(session, request_id) == 0
+    goal = loop_service.create_task_goal(session, TaskGoalCreate(
+        project_id=project_id, request_id=request_id, objective="subjectless", success_criteria=["none"],
+        approval_id=legacy, idempotency_key=f"rc2-goal-{uuid4()}"))
+    with pytest.raises(PermissionError, match="APPROVAL_SUBJECT_UNBOUND"):
+        loop_service.create_task_plan(session, _plan(str(goal["id"]), legacy, sequences=(1,)))
+
+
+def test_idempotency_key_reuse_with_a_different_subject_is_refused(
+    session: Session, router: Router, tmp_path: Path
+) -> None:
+    project_id = _project(session, tmp_path / "ws")
+    request_id = _request(session, project_id)
+    key = f"rc2-approval-{uuid4()}"
+    first = control_service.create_approval(session, {
+        "project_id": project_id, "proposal_summary": "s", "idempotency_key": key,
+        "subject": _subject(project_id, request_id, [API_STATIC])})
+    replay = control_service.create_approval(session, {
+        "project_id": project_id, "proposal_summary": "s", "idempotency_key": key,
+        "subject": _subject(project_id, request_id, [API_STATIC])})
+    assert replay["id"] == first["id"]
+    widened = [API_STATIC, {**API_STATIC, "capability_id": "BUILD_RELEASE", "command_id": None}]
+    with pytest.raises(ValueError, match="APPROVAL_IDEMPOTENCY_CONTENT_CONFLICT"):
+        control_service.create_approval(session, {
+            "project_id": project_id, "proposal_summary": "s", "idempotency_key": key,
+            "subject": _subject(project_id, request_id, widened)})
+    approved = control_service.decide_approval(session, str(first["id"]), version=1, status="APPROVED",
+                                               reason="rc2", idempotency_key=f"rc2-decision-{uuid4()}")
+    route = _route(str(approved["id"]), "RUN_STATIC_ANALYSIS", command_id="python_version")
+    assert _do_route(session, request_id, route, tmp_path)["job"]["status"] == "SUCCEEDED"
+    # Reusing the route idempotency key under another approval never returns the existing job.
+    other_request = _request(session, project_id)
+    foreign = _approval(session, project_id, _subject(project_id, other_request, [API_STATIC]))
+    _assert_refused(session, router, tmp_path, request_id, route.model_copy(update={"approval_id": foreign}),
+                    "APPROVAL_REQUEST_MISMATCH")
+    legacy = _approval(session, project_id, None)
+    _assert_refused(session, router, tmp_path, request_id, route.model_copy(update={"approval_id": legacy}),
+                    "APPROVAL_SUBJECT_UNBOUND")
+    assert _jobs(session, request_id) == 1
+
+
+def _plan(goal_id: str, approval_id: str, *, sequences: tuple[int, ...]) -> TaskPlanCreate:
+    return TaskPlanCreate(
+        task_goal_id=goal_id, approval_id=approval_id, idempotency_key=f"rc2-plan-{uuid4()}",
+        steps=[PlanStepCreate(sequence=sequence, title=f"step {sequence}", step_type=StepType.INSPECT,
+                              required_capability=CapabilityId.READ_REPOSITORY, command_id="python_version",
+                              dependencies=[] if sequence == 1 else [sequence - 1])
+               for sequence in sequences])
+
+
+def _loop_op(sequence: int) -> dict[str, Any]:
+    return {"step_sequence": sequence, "capability_id": "READ_REPOSITORY", "command_id": "python_version",
+            "max_risk_level": "LOW"}
+
+
+def test_wrong_task_plan_is_refused_at_plan_creation(session: Session, tmp_path: Path) -> None:
+    project_id = _project(session, tmp_path / "ws")
+    request_id = _request(session, project_id)
+    other_request = _request(session, project_id)
+    step_one = _approval(session, project_id, _subject(project_id, request_id, [_loop_op(1)]))
+    goal = loop_service.create_task_goal(session, TaskGoalCreate(
+        project_id=project_id, request_id=request_id, objective="plan binding", success_criteria=["bound"],
+        approval_id=step_one, idempotency_key=f"rc2-goal-{uuid4()}"))
+    with pytest.raises(PermissionError, match="APPROVAL_SCOPE_MISMATCH"):
+        loop_service.create_task_plan(session, _plan(str(goal["id"]), step_one, sequences=(1, 2)))
+    foreign = _approval(session, project_id, _subject(project_id, other_request, [_loop_op(1)]))
+    with pytest.raises(PermissionError, match="APPROVAL_REQUEST_MISMATCH"):
+        loop_service.create_task_plan(session, _plan(str(goal["id"]), foreign, sequences=(1,)))
+    api_only = _approval(session, project_id,
+                         _subject(project_id, request_id, [_loop_op(1)], surfaces=("CONTROL_API",)))
+    with pytest.raises(PermissionError, match="APPROVAL_ACTOR_MISMATCH"):
+        loop_service.create_task_plan(session, _plan(str(goal["id"]), api_only, sequences=(1,)))
+    plan = loop_service.create_task_plan(session, _plan(str(goal["id"]), step_one, sequences=(1,)))
+    with pytest.raises(PermissionError, match="APPROVAL_ACTOR_MISMATCH"):
+        loop_service.create_loop(session, LoopCreate(task_goal_id=str(goal["id"]), active_plan_id=str(plan["id"]),
+                                                     approval_id=api_only, idempotency_key=f"rc2-loop-{uuid4()}"))
+
+
+def test_wrong_task_plan_step_is_refused_at_the_loop_route(
+    session: Session, router: Router, tmp_path: Path
+) -> None:
+    project_id = _project(session, tmp_path / "ws")
+    request_id = _request(session, project_id)
+    step_one = _approval(session, project_id, _subject(project_id, request_id, [_loop_op(1)]))
+    step_two_only = _approval(session, project_id, _subject(project_id, request_id, [_loop_op(2)]))
+    goal = loop_service.create_task_goal(session, TaskGoalCreate(
+        project_id=project_id, request_id=request_id, objective="step binding", success_criteria=["bound"],
+        approval_id=step_one, idempotency_key=f"rc2-goal-{uuid4()}"))
+    plan = loop_service.create_task_plan(session, _plan(str(goal["id"]), step_one, sequences=(1,)))
+    loop = loop_service.create_loop(session, LoopCreate(
+        task_goal_id=str(goal["id"]), active_plan_id=str(plan["id"]), approval_id=step_two_only,
+        idempotency_key=f"rc2-loop-{uuid4()}"))
+    loop_service.start_loop(session, str(loop["id"]), owner_instance="rc2-d1")
+    with pytest.raises(PermissionError, match="APPROVAL_SCOPE_MISMATCH"):
+        loop_service.run_one_iteration(session, loop_id=str(loop["id"]), settings=None,
+                                       artifact_root=tmp_path / "artifacts", idempotency_key=f"rc2-it-{uuid4()}")
+    assert router.calls == []
+    assert _jobs(session, request_id) == 0
+    event = _refusals(session, request_id)[-1]
+    assert (event["code"], event["surface"], event["step_sequence"], event["approval_id"]) == (
+        "APPROVAL_SCOPE_MISMATCH", "TASK_LOOP", 1, step_two_only)
