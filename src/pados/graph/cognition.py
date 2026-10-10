@@ -121,24 +121,68 @@ def build_prompt(operation: CognitiveOperation, context: Mapping[str, Any]) -> s
                 ),
             }
             for node in list(support)[:40]
-            if isinstance(node, Mapping)
+            if isinstance(node, Mapping) and not node.get("evidence_id")
         ]
     else:
         prior_support = spec.get("supporting_context")
         spec["supporting_context"] = list(prior_support)[:40] if isinstance(prior_support, Sequence) and not isinstance(prior_support, (str, bytes, bytearray)) else []
     spec["context_fingerprint"] = str(spec.get("context_fingerprint") or assembly.get("context_fingerprint") or "")
+    cited = _citable_evidence(spec.get("evidence"))
+    spec["evidence"] = _evidence_index(spec.get("evidence"))
     return (
         "You are a bounded cognitive assistant inside PADOS. Do not claim validation, "
         "take external action, or modify authoritative capability definitions. "
         f"Operation: {operation.value}. Cognitive specification JSON:\n"
-        f"{json.dumps(spec, ensure_ascii=False)}\nEnd cognitive specification. "
+        f"{json.dumps(spec, ensure_ascii=False)}\nEnd cognitive specification.\n"
+        f"{_evidence_block(cited)}\n"
         "Return only one JSON object with this bounded schema: "
         "{title:string, answer:string, subquestions:array, gaps:array, claims:array, "
         "evidence_refs:array, proposed_graph_changes:array, limitations:array}. "
         "answer is required. Each claim may contain claim:string and evidence_refs:array. "
+        "Answer only from the EVIDENCE block. Put every factual claim in claims, and give each claim "
+        "at least one evidence id from the EVIDENCE block in its evidence_refs; list the ids you used in "
+        "the top-level evidence_refs. Never cite anything else: no other id, node id, title, file name or URL. "
+        "If the evidence is insufficient, say so in limitations. If no evidence is provided, evidence_refs "
+        "must be [] and claims must not cite anything. "
         "Do not invent evidence IDs. proposed_graph_changes are proposals only and are not "
         "persisted automatically. All output is provisional for human inspection."
     )
+
+
+def _evidence_list(value: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [item for item in list(value)[:_MAX_EVIDENCE_REFS] if isinstance(item, Mapping)]
+
+
+def _citable_evidence(value: Any) -> list[Mapping[str, Any]]:
+    return [item for item in _evidence_list(value) if item.get("evidence_id")]
+
+
+def _evidence_index(value: Any) -> list[dict[str, Any]]:
+    """Evidence in the JSON specification carries ids and titles only; excerpts live in the EVIDENCE block."""
+
+    return [
+        {
+            "evidence_id": str(item["evidence_id"]),
+            "source_title": str(item.get("source_title") or "")[:240],
+            "source_id": str(item.get("source_id") or item.get("source_node_id") or ""),
+        }
+        if item.get("evidence_id")
+        else dict(item)
+        for item in _evidence_list(value)
+    ]
+
+
+def _evidence_block(evidence: Sequence[Mapping[str, Any]]) -> str:
+    if not evidence:
+        return "EVIDENCE: none provided.\nEND EVIDENCE"
+    lines = ["EVIDENCE (server-assigned ids; cite only these):"]
+    for item in evidence:
+        lines.append(f"[{item['evidence_id']}] {str(item.get('source_title') or '')[:240]}")
+        lines.append(str(item.get("excerpt") or "").strip())
+    lines.append("END EVIDENCE")
+    return "\n".join(lines)
 
 
 def _json_array(value: str) -> list[Any] | None:

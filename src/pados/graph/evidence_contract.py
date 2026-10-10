@@ -102,6 +102,53 @@ def evidence_record(
     }
 
 
+def node_source_record(node: Mapping[str, Any], *, content_hash: str) -> dict[str, Any]:
+    """Return the source identity of a graph node whose own content is used as evidence."""
+
+    return source_record(node) | {
+        "content_hash": content_hash,
+        "content_version": content_hash,
+        "evidence_eligibility": "GRAPH_NODE_CONTENT",
+    }
+
+
+def node_evidence_record(
+    *,
+    node: Mapping[str, Any],
+    content_hash: str,
+    excerpt: str,
+    location: Mapping[str, Any] | None,
+    relevance_score: float,
+    retrieval_reason: str,
+) -> dict[str, Any]:
+    """Return one bounded evidence span taken from a graph node's own content (not a fetched source)."""
+
+    identity = node_source_record(node, content_hash=content_hash)
+    return {
+        "kind": "EVIDENCE",
+        "context_role": "SELECTED_EVIDENCE",
+        "evidence_id": identity["source_id"],
+        "source_id": identity["source_id"],
+        "source_node_id": identity["source_id"],
+        "source_type": str(node.get("semantic_type") or ""),
+        "source_title": identity["title"],
+        "source_version": content_hash,
+        "content_hash": content_hash,
+        "excerpt": excerpt,
+        "location": dict(location or {}),
+        "selection_status": SELECTED,
+        "relevance_score": relevance_score,
+        "retrieval_reason": retrieval_reason,
+        "provenance": {
+            "source_id": identity["source_id"],
+            "source_node_id": identity["source_id"],
+            "content_hash": content_hash,
+            "content_version": content_hash,
+            "origin": identity["origin"],
+        },
+    }
+
+
 def validate_evidence(
     references: Sequence[Mapping[str, Any]],
     evidence: Sequence[Mapping[str, Any]],

@@ -184,6 +184,37 @@ def _cognitive_source_ids(assembly: Mapping[str, Any]) -> tuple[list[str], list[
     return used, references
 
 
+def _evidence_provenance(evidence: Any, response: Mapping[str, Any]) -> dict[str, Any]:
+    """Map server-assigned evidence ids (E1..En) back to their source nodes; provenance stays server-owned."""
+
+    items = (
+        [item for item in evidence if isinstance(item, Mapping) and item.get("evidence_id")]
+        if isinstance(evidence, Sequence) and not isinstance(evidence, (str, bytes, bytearray))
+        else []
+    )
+    sources = [
+        {
+            "evidence_id": str(item["evidence_id"]),
+            "source_node_id": str(item.get("source_node_id") or item.get("source_id") or ""),
+            "source_ref": str(item.get("source_ref") or ""),
+            "source_title": str(item.get("source_title") or ""),
+            "content_hash": str(item.get("content_hash") or ""),
+        }
+        for item in items
+    ]
+    by_id = {source["evidence_id"]: source["source_node_id"] for source in sources}
+    refs = [str(value) for value in response.get("evidence_refs", [])]
+    for claim in response.get("claims", []):
+        if isinstance(claim, Mapping):
+            refs.extend(str(value) for value in claim.get("evidence_refs", []))
+    cited = [by_id[ref] for ref in dict.fromkeys(refs) if by_id.get(ref)]
+    return {
+        "evidence_ids": [source["evidence_id"] for source in sources],
+        "evidence_sources": sources,
+        "cited_source_node_ids": list(dict.fromkeys(cited)),
+    }
+
+
 def _enforce_provider_context_budget(specification: Mapping[str, Any], estimated_tokens: int) -> None:
     budget = specification.get("context_budget")
     if not isinstance(budget, Mapping):
@@ -1507,11 +1538,7 @@ async def process_cognitive_item(
                     "cognitive_runtime_status": _cognitive_runtime_status(effective_settings, measured_execution),
                     "source_node_ids": used_source_ids or assembled_node_ids,
                     "reference_source_ids": reference_source_ids,
-                    "evidence_ids": [
-                        str(evidence.get("evidence_id"))
-                        for evidence in assembly.get("evidence", [])
-                        if isinstance(evidence, Mapping) and evidence.get("evidence_id")
-                    ],
+                    **_evidence_provenance(assembly.get("evidence", []), candidate_response),
                     "claims": candidate_response.get("claims", []),
                     "evidence_refs": candidate_response.get("evidence_refs", []),
                     "proposed_graph_changes": candidate_response.get("proposed_graph_changes", []),
@@ -1820,11 +1847,7 @@ async def refresh_living_synthesis(
         "root_node_ids": root_ids,
         "source_node_ids": used_source_ids or root_ids,
         "reference_source_ids": reference_source_ids,
-        "evidence_ids": [
-            str(evidence.get("evidence_id"))
-            for evidence in refreshed_context.get("evidence", [])
-            if isinstance(evidence, Mapping) and evidence.get("evidence_id")
-        ],
+        **_evidence_provenance(refreshed_context.get("evidence", []), provider_response),
         "claims": provider_response.get("claims", []),
         "evidence_refs": provider_response.get("evidence_refs", []),
         "proposed_graph_changes": provider_response.get("proposed_graph_changes", []),

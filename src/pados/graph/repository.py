@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from pados.graph import retrieval
 from pados.graph.schemas import (
     GroupCreate,
     SystemEdgeCreate,
@@ -364,18 +365,34 @@ def create_group(session: Session, workspace_id: str, payload: GroupCreate) -> d
     return row
 
 
+_SEARCH_PREFILTER_ROWS = 2_000
+
+
 def search_nodes(session: Session, workspace_id: str, query: str, limit: int) -> list[dict[str, Any]]:
-    return _many(
+    """Substring prefilter (the phrase or any query word), then deterministic lexical ranking.
+
+    A single-word query keeps the phrase semantics: the same rows match, now ordered by relevance
+    and then recency. Rows that only match as a substring rank after scored rows, by recency.
+    """
+
+    words = retrieval.prefilter_patterns(query)
+    phrase = f"%{query}%"
+    patterns = [phrase] if len(retrieval.query_terms(query)) <= 1 else list(dict.fromkeys([phrase, *(f"%{w}%" for w in words)]))
+    rows = _many(
         session,
         """
         SELECT * FROM graph_nodes
         WHERE workspace_id = CAST(:workspace_id AS uuid)
-          AND (title ILIKE :query OR content ILIKE :query)
+          AND (title ILIKE ANY(CAST(:patterns AS text[])) OR content ILIKE ANY(CAST(:patterns AS text[])))
         ORDER BY updated_at DESC
-        LIMIT :limit
+        LIMIT :prefilter
         """,
-        {"workspace_id": workspace_id, "query": f"%{query}%", "limit": limit},
+        {"workspace_id": workspace_id, "patterns": patterns, "prefilter": _SEARCH_PREFILTER_ROWS},
     )
+    recency = {str(row.get("id")): index for index, row in enumerate(rows)}
+    ranked = retrieval.rank_nodes(query, rows, root_ids=(), edges=(), excluded_types=frozenset(), type_weights={})
+    ordered = sorted(ranked, key=lambda item: (-item.score, recency[item.node_id]))
+    return [dict(item.node) for item in ordered[:limit]]
 
 
 def insert_intent(

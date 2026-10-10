@@ -475,7 +475,8 @@ class SynthesisPlanner:
                     "content": str(item.get("content") or "")[:1_200],
                 }
                 for item in list(assembly.get("nodes", []))[:40]
-                if isinstance(item, Mapping)
+                # Evidence content travels once, in ``evidence`` with its server id; never duplicated here.
+                if isinstance(item, Mapping) and not item.get("evidence_id")
             ],
             "evidence": [dict(item) for item in list(evidence)[:12] if isinstance(item, Mapping)],
             "references": [dict(item) for item in list(references)[:8] if isinstance(item, Mapping)],

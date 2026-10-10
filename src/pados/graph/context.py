@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from typing import Any, Protocol
 
+from pados.graph import retrieval
 from pados.graph.cognitive_pipeline import EvidenceResolver
+from pados.graph.evidence_contract import evidence_state, node_evidence_record, node_source_record, validate_evidence
 
 
 class DirtyEvent(StrEnum):
@@ -46,12 +47,17 @@ _MAX_REFERENCES = 8
 DEFAULT_CONTEXT_TOKEN_BUDGET = 2_400
 CONTEXT_SEGMENT_BUDGETS = {
     "question": 240,
-    "evidence": 1_000,
-    "concepts": 520,
-    "prior_synthesis": 320,
-    "memory": 160,
-    "references": 160,
+    "evidence": 1_500,
+    "concepts": 300,
+    "prior_synthesis": 200,
+    "memory": 80,
+    "references": 80,
 }
+_MAX_EVIDENCE_ITEMS = 12
+_MAX_RETRIEVED_EVIDENCE = 8
+_MAX_EXCERPT_CHARS = 1_200
+_MIN_TRUNCATED_CHARS = 200
+_ELLIPSIS = "…"
 _EXCLUDED_METADATA = {
     "artifact",
     "auto_refresh_policy",
@@ -145,23 +151,17 @@ def _edge_semantic_hash(edge: Mapping[str, Any]) -> str:
     return _digest(edge_semantic_projection(edge))
 
 
-def _tokens(value: str) -> set[str]:
-    return {
-        token
-        for token in re.findall(r"[0-9A-Za-z\u0080-\uffff]{2,}", value.casefold())
-        if len(token) >= 2
-    }
-
-
 def _estimate_tokens(value: str) -> int:
     return max(1, (len(value) + 3) // 4)
 
 
 def _fit_text(value: str, budget: int) -> tuple[str, bool]:
+    """Bound ``value`` to ``budget`` estimated tokens; the result never re-estimates above it."""
+
     if _estimate_tokens(value) <= budget:
         return value, False
-    max_chars = max(4, budget * 4)
-    return value[:max_chars].rstrip() + "…", True
+    max_chars = max(1, budget * 4 - len(_ELLIPSIS))
+    return value[:max_chars].rstrip() + _ELLIPSIS, True
 
 
 def _fit_records(
@@ -170,32 +170,26 @@ def _fit_records(
     budget: int,
     text_key: str,
 ) -> tuple[list[dict[str, Any]], int, bool]:
+    """Keep records in order within ``budget``; truncate rather than drop when a useful part fits."""
+
     selected: list[dict[str, Any]] = []
     remaining = budget
     truncated = False
     for record in records:
-        if remaining <= 0:
-            truncated = True
-            break
         item = dict(_json_safe(record))
         text = str(item.get(text_key) or "")
         if not text:
             selected.append(item)
             continue
+        if _estimate_tokens(text) > remaining and min(len(text), remaining * 4) < _MIN_TRUNCATED_CHARS:
+            truncated = True
+            continue
         bounded, was_truncated = _fit_text(text, remaining)
         item[text_key] = bounded
-        used = _estimate_tokens(bounded)
-        if used > remaining:
-            truncated = True
-            break
         selected.append(item)
-        remaining -= used
+        remaining -= _estimate_tokens(bounded)
         truncated = truncated or was_truncated
     return selected, remaining, truncated
-
-
-def _node_text(node: Mapping[str, Any]) -> str:
-    return f"{node.get('title', '')} {node.get('content', '')}".casefold()
 
 
 def _is_living_synthesis(node: Mapping[str, Any]) -> bool:
@@ -257,6 +251,210 @@ def _references(provider: ContextProvider, workspace_id: str, query: str) -> lis
     ][:_MAX_REFERENCES]
 
 
+def _root_query_text(roots: Sequence[Mapping[str, Any]]) -> str:
+    return " ".join(f"{node.get('title') or ''} {node.get('content') or ''}" for node in roots).strip()
+
+
+def _candidate_pool(
+    roots: Sequence[Mapping[str, Any]],
+    ranked: Sequence[retrieval.ScoredNode],
+    resources: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Roots, then relevant non-resource nodes by score, then resources; bounded by the pool cap."""
+
+    ordered = [*roots, *(item.node for item in ranked if item.score > 0), *resources]
+    return _deduplicate_nodes(ordered[:_MAX_NODES])
+
+
+def _bounded_excerpt(node: Mapping[str, Any], max_chars: int) -> tuple[str, bool]:
+    text = str(node.get("content") or "").strip() or str(node.get("title") or "").strip()
+    if len(text) <= max_chars:
+        return text, False
+    return text[: max(1, max_chars - len(_ELLIPSIS))].rstrip() + _ELLIPSIS, True
+
+
+def _retrieved_evidence(
+    selection: retrieval.Selection,
+    *,
+    budget_tokens: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Turn the diverse selection into bounded, validated graph-node evidence (in selection order)."""
+
+    remaining = max(0, budget_tokens * 4)
+    units: list[dict[str, Any]] = []
+    references: list[dict[str, Any]] = []
+    truncated = False
+    for item in selection.selected:
+        title = str(item.node.get("title") or "")
+        room = min(_MAX_EXCERPT_CHARS, remaining - len(title))
+        if room < _MIN_TRUNCATED_CHARS:
+            truncated = True
+            continue
+        excerpt, was_truncated = _bounded_excerpt(item.node, room)
+        content_hash = str(node_semantic_projection(item.node)["content_hash"])
+        record = node_evidence_record(
+            node=item.node,
+            content_hash=content_hash,
+            excerpt=excerpt,
+            location={"char_start": 0, "truncated": was_truncated},
+            relevance_score=item.score,
+            retrieval_reason=selection.reasons.get(item.node_id, item.reason),
+        )
+        units.append(record | {"node_context_role": _context_role(item.node)})
+        references.append(node_source_record(item.node, content_hash=content_hash))
+        remaining -= len(title) + len(excerpt)
+        truncated = truncated or was_truncated
+    valid, _ = validate_evidence(references, units)
+    return valid, truncated
+
+
+def _assign_evidence_ids(
+    evidence: Sequence[Mapping[str, Any]],
+    node_by_id: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Give every evidence item a server-assigned ``E<n>`` id in prompt order."""
+
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(list(evidence)[:_MAX_EVIDENCE_ITEMS], start=1):
+        source_node_id = str(item.get("source_node_id") or item.get("source_id") or "")
+        node = node_by_id.get(source_node_id, {})
+        content_hash = str(item.get("content_hash") or "") or str(node_semantic_projection(node)["content_hash"])
+        result.append(
+            dict(item)
+            | {
+                "evidence_id": f"E{index}",
+                "source_ref": str(item.get("evidence_id") or source_node_id),
+                "source_node_id": source_node_id,
+                "source_title": str(item.get("source_title") or node.get("title") or "Untitled source"),
+                "content_hash": content_hash,
+            }
+        )
+    return result
+
+
+def _evidence_stub(node: Mapping[str, Any], evidence_id: str) -> dict[str, Any]:
+    """A content-free node record for a node whose content is carried by an evidence item."""
+
+    return _provider_record(node) | {"content": "", "evidence_id": evidence_id}
+
+
+def _provider_record(node: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(node.get("id") or ""),
+        "semantic_type": str(node.get("semantic_type") or ""),
+        "context_role": _context_role(node),
+        "title": str(node.get("title") or "")[:240],
+        "content": str(node.get("content") or "")[:4_000],
+        "provenance": str(node.get("provenance") or ""),
+        "assurance_status": str(node.get("assurance_status") or ""),
+        "version": int(node.get("version") or 1),
+    }
+
+
+def _prompt_projection(
+    nodes: Sequence[Mapping[str, Any]],
+    evidence: Sequence[Mapping[str, Any]],
+    references: Sequence[Mapping[str, Any]],
+    memory: Sequence[Mapping[str, Any]],
+    prior: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """What the provider prompt actually carries (used for the context-size estimate)."""
+
+    return {
+        "nodes": [
+            {"title": item.get("title"), "content": item.get("content")}
+            for item in nodes
+            if not item.get("evidence_id")
+        ],
+        "evidence": [
+            {"id": item.get("evidence_id"), "title": item.get("source_title"), "excerpt": item.get("excerpt")}
+            for item in evidence
+        ],
+        "references": [{"title": item.get("title")} for item in references],
+        "memory": list(memory),
+        "prior": prior,
+    }
+
+
+def _context_refs(provider: ContextProvider, workspace_id: str, query: str, *, role: str, default_title: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "source_id": str(reference.get("source_id") or reference.get("id") or ""),
+            "title": str(reference.get("title") or default_title),
+            "summary": str(reference.get("summary") or reference.get("content") or "")[:800],
+            "content_hash": reference.get("content_hash") or reference.get("source_hash"),
+            "context_role": role,
+        }
+        for reference in _references(provider, workspace_id, query)
+    ]
+
+
+def _source_summary(
+    selected_nodes: Sequence[Mapping[str, Any]],
+    *,
+    memory: Sequence[Mapping[str, Any]],
+    references: Sequence[Mapping[str, Any]],
+    resource_references: Sequence[Mapping[str, Any]],
+    evidence: Sequence[Mapping[str, Any]],
+    gaps: Sequence[Mapping[str, Any]],
+    previous_synthesis: Mapping[str, Any] | None,
+) -> dict[str, int]:
+    def count(semantic_type: str) -> int:
+        return sum(1 for node in selected_nodes if str(node.get("semantic_type")) == semantic_type)
+
+    resource_ids = {
+        str(reference.get("source_id") or reference.get("source_node_id") or "") for reference in resource_references
+    }
+    return {
+        "concepts": count("CONCEPT"),
+        "resources": count("RESOURCE"),
+        "experts": count("EXPERT"),
+        "actions": count("ACTION"),
+        "memory": len(memory),
+        "corpus": sum(
+            1
+            for item in references
+            if str(item.get("source_id") or item.get("source_node_id") or "") not in resource_ids
+        ),
+        "references": len(resource_references),
+        "evidence_units": len(evidence),
+        "gaps": len(gaps),
+        "previous_outputs": 1 if previous_synthesis else 0,
+    }
+
+
+def _versions(
+    selected_nodes: Sequence[Mapping[str, Any]],
+    selected_edges: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    node_projections = [node_semantic_projection(node) for node in selected_nodes]
+    edge_projections = [edge_semantic_projection(edge) for edge in selected_edges]
+    node_versions = [
+        {
+            "id": projection["id"],
+            "version": int(node.get("version") or 1),
+            "semantic_type": projection["semantic_type"],
+            "semantic_hash": _node_semantic_hash(node),
+        }
+        for projection, node in zip(node_projections, selected_nodes, strict=True)
+    ]
+    edge_versions = [
+        {"id": projection["id"], "semantic_hash": _edge_semantic_hash(edge)}
+        for projection, edge in zip(edge_projections, selected_edges, strict=True)
+    ]
+    resource_versions = [
+        {
+            "id": projection["id"],
+            "version": node_versions[index]["version"],
+            "content_hash": projection["content_hash"],
+            "semantic_hash": node_versions[index]["semantic_hash"],
+        }
+        for index, projection in enumerate(node_projections)
+        if projection["semantic_type"] == "RESOURCE"
+    ]
+    return node_projections, edge_projections, node_versions, edge_versions, resource_versions
+
+
 class CognitiveContextAssembler:
     """Assemble bounded graph context with a stable, auditable identity."""
 
@@ -270,6 +468,45 @@ class CognitiveContextAssembler:
         self.memory_provider = memory_provider or EmptyContextProvider()
         self.corpus_provider = corpus_provider or EmptyContextProvider()
         self.evidence_resolver = evidence_resolver or EvidenceResolver()
+
+    def _evidence(
+        self,
+        selected_nodes: Sequence[Mapping[str, Any]],
+        ranked: Sequence[retrieval.ScoredNode],
+        node_by_id: Mapping[str, Mapping[str, Any]],
+        *,
+        query: str,
+        retrieval_query: str,
+    ) -> dict[str, Any]:
+        """Resource evidence first (EvidenceResolver), then the diverse graph retrieval, under one budget."""
+
+        resolved = self.evidence_resolver.resolve(selected_nodes, query=query)
+        selected_ids = {str(node.get("id")) for node in selected_nodes}
+        pool_ranked = [item for item in ranked if item.node_id in selected_ids and item.score > 0]
+        budget = CONTEXT_SEGMENT_BUDGETS["evidence"]
+        resource_budget = budget // 2 if pool_ranked else budget
+        resource_evidence, resource_remaining, resource_truncated = _fit_records(
+            resolved["evidence"],
+            budget=resource_budget,
+            text_key="excerpt",
+        )
+        retrieved_budget = budget - (resource_budget - resource_remaining)
+        selection = retrieval.select_diverse(
+            pool_ranked,
+            budget_chars=retrieved_budget * 4,
+            max_items=max(0, min(_MAX_RETRIEVED_EVIDENCE, _MAX_EVIDENCE_ITEMS - len(resource_evidence))),
+            max_excerpt_chars=_MAX_EXCERPT_CHARS,
+        )
+        retrieved, retrieved_truncated = _retrieved_evidence(selection, budget_tokens=retrieved_budget)
+        evidence = _assign_evidence_ids(resource_evidence + retrieved, node_by_id)
+        return {
+            "references": resolved["references"],
+            "gaps": resolved["gaps"],
+            "evidence": evidence,
+            "truncated": resource_truncated or retrieved_truncated,
+            "diagnostics": retrieval.diagnostics(retrieval_query, ranked, selection)
+            | {"budget_tokens": retrieved_budget, "resource_evidence": len(resource_evidence)},
+        }
 
     def assemble(
         self,
@@ -290,78 +527,38 @@ class CognitiveContextAssembler:
             if node_id in node_by_id and str(node_by_id[node_id].get("semantic_type") or "") != "OUTPUT"
         ]
         root_ids = [str(node.get("id")) for node in roots]
-        root_text = " ".join(_node_text(node) for node in roots)
-        root_terms = _tokens(root_text)
-        direct_ids = set(root_ids)
-        for edge in edges:
-            source = str(edge.get("source_node_id"))
-            target = str(edge.get("target_node_id"))
-            if source in direct_ids:
-                direct_ids.add(target)
-            if target in direct_ids:
-                direct_ids.add(source)
-
-        scored: list[tuple[int, str, Mapping[str, Any]]] = []
-        for node_id, node in node_by_id.items():
-            if str(node.get("semantic_type") or "") == "OUTPUT":
-                continue
-            text = _node_text(node)
-            overlap = sum(1 for term in root_terms if term in text or any(term in candidate for candidate in _tokens(text)))
-            score = 0
-            if node_id in root_ids:
-                score = 1000
-            elif node_id in direct_ids:
-                score = 700
-            elif str(node.get("semantic_type")) == "RESOURCE":
-                # Resources are resolved by bounded evidence relevance below;
-                # do not discard a fetched source merely because its title is
-                # different from the user's wording.
-                score = 80
-            elif overlap:
-                score = 100 + overlap
-            if score:
-                scored.append((score, node_id, node))
-        scored.sort(key=lambda item: (-item[0], item[1]))
-        selected_nodes = _deduplicate_nodes([item[2] for item in scored[:_MAX_NODES]])
+        retrieval_query = _root_query_text(roots)
+        non_root = [node for node_id, node in node_by_id.items() if node_id not in set(root_ids)]
+        ranked = retrieval.rank_nodes(
+            retrieval_query,
+            [node for node in non_root if str(node.get("semantic_type") or "") != "RESOURCE"],
+            root_ids=root_ids,
+            edges=edges,
+            # Evidence comes from source content: non-root IDEA nodes are questions or hypotheses, not sources.
+            excluded_types=retrieval.EVIDENCE_EXCLUDED_TYPES,
+        )
+        selected_nodes = _candidate_pool(
+            roots, ranked, [node for node in non_root if str(node.get("semantic_type") or "") == "RESOURCE"]
+        )
         selected_ids = {str(node.get("id")) for node in selected_nodes}
-        selected_edges = [
-            edge
-            for edge in edges
-            if str(edge.get("source_node_id")) in selected_ids
-            and str(edge.get("target_node_id")) in selected_ids
-        ]
-        selected_edges = sorted(selected_edges, key=lambda edge: str(edge.get("id") or ""))[:_MAX_EDGES]
+        selected_edges = sorted(
+            (
+                edge
+                for edge in edges
+                if str(edge.get("source_node_id")) in selected_ids and str(edge.get("target_node_id")) in selected_ids
+            ),
+            key=lambda edge: str(edge.get("id") or ""),
+        )[:_MAX_EDGES]
 
         query = " ".join(str(node.get("title") or "") for node in roots).strip()
-        memory_refs = [
-            {
-                "source_id": str(reference.get("source_id") or reference.get("id") or ""),
-                "title": str(reference.get("title") or "Memory"),
-                "summary": str(reference.get("summary") or reference.get("content") or "")[:800],
-                "content_hash": reference.get("content_hash") or reference.get("source_hash"),
-                "context_role": "MEMORY",
-            }
-            for reference in _references(self.memory_provider, workspace_id, query)
-        ]
-        corpus_refs = [
-            {
-                "source_id": str(reference.get("source_id") or reference.get("id") or ""),
-                "title": str(reference.get("title") or "Corpus source"),
-                "summary": str(reference.get("summary") or reference.get("content") or "")[:800],
-                "content_hash": reference.get("content_hash") or reference.get("source_hash"),
-                "context_role": "REFERENCE_ONLY",
-            }
-            for reference in _references(self.corpus_provider, workspace_id, query)
-        ]
-        resolved_sources = self.evidence_resolver.resolve(selected_nodes, query=query)
-        resource_references = resolved_sources["references"]
-        evidence = resolved_sources["evidence"]
-        gaps = resolved_sources["gaps"]
-        bounded_evidence, _, evidence_truncated = _fit_records(
-            evidence,
-            budget=CONTEXT_SEGMENT_BUDGETS["evidence"],
-            text_key="excerpt",
+        memory_refs = _context_refs(self.memory_provider, workspace_id, query, role="MEMORY", default_title="Memory")
+        corpus_refs = _context_refs(
+            self.corpus_provider, workspace_id, query, role="REFERENCE_ONLY", default_title="Corpus source"
         )
+        resolved = self._evidence(selected_nodes, ranked, node_by_id, query=query, retrieval_query=retrieval_query)
+        resource_references = resolved["references"]
+        bounded_evidence = resolved["evidence"]
+        gaps = resolved["gaps"]
         bounded_memory, _, memory_truncated = _fit_records(
             memory_refs,
             budget=CONTEXT_SEGMENT_BUDGETS["memory"],
@@ -372,109 +569,45 @@ class CognitiveContextAssembler:
             budget=CONTEXT_SEGMENT_BUDGETS["references"],
             text_key="title",
         )
-        node_projections = [node_semantic_projection(node) for node in selected_nodes]
-        edge_projections = [edge_semantic_projection(edge) for edge in selected_edges]
-        node_versions = [
-            {
-                "id": projection["id"],
-                "version": int(node_by_id[projection["id"]].get("version") or 1),
-                "semantic_type": projection["semantic_type"],
-                "semantic_hash": _node_semantic_hash(node_by_id[projection["id"]]),
-            }
-            for projection in node_projections
-        ]
-        edge_versions = [
-            {"id": projection["id"], "semantic_hash": _edge_semantic_hash(edge)}
-            for projection, edge in zip(edge_projections, selected_edges, strict=True)
-        ]
-        resource_versions = [
-            {
-                "id": projection["id"],
-                "version": int(node_by_id[projection["id"]].get("version") or 1),
-                "content_hash": projection["content_hash"],
-                "semantic_hash": node_versions[index]["semantic_hash"],
-            }
-            for index, projection in enumerate(node_projections)
-            if projection["semantic_type"] == "RESOURCE"
-        ]
+        node_projections, edge_projections, node_versions, edge_versions, resource_versions = _versions(
+            selected_nodes, selected_edges
+        )
+        common = {
+            "memory_refs": bounded_memory,
+            "corpus_refs": bounded_references,
+            "resource_references": resource_references,
+            "evidence": bounded_evidence,
+            "gaps": gaps,
+            "prior_synthesis_version": prior_synthesis_version,
+            "intent": intent,
+            "action": action,
+        }
         source_snapshot: dict[str, Any] = {
             "root_node_ids": root_ids,
             "node_versions": node_versions,
             "edge_versions": edge_versions,
             "resource_versions": resource_versions,
-            "memory_refs": bounded_memory,
-            "corpus_refs": bounded_references,
-            "resource_references": resource_references,
-            "evidence": bounded_evidence,
-            "gaps": gaps,
-            "prior_synthesis_version": prior_synthesis_version,
-            "intent": intent,
-            "action": action,
+            **common,
         }
-        fingerprint_payload = {
-            "root_node_ids": root_ids,
-            "nodes": node_projections,
-            "edges": edge_projections,
-            "memory_refs": bounded_memory,
-            "corpus_refs": bounded_references,
-            "resource_references": resource_references,
-            "evidence": bounded_evidence,
-            "gaps": gaps,
-            "prior_synthesis_version": prior_synthesis_version,
-            "intent": intent,
-            "action": action,
-        }
-        source_summary = {
-            "concepts": sum(1 for node in selected_nodes if str(node.get("semantic_type")) == "CONCEPT"),
-            "resources": sum(1 for node in selected_nodes if str(node.get("semantic_type")) == "RESOURCE"),
-            "experts": sum(1 for node in selected_nodes if str(node.get("semantic_type")) == "EXPERT"),
-            "actions": sum(1 for node in selected_nodes if str(node.get("semantic_type")) == "ACTION"),
-            "memory": len(bounded_memory),
-            "corpus": sum(
-                1
-                for item in bounded_references
-                if str(item.get("source_id") or item.get("source_node_id") or "")
-                not in {
-                    str(reference.get("source_id") or reference.get("source_node_id") or "")
-                    for reference in resource_references
-                }
-            ),
-            "references": len(resource_references),
-            "evidence_units": len(bounded_evidence),
-            "gaps": len(gaps),
-            "previous_outputs": 1 if previous_synthesis else 0,
-        }
-        provider_candidates = [
-            node
-            for node in selected_nodes
-            if str(node.get("semantic_type") or "") not in {"RESOURCE", "OUTPUT"}
-        ]
-        provider_records = [
-            {
-                "id": str(node.get("id") or ""),
-                "semantic_type": str(node.get("semantic_type") or ""),
-                "context_role": _context_role(node),
-                "title": str(node.get("title") or "")[:240],
-                "content": str(node.get("content") or "")[:4_000],
-                "provenance": str(node.get("provenance") or ""),
-                "assurance_status": str(node.get("assurance_status") or ""),
-                "version": int(node.get("version") or 1),
-            }
-            for node in provider_candidates
-        ]
-        root_records = [item for item in provider_records if item["id"] in root_ids]
-        concept_records = [item for item in provider_records if item["id"] not in root_ids]
+        fingerprint_payload = {"root_node_ids": root_ids, "nodes": node_projections, "edges": edge_projections, **common}
+        root_records = [_provider_record(node) for node in roots]
         bounded_roots, _, root_truncated = _fit_records(
-            root_records,
+            root_records[:1],
             budget=CONTEXT_SEGMENT_BUDGETS["question"],
             text_key="content",
         )
         bounded_concepts, _, concepts_truncated = _fit_records(
-            concept_records,
+            root_records[1:],
             budget=CONTEXT_SEGMENT_BUDGETS["concepts"],
             text_key="content",
         )
-        prompt_nodes = bounded_roots + bounded_concepts
+        evidence_stubs = [
+            _evidence_stub(node_by_id[str(item["source_node_id"])], str(item["evidence_id"]))
+            for item in bounded_evidence
+            if str(node_by_id.get(str(item.get("source_node_id") or ""), {}).get("semantic_type") or "RESOURCE")
+            != "RESOURCE"
+        ]
+        prompt_nodes = bounded_roots + bounded_concepts + evidence_stubs
         prior_payload: dict[str, Any] | None = None
         prior_truncated = False
         if previous_synthesis:
@@ -492,13 +625,7 @@ class CognitiveContextAssembler:
             "segment_budgets": dict(CONTEXT_SEGMENT_BUDGETS),
             "estimated_input_tokens": _estimate_tokens(
                 _canonical(
-                    {
-                        "nodes": prompt_nodes,
-                        "evidence": bounded_evidence,
-                        "references": bounded_references,
-                        "memory": bounded_memory,
-                        "prior": prior_payload,
-                    }
+                    _prompt_projection(prompt_nodes, bounded_evidence, bounded_references, bounded_memory, prior_payload)
                 )
             ),
             "evidence_spans": len(bounded_evidence),
@@ -507,7 +634,7 @@ class CognitiveContextAssembler:
             "references_included": len(bounded_references),
             "truncation": {
                 "question": root_truncated,
-                "evidence": evidence_truncated,
+                "evidence": bool(resolved["truncated"]),
                 "concepts": concepts_truncated,
                 "prior_synthesis": prior_truncated,
                 "memory": memory_truncated,
@@ -527,14 +654,23 @@ class CognitiveContextAssembler:
             "corpus_refs": bounded_references,
             "resource_references": resource_references,
             "evidence": bounded_evidence,
-            "evidence_state": resolved_sources.get("evidence_state", "NO_SOURCE"),
+            "evidence_state": evidence_state(resource_references, bounded_evidence),
             "gaps": gaps,
             "previous_synthesis": prior_payload,
             "source_snapshot": source_snapshot,
             "context_fingerprint": _digest(fingerprint_payload),
-            "source_summary": source_summary,
+            "source_summary": _source_summary(
+                selected_nodes,
+                memory=bounded_memory,
+                references=bounded_references,
+                resource_references=resource_references,
+                evidence=bounded_evidence,
+                gaps=gaps,
+                previous_synthesis=previous_synthesis,
+            ),
             "context_budget": dict(CONTEXT_SEGMENT_BUDGETS) | {"total": DEFAULT_CONTEXT_TOKEN_BUDGET},
             "context_receipt": context_receipt,
+            "retrieval": resolved["diagnostics"],
         }
 
 
