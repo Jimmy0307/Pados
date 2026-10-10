@@ -62,16 +62,21 @@ test('whole PADOS_HOME satisfies the Windows ACL contract (root, data, logs, sta
     assert.ok(entries.length >= 1, `${target}: no ACL entries parsed`);
     const verdict = classifyWindowsAcl(entries.map((entry) => entry.slice(0, entry.indexOf(':('))), me);
     assert.deepEqual(verdict, { OWNER_PRESENT: 'YES', BROAD_PRINCIPAL_PRESENT: 'NO', ONLY_ALLOWED_TRUSTED_PRINCIPALS: 'YES' },
-      `${target}: ACL violates the owner(+SYSTEM) contract: ${entries.join(' | ')}`);
+      `${target}: ACL violates the owner(+OS-trusted) contract: ${entries.join(' | ')}`);
   }
 });
 
 // The Windows ACL contract itself, on synthetic icacls principals (runs on every platform).
-test('Windows ACL contract: owner, optionally SYSTEM, nothing else', () => {
+test('Windows ACL contract: owner, optionally SYSTEM / Administrators, nothing else', () => {
   const ok = { OWNER_PRESENT: 'YES', BROAD_PRINCIPAL_PRESENT: 'NO', ONLY_ALLOWED_TRUSTED_PRINCIPALS: 'YES' };
   assert.deepEqual(classifyWindowsAcl(['HOST\\runneradmin'], OWNER), ok);
   assert.deepEqual(classifyWindowsAcl(['HOST\\runneradmin', 'NT AUTHORITY\\SYSTEM'], OWNER), ok);
   assert.deepEqual(classifyWindowsAcl(['host\\RunnerAdmin', '*S-1-5-18'], OWNER), ok);
+  // The exact ACL observed on the elevated GitHub-hosted Windows runner (standard user-profile ACL).
+  assert.deepEqual(classifyWindowsAcl(['NT AUTHORITY\\SYSTEM', 'BUILTIN\\Administrators', 'HOST\\runneradmin'], OWNER), ok);
+  assert.deepEqual(classifyWindowsAcl(['*S-1-5-18', '*S-1-5-32-544', 'HOST\\runneradmin'], OWNER), ok);
+  // OS-trusted principals never stand in for the owner.
+  assert.equal(classifyWindowsAcl(['NT AUTHORITY\\SYSTEM', 'BUILTIN\\Administrators'], OWNER).OWNER_PRESENT, 'NO');
   // The owner is the exact account: a same-named account of another domain/host is not the owner.
   assert.deepEqual(classifyWindowsAcl(['EVIL\\runneradmin'], OWNER),
     { OWNER_PRESENT: 'NO', BROAD_PRINCIPAL_PRESENT: 'NO', ONLY_ALLOWED_TRUSTED_PRINCIPALS: 'NO' });
@@ -104,9 +109,9 @@ test('Windows ACL contract catches a broad grant re-added to a real PADOS_HOME',
   assert.equal(verdict.ONLY_ALLOWED_TRUSTED_PRINCIPALS, 'NO');
 });
 
-test('Windows ACL contract rejects unknown principals (fail closed), including Administrators', () => {
-  for (const other of ['HOST\\someone-else', 'BUILTIN\\Administrators', 'CREATOR OWNER', '*S-1-5-21-1-2-3-1001',
-    'SYSTEM', 'HOST\\SYSTEM']) {
+test('Windows ACL contract rejects unknown principals (fail closed), incl. unqualified/foreign trusted names', () => {
+  for (const other of ['HOST\\someone-else', 'CREATOR OWNER', '*S-1-5-21-1-2-3-1001', 'SYSTEM', 'HOST\\SYSTEM',
+    'Administrators', 'HOST\\Administrators', 'BUILTIN\\Power Users', 'BUILTIN\\Remote Desktop Users']) {
     assert.equal(classifyWindowsAcl(['HOST\\runneradmin', other], OWNER).ONLY_ALLOWED_TRUSTED_PRINCIPALS, 'NO', other);
   }
 });

@@ -64,11 +64,17 @@ function windowsPrincipal() {
 }
 
 // Windows ACL contract for PADOS_HOME (review R-6). PADOS grants only the current account; the effective ACL
-// may additionally hold NT AUTHORITY\SYSTEM (S-1-5-18), which Windows and hosted images keep on user profile
-// paths and which already has full control of the machine. Nothing else is acceptable: broad identities are
-// named explicitly and any other or unrecognised principal fails closed too.
-// Only the qualified name or the well-known SID: a bare "SYSTEM" could be an ordinary account of that name.
-const WINDOWS_TRUSTED_SYSTEM = Object.freeze(['nt authority\\system', '*s-1-5-18']);
+// may additionally hold the machine's OS-trusted principals NT AUTHORITY\SYSTEM (S-1-5-18) and
+// BUILTIN\Administrators (S-1-5-32-544). Both are on every Windows user profile (%LOCALAPPDATA%, the default
+// PADOS_HOME parent), an elevated (UAC-off) administrator such as a hosted runner keeps them explicitly, and
+// both already control the machine (local administrators hold take-ownership/backup privileges), so their
+// ACEs grant nothing new; removing them would only break OS backup/AV tooling. Nothing else is acceptable:
+// broad identities are named explicitly and any other or unrecognised principal fails closed too.
+// Only qualified names or well-known SIDs: a bare "SYSTEM" could be an ordinary account of that name.
+const WINDOWS_TRUSTED_SYSTEM = Object.freeze([
+  'nt authority\\system', '*s-1-5-18',
+  'builtin\\administrators', '*s-1-5-32-544',
+]);
 const WINDOWS_BROAD_PRINCIPALS = Object.freeze([
   'everyone', '*s-1-1-0',
   'builtin\\users', 'users', '*s-1-5-32-545',
