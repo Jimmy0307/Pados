@@ -54,8 +54,7 @@ def _prepare(connection: dict[str, str], recreate: bool) -> None:
     from psycopg.conninfo import make_conninfo
 
     def conninfo(database: str) -> str:
-        return make_conninfo(host=connection["host"], port=connection["port"], user=connection["user"],
-                             password=connection["password"], dbname=database)
+        return make_conninfo(dbname=database, **connection)  # host, port, user and the password
 
     with psycopg.connect(conninfo("postgres"), autocommit=True) as admin:
         for database in DATABASES:

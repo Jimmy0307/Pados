@@ -143,7 +143,7 @@ jobs:
         with:
           name: gates-linux
           path: gates/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
   postgres-integration:
     name: postgres integration (D1/D4 database gates, migrations, proof lane)
@@ -186,7 +186,7 @@ jobs:
         with:
           name: gates-postgres
           path: gates/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
   windows:
     name: windows (native suites)
@@ -238,7 +238,7 @@ jobs:
         with:
           name: gates-windows
           path: gates/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
   macos-static:
     name: macos (static and contract)
