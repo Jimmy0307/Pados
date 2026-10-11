@@ -66,15 +66,14 @@ jobs:
           REVIEW_OUTCOME: ${{ steps.review.outcome }}
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           if [ "$REVIEW_OUTCOME" = "success" ]; then
             echo "DEPENDENCY_REVIEW=PASS" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          status=$(curl -sS -o review-probe.json -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPOSITORY/dependency-graph/compare/$BASE_SHA...$HEAD_SHA")
-          if [ "$status" = "403" ] && grep -qi "dependency graph" review-probe.json; then
+          # The SBOM endpoint answers 200 whenever the Dependency graph is enabled; 404 means it is disabled.
+          status=$(curl -sS -m 30 -o review-probe.json -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPOSITORY/dependency-graph/sbom" || echo 000)
+          if [ "$status" = "404" ]; then
             echo "::warning title=DEPENDENCY_REVIEW=ENVIRONMENT_BLOCKER::Dependency graph is disabled for this repository; dependency review did not run. Enable it in Settings > Code security."
             echo "DEPENDENCY_REVIEW=ENVIRONMENT_BLOCKER (Dependency graph disabled; review did not run)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
