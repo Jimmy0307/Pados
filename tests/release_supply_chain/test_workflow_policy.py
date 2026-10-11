@@ -64,6 +64,9 @@ def test_runner_policy_constants() -> None:
 def test_every_third_party_action_is_sha_pinned_with_version_comment(path: Path) -> None:
     lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if "uses:" in line]
     assert lines
+    # Local reusable workflows (./.github/workflows/*.yml) are repository code, inspected recursively by the
+    # policy checker; only third-party actions need a SHA pin.
+    lines = [line for line in lines if not line.split("uses:", 1)[1].strip().startswith("./")]
     for line in lines:
         value, _, comment = line.split("uses:", 1)[1].strip().partition(" # ")
         assert len(value.rsplit("@", 1)[1]) == 40 and all(c in "0123456789abcdef" for c in value.rsplit("@", 1)[1])
@@ -101,6 +104,14 @@ def test_pr_triggered_workflows_use_hosted_runners_and_no_secrets() -> None:
             continue
         assert "secrets." not in text and "secrets[" not in text
         for job in document["jobs"].values():
+            if "uses" in job:  # a local reusable workflow: its own jobs must satisfy the same rule
+                called = ROOT / str(job["uses"])[2:]
+                assert str(job["uses"]).startswith("./.github/workflows/") and called.is_file()
+                called_text = called.read_text(encoding="utf-8")
+                assert "secrets." not in called_text and "secrets[" not in called_text
+                for called_job in load(called_text)["jobs"].values():
+                    assert called_job["runs-on"] in {"ubuntu-latest", "windows-latest", "macos-latest"}
+                continue
             assert job["runs-on"] in {"ubuntu-latest", "windows-latest", "macos-latest"}
 
 

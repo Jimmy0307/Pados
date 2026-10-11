@@ -2,31 +2,14 @@
 # tarballs and run the install acceptance against them. CI IS NOT PADOS AUTHORITY: no publish step, no secrets,
 # no deploy; tarballs stay on the ephemeral runner (short-lived artifact). The CLI only ever sees a temporary npm
 # prefix, a temporary PADOS_HOME and, on Linux, the disposable service database below.
+# Called only from ci.yml (workflow_call) after the test jobs pass on the same commit, so the packaged tree is the
+# tested tree. Every package set carries provenance-<platform>.json (SOURCE_COMMIT, SOURCE_TREE, BUILD_PLATFORM,
+# BUILD_TIMESTAMP, PACKAGE_SHA256) and SHA256SUMS-<platform>.txt; recording fails if the checkout is not exactly
+# the commit under test or any tracked file differs from it.
 name: packaging
 on:
-  push:
-    branches: ["**"]
-    paths:
-      - "packages/**"
-      - "src/pados/install/**"
-      - "tests/install/**"
-      - "migrations/**"
-      - "pyproject.toml"
-      - "requirements.lock"
-      - ".github/workflows/packaging.yml"
-  pull_request:
-    paths:
-      - "packages/**"
-      - "src/pados/install/**"
-      - "tests/install/**"
-      - "migrations/**"
-      - "pyproject.toml"
-      - "requirements.lock"
-      - ".github/workflows/packaging.yml"
+  workflow_call:
 permissions: {}
-concurrency:
-  group: packaging-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 jobs:
   linux:
     name: linux-x64 (build, pack, install acceptance with database)
@@ -78,12 +61,23 @@ jobs:
           PADOS_ACCEPTANCE_TARBALLS: dist-npm
           PADOS_ACCEPTANCE_DATABASE: "1"
         run: node --test packages/cli/test/acceptance/install.acceptance.js
-      - name: Keep tarballs for inspection (not a release)
+      - name: Record package provenance (source commit and tree, SHA-256 manifest)
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: python scripts/release/package_provenance.py record --platform linux-x64 --dist dist-npm --expected-commit "$SOURCE_COMMIT"
+      - name: Verify package provenance
+        run: python scripts/release/package_provenance.py verify --platform linux-x64 --dist dist-npm
+      - name: Keep packages for inspection (release candidate input, not a release)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: npm-tarballs-linux-x64
-          path: dist-npm/*.tgz*
-          retention-days: 7
+          name: npm-packages-linux-x64
+          path: |
+            dist-npm/*.tgz*
+            dist-npm/provenance-linux-x64.json
+            dist-npm/SHA256SUMS-linux-x64.txt
+            dist-npm/pack-report*.json
+          if-no-files-found: error
+          retention-days: 30
   windows:
     name: win32-x64 (build, pack, install acceptance without database)
     runs-on: windows-latest
@@ -120,6 +114,24 @@ jobs:
         env:
           PADOS_ACCEPTANCE_TARBALLS: dist-npm
         run: node --test packages/cli/test/acceptance/install.acceptance.js
+      - name: Record package provenance (source commit and tree, SHA-256 manifest)
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: python scripts/release/package_provenance.py record --platform win32-x64 --dist dist-npm --expected-commit "$SOURCE_COMMIT"
+      - name: Verify package provenance
+        run: python scripts/release/package_provenance.py verify --platform win32-x64 --dist dist-npm
+      - name: Keep packages for inspection (release candidate input, not a release)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-packages-win32-x64
+          path: |
+            dist-npm/*.tgz*
+            dist-npm/provenance-win32-x64.json
+            dist-npm/SHA256SUMS-win32-x64.txt
+            dist-npm/pack-report*.json
+          if-no-files-found: error
+          retention-days: 30
   macos-arm64:
     # Prepared, disabled: @pados-ai/runtime-darwin-arm64 is design-ready (pinned CPython archive in
     # packages/scripts/build_runtime.py) but not built or accepted on hardware in this release. Enable after

@@ -53,9 +53,34 @@ jobs:
         with:
           persist-credentials: false
       - name: Dependency review
+        id: review
+        continue-on-error: true
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
+      # The action cannot run when the repository's Dependency graph is disabled. That is a repository
+      # setting, not a dependency finding: it is reported as DEPENDENCY_REVIEW=ENVIRONMENT_BLOCKER (annotation
+      # and job summary on every run) instead of a permanently red check. Any other failure fails the job.
+      - name: Classify dependency review outcome
+        env:
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$REVIEW_OUTCOME" = "success" ]; then
+            echo "DEPENDENCY_REVIEW=PASS" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          status=$(curl -sS -o review-probe.json -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPOSITORY/dependency-graph/compare/$BASE_SHA...$HEAD_SHA")
+          if [ "$status" = "403" ] && grep -qi "dependency graph" review-probe.json; then
+            echo "::warning title=DEPENDENCY_REVIEW=ENVIRONMENT_BLOCKER::Dependency graph is disabled for this repository; dependency review did not run. Enable it in Settings > Code security."
+            echo "DEPENDENCY_REVIEW=ENVIRONMENT_BLOCKER (Dependency graph disabled; review did not run)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "DEPENDENCY_REVIEW=FAIL (probe HTTP $status)" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
   secret-scan:
     name: secret scan and CI policy
     runs-on: ubuntu-latest
