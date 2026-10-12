@@ -1,0 +1,161 @@
+# PADOS RC CI (Layer 2): the only workflow that packages. Runs on manual dispatch or on a push to an rc/** branch,
+# never on a pull request. Order: the full PR CI (called, same commit), the PostgreSQL integration gate and the
+# fresh-install migration gate; only when all pass, packaging for win32-x64 and linux-x64 (packaging.yml, which
+# refuses to run outside an RC event); finally the RC manifest binds the packages to the tested commit and tree.
+# The RC artifact (pados-rc-artifact) is the only input live acceptance (Layer 3) accepts. No publish, no deploy,
+# no secrets: release promotion stays a manual decision after live acceptance (docs/supply_chain/CICD_V1.md).
+# CI IS NOT PADOS AUTHORITY. CI SUCCESS != DEPLOYMENT AUTHORIZATION. BUILD SUCCESS != TRUST.
+name: rc-ci
+on:
+  workflow_dispatch:
+  push:
+    branches: ["rc/**"]
+permissions: {}
+concurrency:
+  group: rc-ci-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  checks:
+    name: pr-ci checks (same commit)
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+  postgres-integration:
+    name: postgres integration (D1/D4 database gates, migrations, proof lane)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: pados
+          POSTGRES_USER: pados
+          POSTGRES_PASSWORD: ci-only-disposable
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U pados" --health-interval 5s --health-retries 20
+    env:
+      PADOS_DB_PASSWORD: ci-only-disposable
+      PADOS_DB_HOST: 127.0.0.1
+      PADOS_DB_PORT: "5432"
+      PADOS_DB_USER: pados
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install locked dependencies
+        run: python -m pip install -c requirements.lock -e ".[dev]"
+      # Disposable databases on the service container only; every suite must run with zero skips and at
+      # least its accepted test count (scripts/release/postgres_integration_gate.py).
+      - name: PostgreSQL integration gate
+        run: python scripts/release/postgres_integration_gate.py gates --recreate
+      - name: Keep gate reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rc-gates-postgres
+          path: gates/
+          if-no-files-found: warn
+          retention-days: 30
+  fresh-install-migration:
+    name: fresh-install migration gate (declared == Alembic == migrated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: pados
+          POSTGRES_USER: pados
+          POSTGRES_PASSWORD: ci-only-disposable
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U pados" --health-interval 5s --health-retries 20
+    env:
+      PADOS_ENV: test
+      PADOS_DB_PASSWORD: ci-only-disposable
+      PADOS_DB_HOST: 127.0.0.1
+      PADOS_DB_PORT: "5432"
+      PADOS_DB_USER: pados
+      PADOS_DB_NAME: pados_ci_fresh_operational
+      PADOS_OPERATIONAL_DATABASE_NAME: pados_ci_fresh_operational
+      PADOS_CORPUS_DATABASE_NAME: pados_ci_fresh_corpus
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install locked dependencies
+        run: python -m pip install -c requirements.lock -e ".[dev]"
+      # Bootstraps two new disposable lane databases through the installer's own upgrade path.
+      - name: Migration head gate (fresh install)
+        run: mkdir -p gates && python scripts/release/migration_gate.py gates/migration-fresh-install.json --fresh-install
+      - name: Keep gate reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rc-gates-migration
+          path: gates/
+          if-no-files-found: warn
+          retention-days: 30
+  packaging:
+    name: packaging (RC only, after every gate passed on the same commit)
+    needs: [checks, postgres-integration, fresh-install-migration]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/packaging.yml
+  rc-manifest:
+    name: rc manifest (packages bound to the tested commit and tree)
+    needs: [packaging]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Download linux-x64 packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-packages-linux-x64
+          path: rc/linux-x64
+      - name: Download win32-x64 packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-packages-win32-x64
+          path: rc/win32-x64
+      # Fails unless both provenance statements name this run's commit and the checkout's tree, every package
+      # hash matches, and the tracked tree is unmodified.
+      - name: Write and verify the RC manifest
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+          RC_WORKFLOW: ${{ github.workflow }}
+          RC_RUN_ID: ${{ github.run_id }}
+          RC_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RC_EVENT: ${{ github.event_name }}
+          RC_REF: ${{ github.ref }}
+        run: python scripts/release/rc_manifest.py write --rc-dir rc --expected-commit "$SOURCE_COMMIT"
+      - name: Upload the RC artifact (live acceptance input; not a release)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pados-rc-artifact
+          path: rc/
+          if-no-files-found: error
+          retention-days: 30

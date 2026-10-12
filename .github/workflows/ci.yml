@@ -1,17 +1,17 @@
-# PADOS CI: lint, typecheck, tests, invariant gates and package build on GitHub-hosted ephemeral runners.
-# Layer 1 (every push / PR): ruff, mypy, unit/contract tests, D1/D2/D4 regression gates, migration-head gate,
-# secret scan, public-export hygiene, npm CLI tests. Layer 2 (same run): PostgreSQL integration gate and the
-# packaging workflow (called below with needs:, so the packaged tree is the tree these jobs tested).
-# Layer 3 (live acceptance on real hardware) is manual and never runs here: docs/supply_chain/CICD_V1.md.
+# PADOS PR CI (Layer 1): fast, deterministic checks on every pull request and every branch push.
+# Lint, types, unit and contract tests, D1/D2/D4 regression gates, the offline migration-head gate, secret scan,
+# public-export hygiene and npm CLI tests. PR CI NEVER PACKAGES: packaging, the PostgreSQL integration gate and the
+# fresh-install migration gate run only in RC CI (rc-ci.yml), which calls this workflow first (workflow_call).
 # CI IS NOT PADOS AUTHORITY. CI SUCCESS != DEPLOYMENT AUTHORIZATION. BUILD SUCCESS != TRUST.
-# No repository secrets, no deploy, no PADOS semantic state; the only database is the
-# disposable service container below. Policy: docs/supply_chain/SECURE_CICD_V1.md and
+# No repository secrets, no deploy, no PADOS semantic state; the only database is the disposable service
+# container below. Policy: docs/supply_chain/SECURE_CICD_V1.md, docs/supply_chain/CICD_V1.md and
 # src/pados/release/workflow_policy.py (enforced by tests/release_supply_chain).
-name: ci
+name: pr-ci
 on:
   push:
-    branches: ["**"]
+    branches-ignore: ["rc/**"]
   pull_request:
+  workflow_call:
 permissions: {}
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -96,16 +96,10 @@ jobs:
           python -m alembic upgrade heads
           PADOS_DB_NAME=pados_local_runtime python -m alembic upgrade "$(python -c 'from pados.config import OPERATIONAL_REVISION_DEFAULT as r; print(r)')"
           PADOS_DB_NAME=pados_corpus_runtime python -m alembic upgrade "$(python -c 'from pados.config import CORPUS_REVISION_DEFAULT as r; print(r)')"
-      # Declared operational heads == Alembic script heads == heads a fresh install actually migrates to
-      # (through the installer's own upgrade path, on two fresh disposable lane databases).
-      - name: Migration head gate (declared, Alembic, fresh install)
-        env:
-          PADOS_ENV: test
-          PADOS_DB_USER: pados
-          PADOS_DB_NAME: pados_ci_fresh_operational
-          PADOS_OPERATIONAL_DATABASE_NAME: pados_ci_fresh_operational
-          PADOS_CORPUS_DATABASE_NAME: pados_ci_fresh_corpus
-        run: mkdir -p gates && python scripts/release/migration_gate.py gates/migration-gate.json --fresh-install
+      # Declared lane revisions (pados.config) == Alembic script heads. The fresh-install half of this gate runs
+      # in RC CI (rc-ci.yml), against two new disposable lane databases.
+      - name: Migration head gate (declared, Alembic)
+        run: mkdir -p gates && python scripts/release/migration_gate.py gates/migration-gate.json
       # Accepted RC2 invariants, run by name with skips refused (an env-gated skip is a failure here).
       - name: D1 regression gate (approval subject binding)
         run: python scripts/release/regression_gate.py D1 gates/d1.json --no-skips --min-tests 24 tests/unit/test_rc2_approval_subject.py tests/contract/test_rc2_route_surface_contract.py
@@ -142,49 +136,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gates-linux
-          path: gates/
-          if-no-files-found: warn
-          retention-days: 30
-  postgres-integration:
-    name: postgres integration (D1/D4 database gates, migrations, proof lane)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_DB: pados
-          POSTGRES_USER: pados
-          POSTGRES_PASSWORD: ci-only-disposable
-        ports: ["5432:5432"]
-        options: --health-cmd "pg_isready -U pados" --health-interval 5s --health-retries 20
-    env:
-      PADOS_DB_PASSWORD: ci-only-disposable
-      PADOS_DB_HOST: 127.0.0.1
-      PADOS_DB_PORT: "5432"
-      PADOS_DB_USER: pados
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-      - name: Install locked dependencies
-        run: python -m pip install -c requirements.lock -e ".[dev]"
-      # Disposable databases on the service container only; every suite must run with zero skips and at
-      # least its accepted test count (scripts/release/postgres_integration_gate.py).
-      - name: PostgreSQL integration gate
-        run: python scripts/release/postgres_integration_gate.py gates --recreate
-      - name: Keep gate reports
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: gates-postgres
           path: gates/
           if-no-files-found: warn
           retention-days: 30
@@ -259,9 +210,3 @@ jobs:
         run: python -m pip install -c requirements.lock -e ".[dev]"
       - name: Static and contract checks
         run: ruff check src tests && mypy src && python -m pytest -q tests/compute_node tests/enterprise tests/productization tests/release_supply_chain
-  packaging:
-    name: packaging (after the test jobs pass, same commit)
-    needs: [linux, windows, postgres-integration]
-    permissions:
-      contents: read
-    uses: ./.github/workflows/packaging.yml

@@ -47,7 +47,7 @@ def codes(text: str, name: str = "pr.yml") -> set[PolicyCode]:
 
 
 def test_repository_workflows_pass_policy() -> None:
-    assert [p.name for p in WORKFLOWS] == ["ci.yml", "packaging.yml", "release-candidate.yml", "security.yml"]
+    assert [p.name for p in WORKFLOWS] == ["ci.yml", "packaging.yml", "rc-ci.yml", "release-candidate.yml", "security.yml"]
     assert check_repository(ROOT) == []
 
 

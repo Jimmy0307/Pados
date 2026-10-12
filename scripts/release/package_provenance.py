@@ -79,9 +79,11 @@ def record(platform_name: str, dist: Path, expected_commit: str) -> dict[str, An
                      for path in files],
     }
     (dist / f"provenance-{platform_name}.json").write_text(
-        json.dumps(statement, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        json.dumps(statement, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    # LF on every platform (a Windows text-mode write would emit CRLF, which GNU ``sha256sum -c`` rejects).
     (dist / f"SHA256SUMS-{platform_name}.txt").write_text(
-        "".join(f"{item['PACKAGE_SHA256']}  {item['file']}\n" for item in statement["PACKAGES"]), encoding="utf-8")
+        "".join(f"{item['PACKAGE_SHA256']}  {item['file']}\n" for item in statement["PACKAGES"]),
+        encoding="utf-8", newline="\n")
     return statement
 
 
@@ -95,7 +97,7 @@ def verify(platform_name: str, dist: Path, expected_commit: str | None, expected
         raise ProvenanceError("SOURCE_TREE_MISMATCH", statement["SOURCE_TREE"])
     sums = {}
     for line in (dist / f"SHA256SUMS-{platform_name}.txt").read_text(encoding="utf-8").splitlines():
-        digest, name = line.split("  ", 1)
+        digest, name = line.rstrip("\r").split("  ", 1)  # also reads manifests written before the LF fix
         sums[name] = digest
     recorded = {item["file"]: item["PACKAGE_SHA256"] for item in statement["PACKAGES"]}
     if sums != recorded:

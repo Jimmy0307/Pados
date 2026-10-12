@@ -1,17 +1,20 @@
 # PADOS npm packaging: build the platform runtime payload, run the Node and Python install-glue tests, pack local
-# tarballs and run the install acceptance against them. CI IS NOT PADOS AUTHORITY: no publish step, no secrets,
-# no deploy; tarballs stay on the ephemeral runner (short-lived artifact). The CLI only ever sees a temporary npm
-# prefix, a temporary PADOS_HOME and, on Linux, the disposable service database below.
-# Called only from ci.yml (workflow_call) after the test jobs pass on the same commit, so the packaged tree is the
-# tested tree. Every package set carries provenance-<platform>.json (SOURCE_COMMIT, SOURCE_TREE, BUILD_PLATFORM,
-# BUILD_TIMESTAMP, PACKAGE_SHA256) and SHA256SUMS-<platform>.txt; recording fails if the checkout is not exactly
-# the commit under test or any tracked file differs from it.
+# tarballs and run the install acceptance against them (the fresh-install check of RC CI). CI IS NOT PADOS
+# AUTHORITY: no publish step, no secrets, no deploy; tarballs stay workflow artifacts. The CLI only ever sees a
+# temporary npm prefix, a temporary PADOS_HOME and, on Linux, the disposable service database below.
+# RC ONLY: callable solely through workflow_call from rc-ci.yml after every gate passed on the same commit, and
+# every job refuses to run unless the triggering event is an RC event (manual dispatch or a push to rc/**), so a
+# pull request can never package even if a workflow called this file. Every package set carries
+# provenance-<platform>.json (SOURCE_COMMIT, SOURCE_TREE, BUILD_PLATFORM, BUILD_TIMESTAMP, PACKAGE_SHA256) and
+# SHA256SUMS-<platform>.txt; recording fails if the checkout is not exactly the commit under test or any tracked
+# file differs from it.
 name: packaging
 on:
   workflow_call:
 permissions: {}
 jobs:
   linux:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rc/'))
     name: linux-x64 (build, pack, install acceptance with database)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -79,6 +82,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   windows:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rc/'))
     name: win32-x64 (build, pack, install acceptance without database)
     runs-on: windows-latest
     timeout-minutes: 60

@@ -1,82 +1,121 @@
-# PADOS CI/CD V1: invariant gates, provenance and release promotion
+# PADOS CI/CD V1.1: PR CI, RC CI, artifact-bound live acceptance and manual promotion
 
-CI IS NOT PADOS AUTHORITY. CI SUCCESS != DEPLOYMENT AUTHORIZATION. A green run proves that a tree passed the
-gates below; it never publishes, deploys or authorizes anything. The authority boundary itself is enforced by
+CI IS NOT PADOS AUTHORITY. CI SUCCESS != DEPLOYMENT AUTHORIZATION. A green run proves only that a tree passed the
+gates below. It never publishes, deploys or authorizes anything. The authority boundary itself is enforced by
 `docs/supply_chain/SECURE_CICD_V1.md` and `src/pados/release/workflow_policy.py`.
 
 ## Layers
 
-| Layer | Where | When | What |
-| --- | --- | --- | --- |
-| 1 — PR CI | `ci.yml` jobs `linux`, `windows`, `macos-static` | every push and pull request | ruff, mypy, unit and contract tests (`-rs`), D1/D2/D4 regression gates, migration-head gate, secret scan, public-export hygiene, npm CLI tests, frontend |
-| 2 — RC / merge CI | `ci.yml` job `postgres-integration`, then the reusable `packaging.yml` (called with `needs:`) | same workflow run | PostgreSQL integration (D1 approval binding, D4 loop handoff, residual amendment, proof lane, P6.11, migrations 0017/0018), fresh-database migration bootstrap, win32-x64 and linux-x64 runtime build, pack, install acceptance, provenance and SHA-256 manifests |
-| 3 — Live acceptance | `scripts/acceptance/live_acceptance.py`, run by an operator | release candidates only, never per commit | D1 exploit replay, D2 one real local inference, D4 deterministic-then-model TaskLoop, against an installed PADOS on real hardware |
+| Layer | Workflow | Triggers | Packages? | What runs |
+| --- | --- | --- | --- | --- |
+| 1 — PR CI | `ci.yml` (workflow name `pr-ci`) | every pull request; pushes to every branch except `rc/**`; `workflow_call` from RC CI | **never** | ruff, mypy, unit and contract tests (`-rs`), D1/D2/D4 regression gates (Linux and Windows), offline migration-head gate, secret scan, public-export hygiene, npm CLI tests, frontend, macOS static/contract |
+| 2 — RC CI | `rc-ci.yml` (`rc-ci`) | `workflow_dispatch`; push to `rc/**` | **only here** | the whole PR CI (called on the same commit), PostgreSQL integration gate, fresh-install migration gate, then `packaging.yml` (win32-x64, linux-x64, install acceptance), then the RC manifest |
+| 3 — Live acceptance | `scripts/acceptance/live_acceptance.py` (operator) | release candidates only | consumes the RC artifact | D1 exploit replay, D2 one real local inference, D4 deterministic-then-model TaskLoop, on an installed RC artifact |
+| Promotion | `scripts/release/promotion_check.py`, then a human decision | manual | — | eligible only with a verified RC artifact and a PASS live acceptance of the same commit and tree |
 
-macOS remains static/contract only: the darwin-arm64 runtime package is design-ready but not built or accepted.
+- macOS stays static/contract only: the darwin-arm64 runtime package is design-ready but not built or accepted.
+- `ci.yml` keeps its file name because `src/pados/release/workflow_policy.py` requires the files `ci.yml`,
+  `security.yml` and `release-candidate.yml`. It is the PR CI workflow (`name: pr-ci`).
+
+## Boundaries (enforced by `tests/release_supply_chain/test_cicd_v1_1_boundaries.py`)
+
+- **PR CI never packages.** `ci.yml` calls no reusable workflow, and it contains no packaging, provenance,
+  PostgreSQL integration or fresh-install step.
+- **RC CI packages only after every gate.**
+  - `rc-ci.yml` triggers only on `workflow_dispatch` and `rc/**` pushes, never on `pull_request`.
+  - Its `packaging` job `needs` `checks`, `postgres-integration` and `fresh-install-migration`.
+  - Its `rc-manifest` job `needs` `packaging`.
+- **Packaging is RC-only, enforced twice.**
+  - `packaging.yml` has only a `workflow_call` trigger, and `rc-ci.yml` is its only caller.
+  - Every packaging job also carries
+    `if: github.event_name == 'workflow_dispatch' || (push to refs/heads/rc/*)`. Even a mistaken call from a
+    pull-request event therefore skips packaging.
+- **Nothing publishes.**
+  - No workflow holds write permissions outside the CodeQL and release-attestation allowlist.
+  - The policy checker refuses `npm publish`, `twine upload`, `gh release`, `git push`, deploy commands and
+    secrets in every workflow.
+- **PR CI success is never a deployment authorization.**
+  - No workflow uses `workflow_run`.
+  - `release-candidate.yml` triggers only on manual dispatch and `v*` tags, and is guarded to `main`.
+  - Deployment verification rejects CI-originated approval (`CI_CANNOT_AUTHORIZE_DEPLOYMENT`).
 
 ## Fail-closed gates
 
-- **Regression gates** (`scripts/release/regression_gate.py`) run a named list of test files. A gate fails if
-  pytest fails, a path is missing or collects nothing, fewer than the accepted minimum pass, or any test skips
-  that is not explicitly listed with `--allow-skip`. Each gate writes a JSON report with the source commit and
-  tree; the reports are uploaded as `gates-*` workflow artifacts.
+**Regression gates** (`scripts/release/regression_gate.py`). A gate fails when:
+- pytest fails;
+- a listed path is missing or collects nothing;
+- fewer than the accepted minimum tests pass;
+- any test skips that is not explicitly allowed.
 
-  | Gate | Tests | Minimum |
-  | --- | --- | --- |
-  | D1 approval subject binding | `tests/unit/test_rc2_approval_subject.py`, `tests/contract/test_rc2_route_surface_contract.py` | 24 |
-  | D2 measured execution binding | `tests/local_intelligence/test_rc2_execution_binding.py`, `tests/local_intelligence/test_measured_execution_contract.py`, `tests/unit/test_rc2_graph_measured_binding.py` | 50 (one allowed skip: the accepted M3 profile evidence is not in the public tree) |
-  | D4 TaskLoop model handoff | `tests/unit/test_rc2_worker_model_executor.py`, `tests/unit/test_p6_10_loop_engine.py` | 17 |
-  | PostgreSQL (`postgres_integration_gate.py`) | D1 binding 16, D4 handoff 6, residual 3, proof lane 17, P6.11 7, migration 5 | as listed, zero skips |
+Reports record the source commit and tree. Minimum passing counts:
 
-- **Migration head gate** (`scripts/release/migration_gate.py`): the runtime's declared lane revisions
-  (`pados.config`: operational, corpus, proof) must equal the Alembic script heads, and `--fresh-install`
-  bootstraps two new disposable lane databases through the installer's own upgrade path and requires their
-  `alembic_version` to equal the declared revisions. CI pins no revision id anywhere.
+| Gate | Minimum |
+| --- | --- |
+| D1 | 24 |
+| D2 | 50 (one allowed skip: internal M3 evidence is not in the public tree) |
+| D4 | 17 |
+| PostgreSQL (RC CI) | D1 binding 16, D4 handoff 6, residual 3, proof lane 17, P6.11 7, migration 5; zero skips |
 
-## Provenance: the packaged tree is the tested tree
+**Migration head gate** (`scripts/release/migration_gate.py`):
+- PR CI: the declared lane revisions (`pados.config`) must equal the Alembic heads.
+- RC CI: a fresh install through the installer's own upgrade path must migrate to exactly those revisions.
+- No revision id is pinned anywhere in CI.
 
-`packaging.yml` runs only as `needs: [linux, windows, postgres-integration]` of the same `ci.yml` run, so it
-packages exactly the commit those jobs tested. After packing, `scripts/release/package_provenance.py record`
-refuses to continue unless the checkout HEAD equals the run's commit and no tracked file differs from it, then
-writes, per platform:
+## RC artifact: the packaged tree is the tested tree
 
-- `provenance-<platform>.json`: `SOURCE_COMMIT`, `SOURCE_TREE`, `BUILD_PLATFORM`, `BUILD_HOST`,
-  `BUILD_TIMESTAMP` and `PACKAGE_SHA256` for every tarball;
-- `SHA256SUMS-<platform>.txt` in `sha256sum` format.
+**Per platform**, packaging records two files:
+- `provenance-<platform>.json`: `SOURCE_COMMIT`, `SOURCE_TREE`, `BUILD_PLATFORM`, `BUILD_HOST`, `BUILD_TIMESTAMP`
+  and `PACKAGE_SHA256` for every tarball.
+- `SHA256SUMS-<platform>.txt`: LF line endings on every platform, in GNU `sha256sum -c` format.
 
-Both platforms upload `npm-packages-<platform>` (tarballs, sidecars, provenance, manifest; 30 days).
-`package_provenance.py verify --expected-commit C --expected-tree T` re-hashes a downloaded set before any
-install.
+Recording refuses unless HEAD is the run's commit and no tracked file differs from it.
 
-## Dependency review: ENVIRONMENT_BLOCKER, not a red check
+**The `rc-manifest` job** then runs `scripts/release/rc_manifest.py write`. It:
+- refuses non-RC events;
+- re-verifies both platforms against the run's commit and the checkout's tree;
+- writes `rc-manifest.json` with `RC_COMMIT`, `RC_TREE`, the producing run, the gates and every package hash.
 
-`actions/dependency-review-action` needs the repository's Dependency graph. When it is disabled the
-`security.yml` job reports `DEPENDENCY_REVIEW=ENVIRONMENT_BLOCKER` as a warning annotation and in the job
-summary on every pull request; any other dependency-review failure fails the job. The blocker is cleared only
-by the repository owner enabling Dependency graph (Settings > Code security); it is never reported as PASS.
+The whole set is uploaded as **`pados-rc-artifact`**.
+
+## Live acceptance (Layer 3): RC artifact only
+
+1. **Download and verify.** Download `pados-rc-artifact` from a successful RC CI run, then run
+   `python scripts/release/rc_manifest.py verify --rc-dir RC --expected-commit C --expected-tree T`.
+2. **Install.** Install `RC/win32-x64/*.tgz` into a temporary npm prefix with a fresh `PADOS_HOME`. Run
+   `pados init` (fresh databases only), then `pados doctor`.
+3. **Prepare.** Run `python -I live_acceptance.py prepare --home H --out OUT --profile-report R --expected-profile-id ID`.
+   - It uses the accepted profile and writes a project-scoped registration.
+   - It prints the environment for `pados up`. `PADOS_CHAT_MODEL` is the profile's runtime tag, for example
+     `qwen3:8b`.
+4. **Start.** Export that environment and the node credential variable, then run `pados up` and `pados status`.
+5. **Run.** `python -I live_acceptance.py run --home H --out OUT --rc-manifest RC/rc-manifest.json`.
+   - It refuses unless the installed runtime's commit equals `RC_COMMIT`, the runtime is not dirty, and its
+     package is part of the RC.
+   - It runs D1, D2 and D4, bounded to one inference per model gate.
+   - D2 evidence is read from `work_item.candidate_outputs[].measured_execution`.
+6. **Clean up.** `python -I live_acceptance.py revoke --home H --out OUT`, then `pados down`.
 
 ## Release promotion (manual)
 
 ```
-CI PASS  ->  PACKAGING PASS (same run)  ->  RC artifact (npm-packages-*, provenance verified)
-         ->  LIVE ACCEPTANCE PASS (Layer 3, on the RC artifact)  ->  manual release promotion
+PR CI PASS  ->  RC CI PASS (gates + packaging + RC manifest)  ->  LIVE ACCEPTANCE PASS (same RC commit/tree)
+            ->  promotion_check.py: PROMOTION_ELIGIBLE  ->  human release decision
 ```
 
-No workflow publishes to npm. `release-candidate.yml` (attested sdist/wheel/SBOM) stays restricted to `main`
-and `v*` tags.
+`promotion_check.py --rc-dir RC --live-summary OUT/live-acceptance-summary.json`:
+- re-verifies the RC artifact;
+- requires a PASS live acceptance (d1, d2, d4) recorded for the same `RC_COMMIT` and `RC_TREE`, on a clean
+  runtime.
 
-## Layer 3: live acceptance procedure
+PR CI success is not an input. No step publishes to npm.
 
-1. Download and verify the RC artifact:
-   `python scripts/release/package_provenance.py verify --platform win32-x64 --dist DIR --expected-commit C --expected-tree T`.
-2. Install it into a temporary npm prefix and a fresh `PADOS_HOME`; `pados init`, `pados doctor`.
-3. With the installed runtime's interpreter, isolated:
-   `python -I scripts/acceptance/live_acceptance.py prepare --home H --out OUT --profile-report R --expected-profile-id ID`
-   (imports the ACCEPTED model capability profile and writes a project-scoped registration naming its model).
-4. Export the printed environment (`PADOS_CHAT_PROVIDER`, `PADOS_CHAT_MODEL`, `PADOS_MODEL_CATALOG`,
-   `PADOS_COMPUTE_NODES_CONFIG`) and the node credential variable, then `pados up` and `pados status`.
-5. `python -I scripts/acceptance/live_acceptance.py run --home H --out OUT` (D1, D2, D4; bounded: one model
-   inference per model gate, no benchmark loops).
-6. `python -I scripts/acceptance/live_acceptance.py revoke --home H --out OUT`, then `pados down`.
+## Dependency review: ENVIRONMENT_BLOCKER
 
-The evidence files `OUT/live-acceptance-*.json` record the installed runtime identity and every API exchange.
+- `actions/dependency-review-action` needs the repository's Dependency graph, which is currently disabled.
+- While it is disabled, the repository SBOM endpoint answers 404 and `security.yml` reports
+  `DEPENDENCY_REVIEW=ENVIRONMENT_BLOCKER` as a warning annotation and in the job summary. It is never reported
+  as PASS.
+- Any other dependency-review failure fails the job.
+- The owner clears the blocker by enabling Dependency graph.
+
+`main` branch protection: see `MAIN_BRANCH_PROTECTION.md`.

@@ -11,7 +11,10 @@ settings, and records the result. Run it with the INSTALLED runtime's interprete
       Creates a disposable acceptance project, imports the ACCEPTED model capability profile into the
       installation's model catalog and writes a compute-node registration that names that profile's model for
       this project only. Run it before `pados up`. Prints the environment `pados up` needs.
-  ... live_acceptance.py run --home H --out DIR [--only d1,d2,d4]
+  ... live_acceptance.py run --home H --out DIR --rc-manifest RC/rc-manifest.json [--only d1,d2,d4]
+      Refuses unless the installed runtime is exactly the RC CI artifact named by the RC manifest (verify the
+      downloaded artifact first with scripts/release/rc_manifest.py verify; live acceptance never runs against
+      a developer build).
       D1: an approval bound to one subject cannot route other capabilities, and a legacy unbound approval
           cannot route at all; no job is created and every refusal is durably audited.
       D2: one real local inference through graph cognition carries measured-execution evidence whose context
@@ -71,7 +74,7 @@ class Harness:
         manifest = app / "runtime-manifest.json"
         data = json.loads(manifest.read_text(encoding="utf-8")) if manifest.is_file() else {}
         return {"runtime_app": str(app), "runtime_manifest_sha256": _sha(manifest),
-                "source": {key: data.get(key) for key in ("version", "commit", "dirty", "platform")}}
+                "source": runtime_source_identity(data)}
 
     def dump(self, gate: str, result: dict[str, Any]) -> bool:
         record = {"gate": gate, **result, "runtime": self.runtime_identity(), "trace": self.trace}
@@ -134,6 +137,61 @@ class Harness:
         return request, approval["id"]
 
 
+def runtime_source_identity(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Identity of an installed runtime from its runtime-manifest.json (commit and dirty live under "source")."""
+
+    raw_source = manifest.get("source")
+    source: dict[str, Any] = raw_source if isinstance(raw_source, dict) else {}
+    return {"package": manifest.get("package"), "version": manifest.get("package_version"),
+            "platform": manifest.get("platform"), "commit": source.get("commit"), "dirty": source.get("dirty")}
+
+
+def chat_environment(artifact_ref: str, catalog: Path, registry: Path) -> dict[str, str]:
+    """Environment `pados up` needs. The measured binding matches PADOS_CHAT_MODEL against the profile's
+    artifact.artifact_ref (the runtime tag, e.g. qwen3:8b), never against the catalog model_id."""
+
+    return {"PADOS_CHAT_PROVIDER": "ollama", "PADOS_CHAT_MODEL": artifact_ref,
+            "PADOS_MODEL_CATALOG": str(catalog), "PADOS_COMPUTE_NODES_CONFIG": str(registry)}
+
+
+def find_measured_execution(body: Any) -> dict[str, Any] | None:
+    """The measured-execution evidence of a graph cognitive response.
+
+    The API returns it under work_item.candidate_outputs[].measured_execution and under
+    candidate_nodes[].metadata_json.measured_execution; both are read, the first found wins.
+    """
+
+    if not isinstance(body, dict):
+        return None
+    raw_item = body.get("work_item")
+    work_item: dict[str, Any] = raw_item if isinstance(raw_item, dict) else {}
+    candidates: list[Any] = list(work_item.get("candidate_outputs") or [])
+    candidates += [(node or {}).get("metadata_json") for node in body.get("candidate_nodes") or []
+                   if isinstance(node, dict)]
+    for candidate in candidates:
+        evidence = candidate.get("measured_execution") if isinstance(candidate, dict) else None
+        if isinstance(evidence, dict):
+            return evidence
+    return None
+
+
+def rc_identity_check(runtime: dict[str, Any], rc_manifest: dict[str, Any]) -> list[str]:
+    """Problems that make an installed runtime unacceptable as the RC artifact named by ``rc_manifest``."""
+
+    problems: list[str] = []
+    if rc_manifest.get("schema") != "pados.rc-manifest.v1":
+        problems.append("RC_MANIFEST_INVALID")
+    if runtime.get("commit") != rc_manifest.get("RC_COMMIT"):
+        problems.append("RUNTIME_NOT_RC_COMMIT")
+    if runtime.get("dirty") is not False:
+        problems.append("RUNTIME_DIRTY_OR_UNKNOWN")
+    platform = (rc_manifest.get("platforms") or {}).get(runtime.get("platform") or "")
+    names = [item.get("file", "") for item in (platform or {}).get("packages", [])]
+    if not any(f"-{runtime.get('version')}.tgz" in name and "runtime" in name for name in names):
+        problems.append("RUNTIME_PACKAGE_NOT_IN_RC")
+    return problems
+
+
 def _sha(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
 
@@ -194,10 +252,11 @@ def prepare(harness: Harness, report: Path, expected_profile_id: str) -> int:
         print("LIVE_ACCEPTANCE prepare FAIL PERSISTENCE_CHANGED_IDENTITY")
         return 1
     registry = _write_registry(harness, str(project), (profile.artifact.model_ref,))
+    runtime_tag = profile.artifact.artifact_ref
     harness.save_state({"project_id": str(project), "profile_id": profile.profile_id,
-                        "model_ref": profile.artifact.model_ref, "model_id": description.model_id})
-    environment = {"PADOS_CHAT_PROVIDER": "ollama", "PADOS_CHAT_MODEL": description.model_id,
-                   "PADOS_MODEL_CATALOG": str(store.path), "PADOS_COMPUTE_NODES_CONFIG": registry["registry"]}
+                        "model_ref": profile.artifact.model_ref, "model_id": runtime_tag,
+                        "catalog_model_id": description.model_id})
+    environment = chat_environment(runtime_tag, store.path, Path(registry["registry"]))
     harness.dump("prepare", {"status": "PASS", "project_id": str(project), "profile_id": profile.profile_id,
                              "report_sha256": _sha(report), "catalog_digest": digest, **registry,
                              "environment_for_pados_up": environment,
@@ -253,10 +312,7 @@ def gate_d2(harness: Harness, project: str, model_id: str) -> bool:
     with urllib.request.urlopen(f"{base}/api/ps", timeout=10) as response:  # noqa: S310 - loopback runtime
         loaded = [{key: model.get(key) for key in ("name", "context_length", "size", "size_vram", "digest")}
                   for model in json.loads(response.read()).get("models", [])]
-    evidence = None
-    created_nodes = (body.get("created") or body.get("nodes") or []) if isinstance(body, dict) else []
-    for item in created_nodes if isinstance(created_nodes, list) else []:
-        evidence = evidence or (item.get("metadata_json") or {}).get("measured_execution")
+    evidence = find_measured_execution(body)
     loaded_context = next((m["context_length"] for m in loaded if m["name"] == model_id), None)
     passed = (status in {200, 201} and evidence is not None and loaded_context is not None
               and (evidence.get("execution") or {}).get("context_window") == loaded_context)
@@ -318,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile-report", type=Path)
     parser.add_argument("--expected-profile-id")
     parser.add_argument("--only", default="d1,d2,d4")
+    parser.add_argument("--rc-manifest", type=Path, help="rc-manifest.json of the RC artifact that was installed")
     args = parser.parse_args(argv)
     harness = Harness(args.home, args.out)
     if args.action == "prepare":
@@ -331,6 +388,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "revoke":
         harness.dump("revoke", {"status": "PASS", **_write_registry(harness, state["project_id"], ())})
         return 0
+    if args.rc_manifest is None:
+        parser.error("run needs --rc-manifest (live acceptance consumes RC CI artifacts only)")
+    rc_manifest = json.loads(args.rc_manifest.read_text(encoding="utf-8"))
+    problems = rc_identity_check(harness.runtime_identity()["source"], rc_manifest)
+    if problems:
+        print(f"LIVE_ACCEPTANCE FAIL NOT_THE_RC_ARTIFACT {','.join(problems)}")
+        return 1
+    harness.save_state({"rc_commit": rc_manifest["RC_COMMIT"], "rc_tree": rc_manifest["RC_TREE"]})
     wanted = {item.strip() for item in args.only.split(",") if item.strip()}
     outcomes = {}
     if "d1" in wanted:
@@ -342,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     verdict = "PASS" if outcomes and all(outcomes.values()) else "FAIL"
     (args.out / "live-acceptance-summary.json").write_text(json.dumps(
         {"status": verdict, "gates": {k: "PASS" if v else "FAIL" for k, v in outcomes.items()},
+         "rc": {"RC_COMMIT": rc_manifest["RC_COMMIT"], "RC_TREE": rc_manifest["RC_TREE"]},
          "runtime": harness.runtime_identity()}, indent=1), encoding="utf-8")
     print(f"LIVE_ACCEPTANCE {verdict} {outcomes}")
     return 0 if verdict == "PASS" else 1
