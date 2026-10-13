@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from learning_support import (
+from loop_learning_support import (
     ENDPOINT,
     HEALTH_OK,
     LEARNING_ADAPTER,
