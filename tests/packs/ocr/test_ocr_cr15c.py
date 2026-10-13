@@ -457,13 +457,14 @@ def test_decompression_bomb_is_refused_before_text_extraction(streams: list[byte
 
 
 @pytest.fixture
-def pypdf_limits(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Snapshot pypdf's module limits so an in-process worker call cannot leak lowered values."""
-    from pypdf import filters
+def pypdf_limits() -> Iterator[Any]:
+    """pypdf's filters module; asserts afterwards that no in-process worker call leaked its decode budget
+    into the caller's pypdf configuration (the budget is scoped to each operation)."""
+    from pypdf import filters, get_configuration
 
-    for name in _pdf_worker.DECODE_LIMITS:
-        monkeypatch.setattr(filters, name, getattr(filters, name))
-    return filters
+    before = get_configuration()
+    yield filters
+    assert get_configuration() == before
 
 
 def _header(**overrides: Any) -> dict[str, Any]:
@@ -476,18 +477,99 @@ def _header(**overrides: Any) -> dict[str, Any]:
     return header
 
 
+# The nine controls the worker set through the legacy pypdf.filters constants, under pypdf's Configuration names,
+# with the budget each one takes ("stream" = per-page content budget, "declared" = the source budget).
+OCR01_CONTROLS = {
+    "zlib_maximum_output_length": "stream",  # ZLIB_MAX_OUTPUT_LENGTH
+    "lzw_maximum_output_length": "stream",  # LZW_MAX_OUTPUT_LENGTH
+    "run_length_maximum_output_length": "stream",  # RUN_LENGTH_MAX_OUTPUT_LENGTH
+    "jbig2_maximum_output_length": "stream",  # JBIG2_MAX_OUTPUT_LENGTH
+    "array_based_stream_maximum_output_length": "stream",  # MAX_ARRAY_BASED_STREAM_OUTPUT_LENGTH
+    "image_maximum_buffer_size": "stream",  # FLATE_MAX_BUFFER_SIZE
+    "flate_maximum_row_length": "stream",  # FLATE_MAX_ROW_LENGTH
+    "zlib_maximum_recovery_input_length": "stream",  # ZLIB_MAX_RECOVERY_INPUT_LENGTH
+    "maximum_declared_stream_length": "declared",  # MAX_DECLARED_STREAM_LENGTH
+}
+
+
+def test_ocr01_policy_maps_every_legacy_control_to_the_configuration_api() -> None:
+    from pypdf import Configuration
+
+    assert _pdf_worker.DECODE_LIMITS == OCR01_CONTROLS  # same controls, same budget sources (policy unchanged)
+    defaults = Configuration()
+    applied = _pdf_worker.decode_limits(512 * 1024, 64 * MIB)
+    for name, source in OCR01_CONTROLS.items():
+        assert applied[name] == min(getattr(defaults, name), 512 * 1024 if source == "stream" else 64 * MIB)
+    assert applied["zlib_maximum_output_length"] == 512 * 1024  # not pypdf's 75 MB default
+    assert applied["maximum_declared_stream_length"] == 64 * MIB
+    generous = _pdf_worker.decode_limits(1 << 34, 1 << 34)  # a budget above pypdf's defaults never raises one
+    assert generous == {name: getattr(defaults, name) for name in OCR01_CONTROLS}
+    with pytest.raises(_pdf_worker.ProtocolError):
+        _pdf_worker.decode_limits(0, 64 * MIB)  # 0 would DISABLE pypdf's limits: refused
+    with pytest.raises(_pdf_worker.ProtocolError):
+        _pdf_worker.decode_limits(512 * 1024, 0)
+
+
 def test_decode_limits_are_set_from_the_budget_and_observable(pypdf_limits: Any) -> None:
-    assert set(_pdf_worker.DECODE_LIMITS) <= set(vars(pypdf_limits))  # the installed pypdf has every limit
-    applied = _pdf_worker.apply_decode_limits(512 * 1024, 64 * MIB)
-    for name, source in _pdf_worker.DECODE_LIMITS.items():
-        assert getattr(pypdf_limits, name) == applied[name]
-        assert applied[name] <= (512 * 1024 if source == "stream" else 64 * MIB)
+    from pypdf import get_configuration
     from pypdf.errors import LimitReachedError
 
-    with pytest.raises(LimitReachedError):  # pypdf itself stops decompressing at the budget
-        pypdf_limits.decompress(zlib.compress(b" " * (4 * MIB), 9))
-    with pytest.raises(_pdf_worker.ProtocolError):
-        _pdf_worker.apply_decode_limits(0, 64 * MIB)  # 0 would DISABLE pypdf's limits: refused
+    with _pdf_worker.decode_budget(512 * 1024, 64 * MIB) as applied:
+        active = get_configuration()  # A: the budget is what pypdf itself reports
+        for name, source in _pdf_worker.DECODE_LIMITS.items():
+            assert getattr(active, name) == applied[name] <= (512 * 1024 if source == "stream" else 64 * MIB)
+        with pytest.raises(LimitReachedError):  # B: pypdf itself stops decompressing at the PADOS budget
+            pypdf_limits.decompress(zlib.compress(b" " * (4 * MIB), 9))
+        assert pypdf_limits.decompress(zlib.compress(b" " * (256 * 1024), 9)) == b" " * (256 * 1024)  # C
+    # D: restored on exit, so the same 4 MiB stream decodes under pypdf's own (larger) default again.
+    assert pypdf_limits.decompress(zlib.compress(b" " * (4 * MIB), 9)) == b" " * (4 * MIB)
+    with pytest.raises(_pdf_worker.ProtocolError), _pdf_worker.decode_budget(0, 64 * MIB):
+        pass  # never entered: a 0 budget is refused before pypdf is configured
+
+
+def test_decode_budget_is_isolated_to_its_execution_context(pypdf_limits: Any) -> None:
+    import contextvars
+
+    from pypdf import Configuration, get_configuration
+
+    with _pdf_worker.decode_budget(512 * 1024, 64 * MIB):
+        assert get_configuration().zlib_maximum_output_length == 512 * 1024
+        other = contextvars.Context().run(get_configuration)  # an independent execution context (another job)
+        assert other.zlib_maximum_output_length == Configuration().zlib_maximum_output_length
+    assert get_configuration().zlib_maximum_output_length == Configuration().zlib_maximum_output_length
+
+
+def test_legacy_module_constants_cannot_loosen_the_budget(pypdf_limits: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """pypdf copies changed deprecated constants into the configuration when a reader is built; inside the
+    worker's budget that legacy handling is disabled, so a loosened constant cannot replace the budget."""
+    from pypdf import PdfReader, get_configuration
+    from pypdf.errors import LimitReachedError
+
+    monkeypatch.setattr(pypdf_limits, "ZLIB_MAX_OUTPUT_LENGTH", 1 << 40)
+    with _pdf_worker.decode_budget(512 * 1024, 64 * MIB):
+        PdfReader(io.BytesIO(load_builder().flate_content_pdf([TEXT])))
+        assert get_configuration().zlib_maximum_output_length == 512 * 1024
+        with pytest.raises(LimitReachedError):
+            pypdf_limits.decompress(zlib.compress(b" " * (4 * MIB), 9))
+
+
+def test_every_worker_operation_runs_under_the_decode_budget(pypdf_limits: Any,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    from pypdf import get_configuration
+
+    seen: dict[str, int] = {}
+    real_reader = _pdf_worker._reader
+
+    def spy(header: dict[str, Any], data: bytes) -> Any:
+        seen[str(header["op"])] = get_configuration().zlib_maximum_output_length
+        return real_reader(header, data)
+
+    monkeypatch.setattr(_pdf_worker, "_reader", spy)
+    data = load_builder().flate_content_pdf([TEXT])
+    _pdf_worker.text(_header(), data)
+    _pdf_worker.inspect(_header(op="inspect", max_pages=10), data)
+    _pdf_worker.figures(_header(op="figures", max_figures=8, max_xobjects_per_page=8, max_xobjects=8), data)
+    assert seen == {"text": 512 * 1024, "inspect": 512 * 1024, "figures": 512 * 1024}
 
 
 def test_content_streams_are_decoded_before_extract_text(pypdf_limits: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -497,7 +579,10 @@ def test_content_streams_are_decoded_before_extract_text(pypdf_limits: Any, monk
     real_extract = PageObject.extract_text
 
     def spy(self: Any, *args: Any, **kwargs: Any) -> Any:
+        from pypdf import get_configuration
+
         extracted.append(self)
+        assert get_configuration().zlib_maximum_output_length == 512 * 1024  # extraction runs under the budget
         return real_extract(self, *args, **kwargs)
 
     monkeypatch.setattr(PageObject, "extract_text", spy)
@@ -507,7 +592,6 @@ def test_content_streams_are_decoded_before_extract_text(pypdf_limits: Any, monk
             _pdf_worker.text(_header(), builder.flate_content_pdf(streams))
         assert refused.value.code == "OCR_DECODE_BUDGET_EXCEEDED"
     assert extracted == []  # refused before any text extraction
-    assert pypdf_limits.ZLIB_MAX_OUTPUT_LENGTH == 512 * 1024
     many = builder.flate_content_pdf([TEXT] + [b" " * (100 * 1024)] * 3)  # under the page cap
     with pytest.raises(_pdf_worker.Refused):
         _pdf_worker.text(_header(max_content_bytes=200 * 1024), many)  # ... but over the running total

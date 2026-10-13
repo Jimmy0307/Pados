@@ -113,14 +113,10 @@ class _Stream:
 def test_worker_applies_every_limit_before_it_reads_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     import resource
 
-    from pypdf import filters
-
     recorder = _Recorder()
     monkeypatch.setattr(resource, "setrlimit", recorder.setrlimit)  # never limit the test process itself
     monkeypatch.setattr(resource, "getrlimit", recorder.getrlimit)
     monkeypatch.setattr(_launcher(), "lock_privileges", lambda: recorder.events.append("no_new_privs") or True)
-    for name in _pdf_worker.DECODE_LIMITS:  # restored afterwards: the worker lowers them in-process here
-        monkeypatch.setattr(filters, name, getattr(filters, name))
     monkeypatch.setattr(sys, "stdin", _Stream(recorder))
     out = io.BytesIO()
     monkeypatch.setattr(sys, "stdout", _Stream(out))

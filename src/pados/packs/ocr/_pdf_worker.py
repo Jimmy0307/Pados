@@ -13,12 +13,15 @@ written, 3 = the memory budget was exhausted (``MemoryError``), 4 = protocol vio
 refused. Imports only the standard library, the stdlib-only ``_rlimit_exec`` and (lazily) pypdf, so
 the child stays small under its address-space limit; pypdf creates no thread or process.
 
-Decoding is bounded BEFORE parsing: ``_reader`` first lowers pypdf's module-level decompression
-limits (``DECODE_LIMITS``: zlib/LZW/run-length/JBIG2 output, array-based content streams, flate image
-buffers and predictor rows, zlib recovery input, the declared stream length) to the budget the
-parent sent (``max_stream_bytes`` = the per-page content budget, ``max_declared_stream_bytes`` = the
-source budget), never above pypdf's own defaults, and reads every one back. A stream that would
-decode past its cap raises pypdf's ``LimitReachedError``, reported as ``OCR_DECODE_BUDGET_EXCEEDED``.
+Decoding is bounded BEFORE parsing: every operation runs inside ``decode_budget``, which applies
+pypdf's public ``Configuration`` (``pypdf.apply_configuration``, scoped to the operation and restored
+afterwards) with the decompression limits in ``DECODE_LIMITS`` (zlib/LZW/run-length/JBIG2 output,
+array-based content streams, flate image buffers and predictor rows, zlib recovery input, the declared
+stream length) lowered to the budget the parent sent (``max_stream_bytes`` = the per-page content
+budget, ``max_declared_stream_bytes`` = the source budget), never above pypdf's own defaults, and reads
+every one back from ``pypdf.get_configuration()``. Legacy handling is disabled inside the scope, so the
+deprecated module constants can never overwrite the budget when the reader is built. A stream that
+would decode past its cap raises pypdf's ``LimitReachedError``, reported as ``OCR_DECODE_BUDGET_EXCEEDED``.
 
 Operations (the same pypdf calls the pack previously made in-process, so results are identical):
 ``inspect`` (page count, encryption, MediaBox geometry of the selected pages), ``figures`` (image
@@ -36,7 +39,9 @@ import json
 import math
 import re
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from functools import wraps
 from typing import Any
 
 from pados.packs.ocr._rlimit_exec import EXIT_LIMITS_REFUSED, enter_limits
@@ -45,12 +50,17 @@ EXIT_OK, EXIT_BUDGET, EXIT_PROTOCOL = 0, 3, 4
 BUDGET_EXCEEDED = "OCR_PARSE_BUDGET_EXCEEDED"
 DECODE_BUDGET_EXCEEDED = "OCR_DECODE_BUDGET_EXCEEDED"
 MAX_CONTENT_STREAMS = 10_000  # entries of one page's /Contents array (pypdf's CONTENT_STREAM_ARRAY_MAX_LENGTH)
-# pypdf.filters module limits -> which budget value bounds them ("stream" = per-page content budget).
+# pypdf.Configuration decompression fields -> which budget value bounds them ("stream" = per-page content
+# budget). The same nine controls the worker set through the legacy pypdf.filters constants
+# (ZLIB_MAX_OUTPUT_LENGTH, LZW_MAX_OUTPUT_LENGTH, RUN_LENGTH_MAX_OUTPUT_LENGTH, JBIG2_MAX_OUTPUT_LENGTH,
+# MAX_ARRAY_BASED_STREAM_OUTPUT_LENGTH, FLATE_MAX_BUFFER_SIZE, FLATE_MAX_ROW_LENGTH,
+# ZLIB_MAX_RECOVERY_INPUT_LENGTH, MAX_DECLARED_STREAM_LENGTH), under pypdf's own field names.
 DECODE_LIMITS: dict[str, str] = {
-    "ZLIB_MAX_OUTPUT_LENGTH": "stream", "LZW_MAX_OUTPUT_LENGTH": "stream", "RUN_LENGTH_MAX_OUTPUT_LENGTH": "stream",
-    "JBIG2_MAX_OUTPUT_LENGTH": "stream", "MAX_ARRAY_BASED_STREAM_OUTPUT_LENGTH": "stream",
-    "FLATE_MAX_BUFFER_SIZE": "stream", "FLATE_MAX_ROW_LENGTH": "stream", "ZLIB_MAX_RECOVERY_INPUT_LENGTH": "stream",
-    "MAX_DECLARED_STREAM_LENGTH": "declared",
+    "zlib_maximum_output_length": "stream", "lzw_maximum_output_length": "stream",
+    "run_length_maximum_output_length": "stream", "jbig2_maximum_output_length": "stream",
+    "array_based_stream_maximum_output_length": "stream", "image_maximum_buffer_size": "stream",
+    "flate_maximum_row_length": "stream", "zlib_maximum_recovery_input_length": "stream",
+    "maximum_declared_stream_length": "declared",
 }
 MAX_HEADER_BYTES = 64 * 1024
 CONTROL_PATTERN = r"[\x00-\x08\x0b-\x1f\x7f]"  # identical to contracts._CONTROL (a test pins this)
@@ -102,26 +112,54 @@ def _pages(header: dict[str, Any]) -> list[int]:
     return pages
 
 
-def apply_decode_limits(stream_cap: int, declared_cap: int) -> dict[str, int]:
-    """Lower every pypdf decompression limit in ``DECODE_LIMITS`` to the budget (never raise one; a
-    limit pypdf disabled with 0 gets the budget) and read each back. A missing or non-integer limit (a
-    changed pypdf) is a protocol error: parsing never starts without them."""
+def decode_limits(stream_cap: int, declared_cap: int) -> dict[str, int]:
+    """The budgeted value of every pypdf limit in ``DECODE_LIMITS``: the budget, never above the current
+    pypdf configuration (a limit pypdf disabled with 0 gets the budget). A missing or non-integer field
+    (a changed pypdf) is a protocol error: parsing never starts without them."""
     if stream_cap < 1 or declared_cap < 1:
         raise ProtocolError("decode limits")
-    from pypdf import filters
+    from pypdf import get_configuration
 
-    applied: dict[str, int] = {}
+    current_configuration = get_configuration()
+    limits: dict[str, int] = {}
     for name, source in DECODE_LIMITS.items():
-        current = getattr(filters, name, None)
+        current = getattr(current_configuration, name, None)
         if isinstance(current, bool) or not isinstance(current, int):
             raise ProtocolError(name)
         budget = stream_cap if source == "stream" else declared_cap
-        target = budget if current <= 0 else min(current, budget)
-        setattr(filters, name, target)
-        if getattr(filters, name) != target:
-            raise ProtocolError(name)
-        applied[name] = target
-    return applied
+        limits[name] = budget if current <= 0 else min(current, budget)
+    return limits
+
+
+@contextmanager
+def decode_budget(stream_cap: int, declared_cap: int) -> Iterator[dict[str, int]]:
+    """Apply the decode budget through pypdf's public Configuration for the enclosed work only.
+
+    ``apply_configuration`` scopes the configuration to the current execution context and restores the
+    previous one on exit. ``disable_legacy_handling`` keeps pypdf's deprecated module constants from
+    overwriting the budget when a reader is built. Every field is read back before any parsing starts."""
+    limits = decode_limits(stream_cap, declared_cap)
+    from pypdf import apply_configuration, get_configuration
+
+    budgeted_configuration = get_configuration().with_overwrites(disable_legacy_handling=True, **limits)
+    with apply_configuration(budgeted_configuration):
+        active = get_configuration()
+        if not active.disable_legacy_handling or any(getattr(active, name) != value for name, value in limits.items()):
+            raise ProtocolError("decode limits")
+        yield limits
+
+
+def budgeted(operation: Callable[[dict[str, Any], bytes], dict[str, Any]],
+             ) -> Callable[[dict[str, Any], bytes], dict[str, Any]]:
+    """Run a whole worker operation (reader construction, parsing and extraction) under ``decode_budget``."""
+
+    @wraps(operation)
+    def run(header: dict[str, Any], data: bytes) -> dict[str, Any]:
+        with decode_budget(_bounded_int(header, "max_stream_bytes", high=1 << 34) or 0,
+                           _bounded_int(header, "max_declared_stream_bytes", high=1 << 34) or 0):
+            return operation(header, data)
+
+    return run
 
 
 def _is_decode_limit(exc: BaseException) -> bool:
@@ -131,9 +169,7 @@ def _is_decode_limit(exc: BaseException) -> bool:
 
 
 def _reader(header: dict[str, Any], data: bytes) -> Any:
-    """Decode limits first, then the reader (object streams are decompressed under them too)."""
-    apply_decode_limits(_bounded_int(header, "max_stream_bytes", high=1 << 34) or 0,
-                        _bounded_int(header, "max_declared_stream_bytes", high=1 << 34) or 0)
+    """The reader, built inside the operation's ``decode_budget`` (object streams decompress under it)."""
     from pypdf import PdfReader
 
     reader = PdfReader(io.BytesIO(data))
@@ -159,6 +195,7 @@ def _declared_page_count(reader: Any) -> int | None:
     return int(count) if isinstance(count, int) and not isinstance(count, bool) else None
 
 
+@budgeted
 def inspect(header: dict[str, Any], data: bytes) -> dict[str, Any]:
     max_pages = _bounded_int(header, "max_pages") or 0
     first = _bounded_int(header, "page_first", optional=True)
@@ -200,7 +237,7 @@ def content_bytes(page: Any, cap: int) -> int:
 
     The ``/Contents`` entry is read raw and an array's length is checked before any stream is
     resolved. Each stream is decoded once (pypdf caches the decoded data on the stream object, which
-    ``extract_text`` then reuses); pypdf's own per-stream limits (``apply_decode_limits``) stop a
+    ``extract_text`` then reuses); pypdf's own per-stream limits (``decode_budget``) stop a
     single stream at ``cap`` while it is being decompressed.
     """
     from pypdf.generic import ArrayObject, NullObject, StreamObject
@@ -227,6 +264,7 @@ def content_bytes(page: Any, cap: int) -> int:
     return size
 
 
+@budgeted
 def figures(header: dict[str, Any], data: bytes) -> dict[str, Any]:
     max_figures = _bounded_int(header, "max_figures") or 0
     per_page = _bounded_int(header, "max_xobjects_per_page") or 0
@@ -256,6 +294,7 @@ def figures(header: dict[str, Any], data: bytes) -> dict[str, Any]:
     return {"figures": found}
 
 
+@budgeted
 def text(header: dict[str, Any], data: bytes) -> dict[str, Any]:
     expected = _bounded_int(header, "page_count")
     max_blocks = _bounded_int(header, "max_blocks") or 0
