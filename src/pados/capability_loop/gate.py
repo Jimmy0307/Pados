@@ -148,3 +148,38 @@ def evaluate_discovery(request: DiscoveryRequest, *, target: TargetRegistration 
     if decision.code is not PolicyCode.ALLOWED:
         return GateDecision(decision.code.value, tuple(checks), decision.decision_hash, None)
     return GateDecision(GateCode.ALLOWED, tuple(checks), decision.decision_hash, str(resolved))
+
+
+def evaluate_learning(*, project_id: str, work_contract_id: str, request_id: str,
+                      classification: DataClassification, contract: Mapping[str, Any],
+                      grant: Mapping[str, Any], capability: CapabilityDescriptor, adapter: AdapterDescriptor,
+                      network_policy: NetworkRequirement, adapter_available: Callable[[], bool],
+                      registered_mcp_capabilities: frozenset[str] = frozenset()) -> GateDecision:
+    """Authorize a learning operation (no filesystem target): credential, work-contract, grant and policy.
+
+    A learning request sends a goal and material references to a local learning runtime. There is no path,
+    so there is no target check; the material bytes stay in PADOS (the adapter sends references only).
+    """
+    checks: list[tuple[str, bool]] = []
+    no_secrets = not contract.get("secret_refs")
+    checks.append((GateCode.CREDENTIAL_EXPOSURE, no_secrets))
+    if not no_secrets:
+        return _refused(GateCode.CREDENTIAL_EXPOSURE, checks)
+    same_contract = (contract.get("work_contract_id") == work_contract_id
+                     and contract.get("project_id") == project_id)
+    checks.append((GateCode.WORK_CONTRACT_MISMATCH, same_contract))
+    if not same_contract:
+        return _refused(GateCode.WORK_CONTRACT_MISMATCH, checks)
+    try:
+        scope = authorize_scope(contract, grant, registered_mcp_capabilities=registered_mcp_capabilities)
+    except PermissionError:
+        checks.append((GateCode.GRANT_REFUSED, False))
+        return _refused(GateCode.GRANT_REFUSED, checks)
+    checks.append((GateCode.GRANT_REFUSED, True))
+    context = PolicyContext(scope=scope, project_id=project_id, stage_id=f"learn:{request_id}",
+                            classification=classification, network_policy=network_policy)
+    decision = evaluate(capability, adapter, context, adapter_available=adapter_available)
+    checks.extend(decision.checks)
+    if decision.code is not PolicyCode.ALLOWED:
+        return GateDecision(decision.code.value, tuple(checks), decision.decision_hash, None)
+    return GateDecision(GateCode.ALLOWED, tuple(checks), decision.decision_hash, None)
