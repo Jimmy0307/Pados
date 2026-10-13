@@ -1,0 +1,9 @@
+{
+  "id": "pados-control-surface",
+  "name": "PADOS Control Surface",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Local-first control surface for a localhost PADOS API.",
+  "author": "PADOS",
+  "isDesktopOnly": true
+}

@@ -1,0 +1,4 @@
+# Machine-captured evidence must keep its exact bytes (hashes are recorded elsewhere).
+runtime/artifacts/reports/stage-b-local-intelligence-v1/m4_2/evidence/** -text
+# Vendored third-party notice texts are hash-checked by packages/scripts/build_runtime.py: keep their exact bytes.
+packages/scripts/vendor/** -text

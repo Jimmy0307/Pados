@@ -1,0 +1,13 @@
+{
+  "name": "pados-control-surface",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "typecheck": "node scripts/typecheck.mjs",
+    "lint": "node scripts/lint.mjs",
+    "test": "node scripts/test.mjs",
+    "build": "node scripts/build.mjs"
+  }
+}

@@ -1,0 +1,427 @@
+{
+  "schema_version": "pados.public-export-manifest.v1",
+  "note": "Defines the publication boundary. Nothing is deleted from the internal branch; excluded paths stay as private development evidence.",
+  "exclude": [
+    {
+      "pattern": "runtime/**",
+      "reason": "generated evidence, logs, backups, local run state (keep .gitkeep placeholders only)",
+      "keep": [
+        "runtime/**/.gitkeep"
+      ]
+    },
+    {
+      "pattern": "work/**",
+      "reason": "agent task logs and scratch work"
+    },
+    {
+      "pattern": "outputs/**",
+      "reason": "generated outputs"
+    },
+    {
+      "pattern": "wiki/**",
+      "reason": "internal development wiki (review before publishing)"
+    },
+    {
+      "pattern": ".migration/**",
+      "reason": "donor mirror (private, never tracked)"
+    },
+    {
+      "pattern": "docs/migration/**",
+      "reason": "private donor consolidation inventory and manifests"
+    },
+    {
+      "pattern": "docs/enterprise/DONOR_CAPABILITY_EXTRACTION_MATRIX.md",
+      "reason": "names private donor repositories"
+    },
+    {
+      "pattern": "docs/p6_13/**",
+      "reason": "internal milestone reports with machine-specific paths"
+    },
+    {
+      "pattern": "docs/architecture/vnext/baseline/**",
+      "reason": "machine-specific baseline manifests"
+    },
+    {
+      "pattern": "docs/superpowers/**",
+      "reason": "agent tooling notes"
+    },
+    {
+      "pattern": "docs/P6_15_*",
+      "reason": "internal milestone contracts"
+    },
+    {
+      "pattern": "P6_*",
+      "reason": "internal milestone reports (root)"
+    },
+    {
+      "pattern": "P0_ACCEPTANCE_REPORT.md",
+      "reason": "internal milestone report"
+    },
+    {
+      "pattern": "P7_BACKLOG.md",
+      "reason": "internal backlog"
+    },
+    {
+      "pattern": "FINAL_ACCEPTANCE_REPORT.md",
+      "reason": "internal milestone report"
+    },
+    {
+      "pattern": "PREFLIGHT_AUDIT.md",
+      "reason": "internal audit"
+    },
+    {
+      "pattern": "CODEX_MASTER_PROMPT_PERSONAL_AUTONOMOUS_DEVELOPMENT_OS.md",
+      "reason": "agent prompt"
+    },
+    {
+      "pattern": "PERSONAL_AI_WORKPLACE_START_HERE.md",
+      "reason": "personal workspace note"
+    },
+    {
+      "pattern": "RELEASE_MANIFEST.json",
+      "reason": "internal release manifest for an earlier milestone"
+    },
+    {
+      "pattern": "config/release_manifest.json",
+      "reason": "internal release manifest"
+    },
+    {
+      "pattern": "scripts/p6_15_*",
+      "reason": "milestone-specific operator scripts with local paths"
+    },
+    {
+      "pattern": "scripts/run_p6_10_demos.py",
+      "reason": "milestone demo runner"
+    },
+    {
+      "pattern": "Start-PADOS-P6-15-Corpus.ps1",
+      "reason": "milestone-specific launcher"
+    },
+    {
+      "pattern": "Start-PADOS-Operator.ps1",
+      "reason": "milestone-specific launcher"
+    },
+    {
+      "pattern": "Stop-PADOS-Operator.ps1",
+      "reason": "milestone-specific launcher"
+    },
+    {
+      "pattern": "AGENTS.md",
+      "reason": "internal agent operating rules (replace with CONTRIBUTING.md at publication)"
+    },
+    {
+      "pattern": "PADOS_WEB_VALIDATION_REPORT.md",
+      "reason": "internal validation report with local user paths"
+    },
+    {
+      "pattern": "docs/clean-room/SIMILARITY_REVIEW.json",
+      "reason": "internal audit record (kept in the internal branch)"
+    },
+    {
+      "pattern": "docs/private/**",
+      "reason": "organisation-specific drafts and validation notes; private by policy (never part of the public export)"
+    },
+    {
+      "pattern": "tests/unit/test_p6_15_historical_shadow.py",
+      "reason": "tests of a milestone-specific script excluded above (scripts/p6_15_*)"
+    },
+    {
+      "pattern": "tests/unit/test_p6_15_ignore_contract.py",
+      "reason": "tests of a milestone-specific script excluded above (scripts/p6_15_*)"
+    },
+    {
+      "pattern": "tests/unit/test_p6_15_isolated_corpus_validation.py",
+      "reason": "tests of a milestone-specific script excluded above (scripts/p6_15_*)"
+    },
+    {
+      "pattern": "tests/unit/test_p6_15_read_only_smoke_observer.py",
+      "reason": "tests of a milestone-specific script excluded above (scripts/p6_15_*)"
+    },
+    {
+      "pattern": "tests/connectivity/test_loopback_probe_denied.py",
+      "reason": "exercises the connectivity-closure evidence scripts under runtime/** (internal)"
+    }
+  ],
+  "allowed_findings": [
+    {
+      "path": ".github/workflows/release-candidate.yml",
+      "rules": [
+        "secret_like"
+      ],
+      "reason": "GitHub Actions permission scope name id-token (keyless OIDC for the build-provenance attestation); not a credential"
+    },
+    {
+      "path": "deploy/github-pages/pages.workflow.yml.template",
+      "rules": [
+        "secret_like"
+      ],
+      "reason": "inactive Pages deployment template (outside .github/workflows); the id-token permission scope name is not a credential and activation needs a recorded decision plus a policy exception"
+    },
+    {
+      "path": "tests/security/test_p6_21m_product_auth.py",
+      "rules": [
+        "local_user_path",
+        "machine_path"
+      ],
+      "reason": "synthetic paths used to prove path redaction"
+    },
+    {
+      "path": "tests/integration/*",
+      "rules": [
+        "machine_path"
+      ],
+      "reason": "synthetic protected-root fixtures (C:/PADOS convention)"
+    },
+    {
+      "path": "tests/unit/test_p6_15_project_context.py",
+      "rules": [
+        "machine_path"
+      ],
+      "reason": "synthetic project root"
+    },
+    {
+      "path": "tests/compute_node/test_node_manifest_identity.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "bind-policy test vectors"
+    },
+    {
+      "path": "src/pados/compute_node/config.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "none expected"
+    },
+    {
+      "path": "scripts/release/*",
+      "rules": [
+        "company_marker",
+        "local_model_name",
+        "local_user_path",
+        "machine_path",
+        "private_ipv4"
+      ],
+      "reason": "scanner rule definitions"
+    },
+    {
+      "path": "packages/cli/test/review-fixes.test.js",
+      "rules": [
+        "local_user_path"
+      ],
+      "reason": "synthetic /home/runner paths (the public GitHub-hosted runner profile) proving the pack-time build-path refusal"
+    },
+    {
+      "path": "packages/cli/test/acceptance/install.acceptance.js",
+      "rules": [
+        "secret_like"
+      ],
+      "reason": "reads the disposable test-database password from the PADOS_DB_PASSWORD environment variable and asserts it never leaks; no literal credential"
+    },
+    {
+      "path": "tests/unit/test_p6_21g_product_loop.py",
+      "rules": [
+        "machine_path",
+        "local_model_name"
+      ],
+      "reason": "synthetic roots; negative guard asserting an internal name is absent"
+    },
+    {
+      "path": "tests/integration/test_p6_21h_durable_read_model.py",
+      "rules": [
+        "local_model_name"
+      ],
+      "reason": "negative guard asserting an internal name is absent"
+    },
+    {
+      "path": "tests/fixtures/sample_repo/secret_sample.txt",
+      "rules": [
+        "secret_like"
+      ],
+      "reason": "synthetic fake secret used by the secret-scanner tests"
+    },
+    {
+      "path": "web/package-lock.json",
+      "rules": [
+        "company_marker"
+      ],
+      "reason": "false positive inside base64 integrity hashes"
+    },
+    {
+      "path": "docs/clean-room/*",
+      "rules": [
+        "company_marker"
+      ],
+      "reason": "none expected; contracts are product-neutral"
+    },
+    {
+      "path": "tests/productization/test_productization.py",
+      "rules": [
+        "machine_path",
+        "private_ipv4",
+        "local_user_path"
+      ],
+      "reason": "hygiene test vectors (forbidden-pattern definitions)"
+    },
+    {
+      "path": "THIRD_PARTY_LICENSES/*",
+      "rules": [
+        "email"
+      ],
+      "reason": "verbatim upstream license attribution text (author contact lines required by the license)"
+    },
+    {
+      "path": "src/pados/remote/deployment.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "RFC 1918 network literals in the private-overlay bind allowlist (standard ranges, not hosts)"
+    },
+    {
+      "path": "tests/remote/test_remote_boundaries.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "synthetic private-overlay bind addresses proving the deployment guard"
+    },
+    {
+      "path": "tests/remote/remote_slice_support.py",
+      "rules": [
+        "machine_path"
+      ],
+      "reason": "synthetic protected-root fixture (C:/PADOS convention)"
+    },
+    {
+      "path": "tests/sandbox/test_sandbox_fabric.py",
+      "rules": [
+        "local_user_path"
+      ],
+      "reason": "synthetic user-profile paths proving host mounts are refused"
+    },
+    {
+      "path": "tests/connectivity/test_connectivity_state.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "synthetic private endpoint proving LOCAL locality is never WAN-gated"
+    },
+    {
+      "path": "tests/connectivity/test_background_probe.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "synthetic private/overlay probe targets proving WAN/overlay target-class validation"
+    },
+    {
+      "path": "tests/connectivity/test_provider_requirement.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "synthetic private endpoints proving PRIVATE_NETWORK providers are never WAN-gated"
+    },
+    {
+      "path": "tests/security/test_hardening_compute_node.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "synthetic private endpoints for the explicit private-host allowlist tests"
+    },
+    {
+      "path": "tests/security/test_hardening_remote.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "synthetic overlay bind addresses for remote deployment-guard tests"
+    },
+    {
+      "path": "tests/security/test_hardening_sandbox.py",
+      "rules": [
+        "local_user_path",
+        "private_ipv4"
+      ],
+      "reason": "synthetic host paths/addresses proving sandbox escapes are refused"
+    },
+    {
+      "path": "tests/security/test_hardening_cr05.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "synthetic overlay/LAN addresses proving listener attestation and private backend URL validation"
+    },
+    {
+      "path": "tests/connectivity/test_loopback_probe_denied.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "synthetic private-overlay probe targets proving legitimate targets are accepted while loopback is denied"
+    },
+    {
+      "path": "scripts/stage_b/windows_*.py",
+      "rules": [
+        "machine_path"
+      ],
+      "reason": "operator scripts refuse to run inside the protected primary checkout; the path is a guard, not a location used"
+    },
+    {
+      "path": "src/pados/local_intelligence/bench_tasks.py",
+      "rules": [
+        "local_user_path"
+      ],
+      "reason": "synthetic benchmark prompt asking for a private file the model must refuse to claim access to"
+    },
+    {
+      "path": "tests/local_intelligence/test_device_profiler.py",
+      "rules": [
+        "local_user_path",
+        "private_ipv4"
+      ],
+      "reason": "synthetic disk path and RFC 1918 address fixtures for path labelling and network-mode classification"
+    },
+    {
+      "path": "tests/local_intelligence/li_fakes.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "fake host addresses (RFC 1918) for device-profiler network-mode tests"
+    },
+    {
+      "path": "tests/local_intelligence/test_benchmark.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "non-loopback runtime URL fixture that the benchmark client must refuse"
+    },
+    {
+      "path": "tests/local_intelligence/test_runtime_discovery.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "non-loopback runtime URL fixture that runtime discovery must refuse"
+    }
+  ],
+  "release_blocker_findings": [],
+  "publication_enabled": false,
+  "publication_requires": [
+    "PUBLIC_EXPORT=CLEAN",
+    "DONOR_DERIVED_IMPLEMENTATION=CLEAN_ROOM_REIMPLEMENTED",
+    "explicit human publication decision",
+    "legal review items in THIRD_PARTY_LICENSE_AUDIT.md"
+  ],
+  "pados_owned_public_source_clean_room": {
+    "files": [
+      "src/pados/execution/context.py",
+      "src/pados/execution/handoff.py",
+      "src/pados/execution/receipts.py",
+      "src/pados/product_loop/state.py",
+      "src/pados/knowledge/identity.py",
+      "src/pados/knowledge/adapters.py",
+      "web/src/resourceCache.ts",
+      "web/src/useResource.ts"
+    ],
+    "evidence": [
+      "docs/clean-room/",
+      "runtime/artifacts/reports/public-release-rights-v1/CLEAN_ROOM_REIMPLEMENTATION.md",
+      "runtime/artifacts/reports/public-release-rights-v1/CLEAN_ROOM_SIMILARITY_AUDIT.md"
+    ]
+  }
+}

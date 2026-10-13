@@ -1,0 +1,212 @@
+# PADOS PR CI (Layer 1): fast, deterministic checks on every pull request and every branch push.
+# Lint, types, unit and contract tests, D1/D2/D4 regression gates, the offline migration-head gate, secret scan,
+# public-export hygiene and npm CLI tests. PR CI NEVER PACKAGES: packaging, the PostgreSQL integration gate and the
+# fresh-install migration gate run only in RC CI (rc-ci.yml), which calls this workflow first (workflow_call).
+# CI IS NOT PADOS AUTHORITY. CI SUCCESS != DEPLOYMENT AUTHORIZATION. BUILD SUCCESS != TRUST.
+# No repository secrets, no deploy, no PADOS semantic state; the only database is the disposable service
+# container below. Policy: docs/supply_chain/SECURE_CICD_V1.md, docs/supply_chain/CICD_V1.md and
+# src/pados/release/workflow_policy.py (enforced by tests/release_supply_chain).
+name: pr-ci
+on:
+  push:
+    branches-ignore: ["rc/**"]
+  pull_request:
+  workflow_call:
+permissions: {}
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    name: linux (lint, types, tests, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: pados
+          POSTGRES_USER: pados
+          POSTGRES_PASSWORD: ci-only-disposable
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U pados" --health-interval 5s --health-retries 20
+    env:
+      PADOS_DB_PASSWORD: ci-only-disposable
+      PADOS_DB_HOST: 127.0.0.1
+      PADOS_DB_PORT: "5432"
+      PADOS_DB_NAME: pados_p6_7_validation
+      PADOS_OPERATIONAL_DATABASE_NAME: pados_local_runtime
+      PADOS_CORPUS_DATABASE_NAME: pados_corpus_runtime
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install locked dependencies
+        run: python -m pip install -c requirements.lock -e ".[dev]"
+      - name: CI authority boundary policy
+        run: python scripts/release/ci_policy_check.py ci-policy.json
+      - name: Ruff
+        run: ruff check src tests
+      - name: mypy strict
+        run: mypy src && mypy --platform win32 src/pados/execution src/pados/product_loop src/pados/enterprise src/pados/compute_node src/pados/release
+      - name: Compile
+        run: python -m compileall -q src tests
+      - name: Provision isolated PostgreSQL test databases
+        run: |
+          python - <<'PY'
+          import os
+
+          import psycopg
+          from psycopg import sql
+
+          connection_settings = {
+              "host": os.environ["PADOS_DB_HOST"],
+              "port": int(os.environ["PADOS_DB_PORT"]),
+              "user": "pados",
+              "password": os.environ["PADOS_DB_PASSWORD"],
+          }
+          databases = (
+              "pados_p6_7_validation",
+              "pados_local_runtime",
+              "pados_corpus_runtime",
+          )
+
+          with psycopg.connect(dbname="postgres", autocommit=True, **connection_settings) as admin:
+              for database in databases:
+                  exists = admin.execute(
+                      "SELECT 1 FROM pg_database WHERE datname = %s", (database,)
+                  ).fetchone()
+                  if exists is None:
+                      admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
+
+          for database in databases:
+              with psycopg.connect(dbname=database, autocommit=True, **connection_settings) as connection:
+                  connection.execute("CREATE EXTENSION IF NOT EXISTS vector")
+          PY
+      # Targets come from the runtime's declared revisions (pados.config); CI pins no revision id.
+      - name: Migrate PostgreSQL test databases
+        run: |
+          python -m alembic upgrade heads
+          PADOS_DB_NAME=pados_local_runtime python -m alembic upgrade "$(python -c 'from pados.config import OPERATIONAL_REVISION_DEFAULT as r; print(r)')"
+          PADOS_DB_NAME=pados_corpus_runtime python -m alembic upgrade "$(python -c 'from pados.config import CORPUS_REVISION_DEFAULT as r; print(r)')"
+      # Declared lane revisions (pados.config) == Alembic script heads. The fresh-install half of this gate runs
+      # in RC CI (rc-ci.yml), against two new disposable lane databases.
+      - name: Migration head gate (declared, Alembic)
+        run: mkdir -p gates && python scripts/release/migration_gate.py gates/migration-gate.json
+      # Accepted RC2 invariants, run by name with skips refused (an env-gated skip is a failure here).
+      - name: D1 regression gate (approval subject binding)
+        run: python scripts/release/regression_gate.py D1 gates/d1.json --no-skips --min-tests 24 tests/unit/test_rc2_approval_subject.py tests/contract/test_rc2_route_surface_contract.py
+      - name: D2 regression gate (measured execution binding)
+        run: >-
+          python scripts/release/regression_gate.py D2 gates/d2.json --no-skips --min-tests 50
+          --allow-skip tests/local_intelligence/test_measured_execution_contract.py::test_the_accepted_m3_profile_still_loads_with_its_id_and_is_refused
+          tests/local_intelligence/test_rc2_execution_binding.py tests/local_intelligence/test_measured_execution_contract.py
+          tests/unit/test_rc2_graph_measured_binding.py
+      - name: D4 regression gate (TaskLoop model handoff)
+        run: python scripts/release/regression_gate.py D4 gates/d4.json --no-skips --min-tests 17 tests/unit/test_rc2_worker_model_executor.py tests/unit/test_p6_10_loop_engine.py
+      - name: Tests
+        run: python -m pytest -q -rs tests --ignore=tests/integration
+      - name: Public export hygiene
+        run: python scripts/release/public_export_check.py public-export.json
+      # Repository-owned scanner: records path, line and rule only; matched values are never printed.
+      - name: Repository secret scan
+        run: python scripts/release/secret_scan.py secret-scan.json
+      - name: Wheel build check
+        run: |
+          python -m pip wheel . --no-deps -w dist
+          python -c "import zipfile,glob;n=zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist();assert all(any(m in x for x in n) for m in ('pados/compute_node/provider.py','pados/lifecycle/storage_flexibility.py'))"
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Frontend
+        working-directory: web
+        run: npm ci --ignore-scripts && npm run typecheck && npm test && npm run lint && npm run build
+      - name: npm CLI tests
+        run: node --test "packages/cli/test/*.test.js"
+      - name: Keep gate reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gates-linux
+          path: gates/
+          if-no-files-found: warn
+          retention-days: 30
+  windows:
+    name: windows (native suites)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install locked dependencies
+        run: python -m pip install -c requirements.lock -e ".[dev]"
+      - name: Windows-native suites
+        run: python -m pytest -q tests/platform tests/consolidation tests/enterprise tests/compute_node tests/productization tests/release_supply_chain
+      # Lifecycle (incl. storage flexibility and storage accounting), advisory learning and security hardening on
+      # native Windows paths, locks and file modes. The three tests deselected below need the PostgreSQL service
+      # container, which only the linux job has; they run there in the full suite.
+      - name: Lifecycle, storage, learning and security (Windows-native)
+        run: >-
+          python -m pytest -q tests/lifecycle tests/learning tests/security
+          --deselect tests/security/test_p6_6_adversarial.py::test_illegal_task_transition_new_to_released_is_rejected
+          --deselect tests/security/test_p6_6_adversarial.py::test_index_repository_rejects_roots_outside_registered_project_boundary
+          --deselect tests/security/test_p6_6_adversarial.py::test_single_agent_loop_fails_closed_without_provider
+      - name: Public export hygiene and secret scan (Windows checkout)
+        run: python scripts/release/public_export_check.py public-export.json && python scripts/release/secret_scan.py secret-scan.json
+      # Deterministic only: measured-execution contract, planner and live-chain rehearsal against a FAKE runtime.
+      # Hosted runners have no reference GPU; physical hardware acceptance is a separate, hash-pinned evidence
+      # artifact verified independently (docs/supply_chain/HARDWARE_ACCEPTANCE_EVIDENCE.md), never mocked here.
+      - name: Local intelligence (fake runtime, model-independent)
+        run: python -m pytest -q tests/local_intelligence tests/resources tests/capability/test_local_capability_routing.py
+      - name: D1/D2/D4 regression gates (Windows-native)
+        shell: bash
+        run: |
+          mkdir -p gates
+          python scripts/release/regression_gate.py D1-windows gates/d1.json --no-skips --min-tests 24 tests/unit/test_rc2_approval_subject.py tests/contract/test_rc2_route_surface_contract.py
+          python scripts/release/regression_gate.py D2-windows gates/d2.json --no-skips --min-tests 50 --allow-skip tests/local_intelligence/test_measured_execution_contract.py::test_the_accepted_m3_profile_still_loads_with_its_id_and_is_refused tests/local_intelligence/test_rc2_execution_binding.py tests/local_intelligence/test_measured_execution_contract.py tests/unit/test_rc2_graph_measured_binding.py
+          python scripts/release/regression_gate.py D4-windows gates/d4.json --no-skips --min-tests 17 tests/unit/test_rc2_worker_model_executor.py tests/unit/test_p6_10_loop_engine.py
+      - name: Migration head gate (offline)
+        run: python scripts/release/migration_gate.py gates/migration-gate.json
+      - name: Keep gate reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gates-windows
+          path: gates/
+          if-no-files-found: warn
+          retention-days: 30
+  macos-static:
+    name: macos (static and contract)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install locked dependencies
+        run: python -m pip install -c requirements.lock -e ".[dev]"
+      - name: Static and contract checks
+        run: ruff check src tests && mypy src && python -m pytest -q tests/compute_node tests/enterprise tests/productization tests/release_supply_chain

@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=80", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pados"
+version = "0.1.0a1"
+description = "Intelligent Mindmap-driven Portable Cognitive & Execution Operating System"
+requires-python = ">=3.12"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "NOTICE"]
+dependencies = [
+  "alembic>=1.17,<2",
+  "fastapi>=0.124,<1",
+  "httpx>=0.28,<1",
+  "python-multipart>=0.0.20,<1",
+  "pypdf>=6.20.1,<7",  # pypdf.Configuration decode budget (packs/ocr/_pdf_worker.py)
+  "psutil>=7,<8",
+  "psycopg[binary]>=3.3,<4",
+  "pydantic-settings>=2.12,<3",
+  "sqlalchemy>=2.0,<3",
+  "structlog>=25,<26",
+  "typer>=0.20,<1",
+  "uvicorn>=0.38,<1"
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.19,<2",
+  "pytest>=9,<10",
+  "ruff>=0.14,<1"
+]
+
+[project.scripts]
+pados = "pados.cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+exclude = ["migrations/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+

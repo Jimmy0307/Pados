@@ -1,0 +1,38 @@
+{
+  "input_sha256": "549e2e9863209e1e4dc0b96a89315b7f36689b47f5892138eebaace7b287c1bf",
+  "label": "TEST_FIXTURE_ONLY",
+  "result": {
+    "pages": [
+      {
+        "height": 792,
+        "lines": [
+          {
+            "bbox": [
+              72,
+              72,
+              300,
+              90
+            ],
+            "confidence": 0.93,
+            "text": "Scanned appendix"
+          },
+          {
+            "bbox": [
+              72,
+              100,
+              280,
+              114
+            ],
+            "confidence": 0.85,
+            "text": "Signed and dated."
+          }
+        ],
+        "page_number": 2,
+        "unit": "pt",
+        "width": 612
+      }
+    ],
+    "schema_version": "ocr.engine-result/v1"
+  },
+  "schema_version": "ocr.fixture-truth/v1"
+}

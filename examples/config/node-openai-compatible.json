@@ -1,0 +1,40 @@
+{
+  "schema_version": "pados.compute-node.config.v1",
+  "bind_host": "127.0.0.1",
+  "port": 8765,
+  "state_dir": "./runtime/local/node-state",
+  "credential_ref": "secretref://env/PADOS_NODE_CREDENTIAL",
+  "privacy_class": "CONFIDENTIAL",
+  "resource_class": "CPU_LIGHT",
+  "limits": {
+    "max_concurrent_jobs": 1,
+    "max_queue_depth": 4,
+    "default_timeout_seconds": 120,
+    "max_timeout_seconds": 300
+  },
+  "node_name": "openai-compatible-node",
+  "capabilities": [
+    "LOCAL_INFERENCE"
+  ],
+  "backends": [
+    {
+      "backend_id": "llamacpp",
+      "kind": "llama_cpp",
+      "endpoint": "http://127.0.0.1:8080"
+    }
+  ],
+  "models": [
+    {
+      "backend_id": "llamacpp",
+      "backend_model": "REPLACE_WITH_DISCOVERED_MODEL",
+      "family": "REPLACE_FROM_DISCOVERY",
+      "version": "1",
+      "context_limit_tokens": 4096,
+      "tasks": [
+        "LOCAL_INFERENCE"
+      ],
+      "resource_class": "CPU_HEAVY",
+      "privacy_class": "CONFIDENTIAL"
+    }
+  ]
+}

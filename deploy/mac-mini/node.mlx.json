@@ -1,0 +1,45 @@
+{
+  "schema_version": "pados.compute-node.config.v1",
+  "node_name": "PADOS-LCN-01",
+  "bind_host": "192.0.2.10",
+  "allow_lan": true,
+  "port": 8765,
+  "state_dir": "./pados-node-state",
+  "credential_ref": "secretref://env/PADOS_NODE_CREDENTIAL",
+  "privacy_class": "CONFIDENTIAL",
+  "resource_class": "GPU",
+  "accelerators": [
+    "APPLE_SILICON"
+  ],
+  "capabilities": [
+    "LOCAL_INFERENCE",
+    "EMBEDDING"
+  ],
+  "limits": {
+    "max_concurrent_jobs": 1,
+    "max_queue_depth": 4,
+    "default_timeout_seconds": 240,
+    "max_timeout_seconds": 600
+  },
+  "backends": [
+    {
+      "backend_id": "mlx",
+      "kind": "mlx_openai_compatible",
+      "endpoint": "http://127.0.0.1:8080"
+    }
+  ],
+  "models": [
+    {
+      "backend_model": "REPLACE_WITH_DISCOVERED_MODEL",
+      "family": "REPLACE_FROM_DISCOVERY",
+      "version": "REPLACE_WITH_DIGEST_OR_VERSION",
+      "context_limit_tokens": 4096,
+      "tasks": [
+        "LOCAL_INFERENCE"
+      ],
+      "resource_class": "GPU",
+      "privacy_class": "CONFIDENTIAL",
+      "backend_id": "mlx"
+    }
+  ]
+}

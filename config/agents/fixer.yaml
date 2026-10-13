@@ -1,0 +1,4 @@
+role: fixer
+write_scope: assigned_worktree
+provider: mock
+

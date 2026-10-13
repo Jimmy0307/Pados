@@ -1,0 +1,85 @@
+# INACTIVE TEMPLATE - NOT AN ACTIVE WORKFLOW. GitHub runs only files under .github/workflows/; this file is
+# deliberately kept outside it. Activating it requires an explicit, policy-recorded human decision AND a
+# reviewed policy exception in src/pados/release/workflow_policy.py: it holds the OIDC id-token and pages
+# write scopes and a deployment environment, which the Secure CI/CD policy allows in no workflow job other
+# than the release attestation job. See deploy/github-pages/README.md and docs/supply_chain/SECURE_CICD_V1.md.
+#
+# CI SUCCESS != DEPLOYMENT AUTHORIZATION. This workflow only deploys the static UI.
+# Home Base, the scheduler, provider access, and semantic state are never available here.
+name: pages
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Deploy the reviewed static artifact to GitHub Pages
+        required: true
+        type: boolean
+        default: false
+permissions: {}
+concurrency:
+  group: pages-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      PADOS_CUSTOM_DOMAIN: ${{ vars.PADOS_CUSTOM_DOMAIN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Select Pages base path
+        shell: bash
+        run: |
+          if [[ -n "$PADOS_CUSTOM_DOMAIN" ]]; then
+            if [[ ! "$PADOS_CUSTOM_DOMAIN" =~ ^([A-Za-z0-9-]+\.)+[A-Za-z]{2,63}$ ]]; then
+              echo "PADOS_CUSTOM_DOMAIN is not a plain DNS hostname" >&2
+              exit 1
+            fi
+            echo "PADOS_PAGES_BASE=/" >> "$GITHUB_ENV"
+          else
+            echo "PADOS_PAGES_BASE=/Pados/" >> "$GITHUB_ENV"
+          fi
+      - name: Install locked frontend dependencies
+        working-directory: web
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Validate frontend
+        working-directory: web
+        run: npm run typecheck && npm test && npm run lint && npm run build
+      - name: Keep the Pages artifact focused on the Work Map
+        run: rm -f web/dist/operator.html web/dist/assets/operator-*.js web/dist/assets/operator-*.css
+      - name: Add optional custom domain marker
+        if: env.PADOS_CUSTOM_DOMAIN != ''
+        working-directory: web
+        run: printf '%s\n' "$PADOS_CUSTOM_DOMAIN" > dist/CNAME
+      - name: Upload static site artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          path: web/dist
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      pages: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy static frontend only
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

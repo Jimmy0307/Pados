@@ -1,0 +1,4 @@
+role: architect
+write_scope: plans_and_adr_drafts
+provider: mock
+

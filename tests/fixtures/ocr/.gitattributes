@@ -1,0 +1,5 @@
+# Fixture bytes are hashed (sidecars are keyed by SHA-256); never rewrite line endings.
+*.pdf binary
+*.png binary
+*.json text eol=lf
+*.py text eol=lf

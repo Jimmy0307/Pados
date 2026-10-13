@@ -1,0 +1,33 @@
+{
+  "name": "@pados-ai/cli",
+  "version": "0.1.0-alpha.1",
+  "description": "Install and run PADOS locally: npm bootstrap and UX entrypoint (PADOS Core remains the authority).",
+  "license": "AGPL-3.0-only",
+  "bin": {
+    "pados": "bin/pados.js"
+  },
+  "main": "lib/main.js",
+  "files": [
+    "bin/",
+    "lib/",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "optionalDependencies": {
+    "@pados-ai/runtime-darwin-arm64": "0.1.0-alpha.1",
+    "@pados-ai/runtime-linux-x64": "0.1.0-alpha.1",
+    "@pados-ai/runtime-win32-x64": "0.1.0-alpha.1"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "keywords": [
+    "pados",
+    "local-ai",
+    "installer"
+  ]
+}

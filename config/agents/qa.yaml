@@ -1,0 +1,4 @@
+role: qa
+write_scope: test_artifacts
+provider: deterministic
+

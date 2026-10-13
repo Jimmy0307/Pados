@@ -1,0 +1,42 @@
+{
+  "schema_version": "pados.compute-node.config.v1",
+  "bind_host": "192.0.2.10",
+  "port": 8765,
+  "state_dir": "./runtime/local/node-state",
+  "credential_ref": "secretref://env/PADOS_NODE_CREDENTIAL",
+  "privacy_class": "CONFIDENTIAL",
+  "resource_class": "CPU_LIGHT",
+  "limits": {
+    "max_concurrent_jobs": 1,
+    "max_queue_depth": 4,
+    "default_timeout_seconds": 120,
+    "max_timeout_seconds": 300
+  },
+  "node_name": "lan-node",
+  "allow_lan": true,
+  "capabilities": [
+    "LOCAL_INFERENCE"
+  ],
+  "backends": [
+    {
+      "backend_id": "deterministic",
+      "kind": "deterministic"
+    }
+  ],
+  "models": [
+    {
+      "backend_id": "deterministic",
+      "backend_model": "pados-deterministic-v1",
+      "family": "pados-deterministic",
+      "version": "1",
+      "context_limit_tokens": 8192,
+      "tasks": [
+        "LOCAL_INFERENCE",
+        "EMBEDDING",
+        "CLASSIFICATION"
+      ],
+      "resource_class": "CPU_LIGHT",
+      "privacy_class": "CONFIDENTIAL"
+    }
+  ]
+}

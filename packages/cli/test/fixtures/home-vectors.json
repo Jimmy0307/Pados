@@ -1,0 +1,19 @@
+{
+  "schema": "pados.install.home-vectors.v1",
+  "note": "Shared PADOS_HOME resolution vectors. The Node CLI (packages/cli/lib/home.js) and the Python runtime (src/pados/install/home.py) must both satisfy every vector, so the two resolvers can never drift. Synthetic user directories only.",
+  "vectors": [
+    {"name": "windows default", "platform": "win32", "env": {"LOCALAPPDATA": "D:\\profiles\\alice\\AppData\\Local"}, "user_home": "D:\\profiles\\alice", "expect": "D:\\profiles\\alice\\AppData\\Local\\PADOS"},
+    {"name": "windows without LOCALAPPDATA", "platform": "win32", "env": {}, "user_home": "D:\\profiles\\alice", "expect": "D:\\profiles\\alice\\AppData\\Local\\PADOS"},
+    {"name": "windows override", "platform": "win32", "env": {"PADOS_HOME": "D:\\pados-home", "LOCALAPPDATA": "D:\\profiles\\alice\\AppData\\Local"}, "user_home": "D:\\profiles\\alice", "expect": "D:\\pados-home"},
+    {"name": "windows reserved drive-root pados refused", "platform": "win32", "env": {"PADOS_HOME": "c:\\pados"}, "user_home": "D:\\profiles\\alice", "error": "PADOS_HOME_RESERVED_PATH"},
+    {"name": "windows reserved forward-slash form refused", "platform": "win32", "env": {"PADOS_HOME": "c:/Pados/"}, "user_home": "D:\\profiles\\alice", "error": "PADOS_HOME_RESERVED_PATH"},
+    {"name": "windows relative override refused", "platform": "win32", "env": {"PADOS_HOME": "pados-home"}, "user_home": "D:\\profiles\\alice", "error": "PADOS_HOME_NOT_ABSOLUTE"},
+    {"name": "linux default", "platform": "linux", "env": {}, "user_home": "/srv/users/alice", "expect": "/srv/users/alice/.local/share/pados"},
+    {"name": "linux xdg", "platform": "linux", "env": {"XDG_DATA_HOME": "/data/alice"}, "user_home": "/srv/users/alice", "expect": "/data/alice/pados"},
+    {"name": "linux relative xdg ignored", "platform": "linux", "env": {"XDG_DATA_HOME": "relative/dir"}, "user_home": "/srv/users/alice", "expect": "/srv/users/alice/.local/share/pados"},
+    {"name": "linux override", "platform": "linux", "env": {"PADOS_HOME": "/srv/pados/", "XDG_DATA_HOME": "/data/alice"}, "user_home": "/srv/users/alice", "expect": "/srv/pados"},
+    {"name": "linux relative override refused", "platform": "linux", "env": {"PADOS_HOME": "./pados"}, "user_home": "/srv/users/alice", "error": "PADOS_HOME_NOT_ABSOLUTE"},
+    {"name": "macos default", "platform": "darwin", "env": {}, "user_home": "/Users/alice", "expect": "/Users/alice/Library/Application Support/PADOS"},
+    {"name": "macos override", "platform": "darwin", "env": {"PADOS_HOME": "/Users/alice/.pados"}, "user_home": "/Users/alice", "expect": "/Users/alice/.pados"}
+  ]
+}

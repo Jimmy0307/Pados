@@ -1,0 +1,4 @@
+role: orchestrator
+write_scope: task_state
+provider: mock
+

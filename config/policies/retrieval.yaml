@@ -1,0 +1,6 @@
+source_authority_order:
+  - git_source
+  - verified_wiki
+  - inferred_wiki
+max_context_tokens: 6000
+

@@ -1,0 +1,48 @@
+{
+  "input_sha256": "696d9b52864988d00321aa154660f830ff88c3eb9be1e5f0bec5eb60a21932b0",
+  "label": "TEST_FIXTURE_ONLY",
+  "result": {
+    "pages": [
+      {
+        "height": 16,
+        "lines": [
+          {
+            "bbox": [
+              2,
+              0,
+              60,
+              4
+            ],
+            "confidence": 0.97,
+            "text": "INVOICE 2026"
+          },
+          {
+            "bbox": [
+              2,
+              8,
+              62,
+              11
+            ],
+            "confidence": 0.91,
+            "text": "Item  Qty  Price"
+          },
+          {
+            "bbox": [
+              2,
+              12,
+              50,
+              15
+            ],
+            "confidence": 0.88,
+            "text": "Pen  2  3.50"
+          }
+        ],
+        "page_number": 1,
+        "unit": "px",
+        "width": 64
+      }
+    ],
+    "schema_version": "ocr.engine-result/v1"
+  },
+  "schema_version": "ocr.fixture-truth/v1"
+}

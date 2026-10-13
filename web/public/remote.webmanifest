@@ -1,0 +1,13 @@
+{
+  "name": "PADOS Work Map",
+  "short_name": "PADOS",
+  "description": "A governed cognitive and execution operating system.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f2eb",
+  "theme_color": "#193f35",
+  "icons": [
+    { "src": "./pados-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

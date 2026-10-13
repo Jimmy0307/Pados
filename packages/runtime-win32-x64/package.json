@@ -1,0 +1,20 @@
+{
+  "name": "@pados-ai/runtime-win32-x64",
+  "version": "0.1.0-alpha.1",
+  "description": "PADOS runtime for Windows x64: relocatable CPython, locked dependency wheels and PADOS Core (installed into PADOS_HOME by @pados-ai/cli).",
+  "license": "AGPL-3.0-only",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "runtime/",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md",
+    "README.md"
+  ],
+  "preferUnplugged": true
+}
