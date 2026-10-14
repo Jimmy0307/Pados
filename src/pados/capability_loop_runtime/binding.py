@@ -34,7 +34,8 @@ from pados.lifecycle.minimization import DataMinimizationViolation, assert_minim
 GENESIS = "0" * 64
 _SHA256 = r"^[0-9a-f]{64}$"
 DEFAULT_MAX_BINDINGS = 100_000
-_LINE_BYTES = 8 * 1024
+_LINE_BYTES = 1024  # a binding record is a few hundred bytes; this bounds one JSONL line
+_RECORD_BYTES = _LINE_BYTES - 256  # minimization bound per record (headroom under the line cap)
 
 
 class _BindingRecord(BaseModel):
@@ -96,7 +97,10 @@ class AnchoredSessionBindingAuthority:
                  max_bindings: int = DEFAULT_MAX_BINDINGS) -> None:
         if not 1 <= max_bindings <= DEFAULT_MAX_BINDINGS:
             raise ValueError("BINDING_LOG_BOUND_INVALID")
-        self._file = JsonlFile(Path(log_path), max_line_bytes=_LINE_BYTES)
+        # Size the readable byte bound to the record cap so the log can never exceed the read limit before
+        # reaching ``max_bindings`` (which read_lines would otherwise reject as LEARNING_STORE_TOO_LARGE,
+        # bricking every existing session).
+        self._file = JsonlFile(Path(log_path), max_bytes=max_bindings * _LINE_BYTES, max_line_bytes=_LINE_BYTES)
         self._anchor = anchor
         self._max = max_bindings
 
@@ -147,7 +151,7 @@ class AnchoredSessionBindingAuthority:
         for index, line in enumerate(lines, start=1):
             try:
                 assert_minimized(line, allowed_keys=_RECORD_KEYS, max_string=160, max_items=16,
-                                 max_total_bytes=_LINE_BYTES - 512)
+                                 max_total_bytes=_RECORD_BYTES)
                 record = _BindingRecord.model_validate(line)  # _sealed() re-validates the governed contract
             except (ValueError, DataMinimizationViolation) as exc:
                 raise BindingAuthorityError("BINDING_LOG_CORRUPT") from exc
@@ -196,7 +200,7 @@ class AnchoredSessionBindingAuthority:
 def _minimized(record: _BindingRecord) -> dict[str, Any]:
     data = record.model_dump(mode="json")
     assert_minimized(data, allowed_keys=_RECORD_KEYS, max_string=160, max_items=16,
-                     max_total_bytes=_LINE_BYTES - 512)
+                     max_total_bytes=_RECORD_BYTES)
     return data
 
 
