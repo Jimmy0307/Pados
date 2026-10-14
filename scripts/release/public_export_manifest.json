@@ -241,6 +241,13 @@
       "reason": "synthetic fake secret used by the secret-scanner tests"
     },
     {
+      "path": "tests/capability_loop/test_r3_candidate_minimization.py",
+      "rules": [
+        "secret_like"
+      ],
+      "reason": "synthetic credential-shaped value proving the loop store refuses a non-minimized candidate"
+    },
+    {
       "path": "web/package-lock.json",
       "rules": [
         "company_marker"
