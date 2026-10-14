@@ -106,6 +106,9 @@ class AnchoredSessionBindingAuthority:
         self._file = JsonlFile(Path(log_path), max_bytes=max_bindings * _LINE_BYTES, max_line_bytes=_LINE_BYTES)
         self._anchor = anchor
         self._max = max_bindings
+        # Parsed-log cache keyed by the file identity/size/mtime; the anchor is still checked on every
+        # lookup, so a cache hit never skips the tamper-evidence, only the re-parse of unchanged content.
+        self._cache: tuple[tuple[int, int, int], tuple[_BindingRecord, ...]] | None = None
 
     # -- public contract ----------------------------------------------------
     def bind(self, binding: GovernedSessionBinding) -> BindingProof:
@@ -144,7 +147,14 @@ class AnchoredSessionBindingAuthority:
             raise BindingAuthorityError("BINDING_ANCHOR_UNAVAILABLE")
         return latest
 
+    def _stamp(self) -> tuple[int, int, int] | None:
+        info = self._file.stat()
+        return None if info is None else (info.st_ino, info.st_size, info.st_mtime_ns)
+
     def _load(self) -> list[_BindingRecord]:
+        stamp = self._stamp()
+        if stamp is not None and self._cache is not None and self._cache[0] == stamp:
+            return list(self._cache[1])  # file unchanged since the last parse (anchor still checked by caller)
         try:
             lines = self._file.read_lines()
         except LearningStoreError as exc:
@@ -166,6 +176,7 @@ class AnchoredSessionBindingAuthority:
                 raise BindingAuthorityError("BINDING_LOG_INCONSISTENT")  # one identity, two governed contexts
             contexts[record.binding.identity] = record.binding.context_hash
             records.append(record)
+        self._cache = None if stamp is None else (stamp, tuple(records))
         return records
 
     def _validated(self) -> list[_BindingRecord]:
@@ -216,7 +227,12 @@ class AnchoredSessionBindingAuthority:
             return  # the anchor DID advance; log and anchor are consistent -- keep the appended record
         if current != anchored:
             raise BindingAuthorityError("BINDING_ANCHOR_UNAVAILABLE") from exc  # unexpected head: never guess
-        self._file.rewrite([_minimized(record) for record in before])  # anchor unchanged: roll the log back
+        try:
+            self._file.rewrite([_minimized(record) for record in before])  # anchor unchanged: roll back
+        except (DataMinimizationViolation, LearningStoreError, OSError, ValueError) as rollback_exc:
+            # The rollback itself failed (full disk / lost permissions / IO); normalize rather than let a raw
+            # error escape. The log is left ahead of the anchor; the next op re-validates and fails closed.
+            raise BindingAuthorityError("BINDING_LOG_WRITE_FAILED") from rollback_exc
         refused = isinstance(exc, AnchorError) and exc.code in {"ANCHOR_CONFLICT", "ANCHOR_NOT_CONTINUING"}
         raise BindingAuthorityError("BINDING_ANCHOR_REFUSED" if refused
                                     else "BINDING_ANCHOR_UNAVAILABLE") from exc
