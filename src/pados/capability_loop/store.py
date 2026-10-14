@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from pados.capability_loop.contracts import CapabilityCandidate
+from pados.capability_loop.learning_contracts import is_valid_session_ref
 from pados.capability_loop.receipts import GENESIS, OperationReceipt, verify_chain
 from pados.connectivity.storage import atomic_write_json, read_json, store_lock
-from pados.lifecycle.minimization import assert_minimized
+from pados.lifecycle.minimization import DataMinimizationViolation, assert_minimized
 
 STORE_SCHEMA = "pados.capability_loop.store.v1"
 DEFAULT_MAX_RECEIPTS = 5000
@@ -34,6 +35,40 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+_SCALAR = (str, int, float, bool, type(None))
+
+
+def _validate_candidates(candidates: dict[Any, Any]) -> None:
+    """Every candidate validates as a model and its key equals its ``candidate_id``."""
+    for key, value in candidates.items():
+        if not isinstance(key, str):
+            raise LoopStoreError("LOOP_STORE_CORRUPT")
+        try:
+            candidate = CapabilityCandidate.model_validate(value)
+        except (TypeError, ValueError) as exc:
+            raise LoopStoreError("LOOP_STORE_CORRUPT") from exc
+        if candidate.candidate_id != key:
+            raise LoopStoreError("LOOP_STORE_CANDIDATE_KEY_MISMATCH")
+
+
+def _validate_progress(progress: dict[Any, Any]) -> None:
+    """Every progress row is a flat, bounded, scalar-valued dict keyed by a well-formed session ref."""
+    for key, row in progress.items():
+        if not isinstance(key, str) or not is_valid_session_ref(key) or not isinstance(row, dict):
+            raise LoopStoreError("LOOP_STORE_CORRUPT")
+        for field_name, field_value in row.items():
+            if not isinstance(field_name, str) or not isinstance(field_value, _SCALAR):
+                raise LoopStoreError("LOOP_STORE_CORRUPT")
+        percent = row.get("progress_percent")
+        if percent is not None and (isinstance(percent, bool) or not isinstance(percent, int)
+                                    or not 0 <= percent <= 100):
+            raise LoopStoreError("LOOP_STORE_CORRUPT")
+        try:
+            assert_minimized(row)
+        except DataMinimizationViolation as exc:
+            raise LoopStoreError("LOOP_STORE_CORRUPT") from exc
+
+
 class LoopStore:
     def __init__(self, path: Path, *, max_receipts: int = DEFAULT_MAX_RECEIPTS,
                  max_candidates: int = DEFAULT_MAX_CANDIDATES, clock: Callable[[], str] = _now) -> None:
@@ -48,12 +83,19 @@ class LoopStore:
         data = read_json(self.path)
         if not isinstance(data, dict) or set(data) != _KEYS or data.get("schema_version") != STORE_SCHEMA:
             raise LoopStoreError("LOOP_STORE_CORRUPT")
+        # Every persisted section is validated before the store reports healthy: a corrupt or tampered
+        # receipt chain, candidate or progress row fails the whole load closed, never partial-recovers.
+        if (not isinstance(data["receipts"], list) or not isinstance(data["candidates"], dict)
+                or not isinstance(data["progress"], dict)):
+            raise LoopStoreError("LOOP_STORE_CORRUPT")
         try:
             receipts = [OperationReceipt.model_validate(item) for item in data["receipts"]]
         except (TypeError, ValueError) as exc:
             raise LoopStoreError("LOOP_STORE_CORRUPT") from exc
         if not verify_chain(receipts):
             raise LoopStoreError("LOOP_STORE_CHAIN_BROKEN")
+        _validate_candidates(data["candidates"])
+        _validate_progress(data["progress"])
         return data
 
     def receipts(self) -> tuple[OperationReceipt, ...]:
