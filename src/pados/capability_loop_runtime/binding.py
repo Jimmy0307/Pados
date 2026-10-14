@@ -15,6 +15,8 @@ it is for ephemeral / test use where durable external anchoring is not the prope
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -106,34 +108,49 @@ class AnchoredSessionBindingAuthority:
         self._file = JsonlFile(Path(log_path), max_bytes=max_bindings * _LINE_BYTES, max_line_bytes=_LINE_BYTES)
         self._anchor = anchor
         self._max = max_bindings
-        # Parsed-log cache keyed by the file identity/size/mtime; the anchor is still checked on every
-        # lookup, so a cache hit never skips the tamper-evidence, only the re-parse of unchanged content.
-        self._cache: tuple[tuple[int, int, int], tuple[_BindingRecord, ...]] | None = None
+        # Parsed-log cache keyed by the file identity/size/mtime AND ctime (inode-change time, which utime
+        # cannot restore), so a same-size in-place rewrite invalidates the cache. The anchor is also checked
+        # on every lookup, so a cache hit never skips the tamper-evidence, only the re-parse of unchanged
+        # content.
+        self._cache: tuple[tuple[int, int, int, int], tuple[_BindingRecord, ...]] | None = None
 
     # -- public contract ----------------------------------------------------
     def bind(self, binding: GovernedSessionBinding) -> BindingProof:
-        with self._file.locked():
-            records = self._validated()
-            existing = _find(records, binding.identity)
-            if existing is not None:
-                if existing.binding.context_hash != binding.context_hash:
-                    raise BindingAuthorityError("BINDING_CONFLICT")  # no rebind to a different context
-                return self._proof(existing)  # idempotent: identical binding already recorded
-            if len(records) + 1 > self._max:
-                raise BindingAuthorityError("BINDING_LOG_FULL")
-            previous = records[-1] if records else None
-            record = _BindingRecord.seal(binding, seq=previous.seq + 1 if previous else 1,
-                                         prev_hash=previous.entry_hash if previous else GENESIS)
-            self._commit(records, [*records, record])
-            return self._proof(record)
+        with self._normalized():
+            with self._file.locked():
+                records = self._validated()
+                existing = _find(records, binding.identity)
+                if existing is not None:
+                    if existing.binding.context_hash != binding.context_hash:
+                        raise BindingAuthorityError("BINDING_CONFLICT")  # no rebind to a different context
+                    return self._proof(existing)  # idempotent: identical binding already recorded
+                if len(records) + 1 > self._max:
+                    raise BindingAuthorityError("BINDING_LOG_FULL")
+                previous = records[-1] if records else None
+                record = _BindingRecord.seal(binding, seq=previous.seq + 1 if previous else 1,
+                                             prev_hash=previous.entry_hash if previous else GENESIS)
+                self._commit(records, [*records, record])
+                return self._proof(record)
 
     def resolve(self, provider_id: str, external_session_ref: str) -> GovernedSessionBinding | None:
-        with self._file.locked():
-            records = self._validated()
+        with self._normalized():
+            with self._file.locked():
+                records = self._validated()
         found = _find(records, (provider_id, external_session_ref))
         return None if found is None else found.binding
 
     # -- internals ----------------------------------------------------------
+    @contextmanager
+    def _normalized(self) -> Iterator[None]:
+        """Translate filesystem / lock / parse failures into the authority's closed error vocabulary, so a
+        caller (LearningService) always sees a BindingAuthorityError rather than a raw store exception."""
+        try:
+            yield
+        except BindingAuthorityError:
+            raise
+        except (LearningStoreError, DataMinimizationViolation, OSError, ValueError) as exc:
+            raise BindingAuthorityError("BINDING_LOG_CORRUPT") from exc
+
     def _proof(self, record: _BindingRecord) -> BindingProof:
         return BindingProof(context_hash=record.binding.context_hash, sequence=record.seq,
                             anchor_checkpoint_hash=record.entry_hash)
@@ -147,9 +164,9 @@ class AnchoredSessionBindingAuthority:
             raise BindingAuthorityError("BINDING_ANCHOR_UNAVAILABLE")
         return latest
 
-    def _stamp(self) -> tuple[int, int, int] | None:
-        info = self._file.stat()
-        return None if info is None else (info.st_ino, info.st_size, info.st_mtime_ns)
+    def _stamp(self) -> tuple[int, int, int, int] | None:
+        info = self._file.stat()  # LearningStoreError here is normalized to BindingAuthorityError by bind/resolve
+        return None if info is None else (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
     def _load(self) -> list[_BindingRecord]:
         stamp = self._stamp()
@@ -222,20 +239,25 @@ class AnchoredSessionBindingAuthority:
         try:
             current = self._anchor.latest()
         except Exception as read_exc:  # noqa: BLE001 - an unreadable anchor after the write fails closed
+            # Includes a failed first-anchor initialization (sentinel written, head write failed -> head lost):
+            # roll the orphan log record back so the log is clean; the anchor stays in its fail-closed state.
+            self._rollback_log(before)
             raise BindingAuthorityError("BINDING_ANCHOR_UNAVAILABLE") from read_exc
         if current == after[-1].checkpoint:
             return  # the anchor DID advance; log and anchor are consistent -- keep the appended record
         if current != anchored:
             raise BindingAuthorityError("BINDING_ANCHOR_UNAVAILABLE") from exc  # unexpected head: never guess
-        try:
-            self._file.rewrite([_minimized(record) for record in before])  # anchor unchanged: roll back
-        except (DataMinimizationViolation, LearningStoreError, OSError, ValueError) as rollback_exc:
-            # The rollback itself failed (full disk / lost permissions / IO); normalize rather than let a raw
-            # error escape. The log is left ahead of the anchor; the next op re-validates and fails closed.
-            raise BindingAuthorityError("BINDING_LOG_WRITE_FAILED") from rollback_exc
+        self._rollback_log(before)  # anchor unchanged: roll back the orphan record
         refused = isinstance(exc, AnchorError) and exc.code in {"ANCHOR_CONFLICT", "ANCHOR_NOT_CONTINUING"}
         raise BindingAuthorityError("BINDING_ANCHOR_REFUSED" if refused
                                     else "BINDING_ANCHOR_UNAVAILABLE") from exc
+
+    def _rollback_log(self, before: list[_BindingRecord]) -> None:
+        """Restore the log to ``before``; a failed rollback is normalized (the next op re-validates closed)."""
+        try:
+            self._file.rewrite([_minimized(record) for record in before])
+        except (DataMinimizationViolation, LearningStoreError, OSError, ValueError) as exc:
+            raise BindingAuthorityError("BINDING_LOG_WRITE_FAILED") from exc
 
 
 def _minimized(record: _BindingRecord) -> dict[str, Any]:

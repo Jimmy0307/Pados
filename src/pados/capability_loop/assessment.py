@@ -106,7 +106,9 @@ def assess_goal(task: TaskEnvelope, goal: Goal, *, validated_capabilities: froze
     registered = frozenset(_bare_capability(item) for item in registered_capabilities)
     recommendations = {_bare_capability(r.required_capability): r for r in
                        recommend_capability_gap(task, goal, registered_capabilities=registered)}
-    mastery = dict(human_mastery or {})
+    # Canonicalize the supplied mastery keys too, so a grant-scoped key still matches the bare lookup below
+    # (otherwise measured mastery/evidence would be silently replaced by the UNASSESSED default).
+    mastery = {_bare_capability(key): value for key, value in (human_mastery or {}).items()}
     decisions: list[PathDecision] = []
     for required in goal.required_capabilities:
         bare = _bare_capability(required)

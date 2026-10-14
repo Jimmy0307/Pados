@@ -10,6 +10,8 @@ from __future__ import annotations
 from tests.work_protocol.test_completion import _envelope
 
 from pados.capability_loop.assessment import CapabilityPath, assess_goal
+from pados.capability_loop.learning_contracts import MasteryLevel
+from pados.capability_loop.lifecycle import CapabilityDimensions, SystemAvailability, ValidationStatus
 
 
 def _goal_with(*capabilities: str):
@@ -48,3 +50,16 @@ def test_prefixed_registered_set_marks_discover_candidate() -> None:
     # Registered (even prefixed) means the discover candidate is a CANDIDATE, not UNKNOWN availability.
     from pados.capability_loop.lifecycle import SystemAvailability
     assert result.decisions[0].dimensions.system_availability is SystemAvailability.CANDIDATE
+
+
+def test_prefixed_human_mastery_key_is_canonicalized() -> None:
+    # Round-9 Finding 3: measured mastery supplied under the grant-scoped key must still be found by the
+    # bare-id lookup, not silently replaced by UNASSESSED.
+    task, goal = _goal_with("CAD_EDIT")
+    dims = CapabilityDimensions(capability_id="CAD_EDIT", human_mastery=MasteryLevel.PASSED,
+                                system_availability=SystemAvailability.UNKNOWN,
+                                validation_status=ValidationStatus.UNVALIDATED)
+    result = assess_goal(task, goal, validated_capabilities=frozenset(),
+                         learnable_capabilities=frozenset({"CAD_EDIT"}), registered_capabilities=frozenset(),
+                         human_mastery={"CAPABILITY:CAD_EDIT": dims})  # grant-scoped mastery key
+    assert result.decisions[0].dimensions.human_mastery is MasteryLevel.PASSED
