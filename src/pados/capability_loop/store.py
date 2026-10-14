@@ -153,10 +153,12 @@ class LoopStore:
                     raise LoopStoreError("LOOP_STORE_FULL")
                 candidate_row = candidate.model_dump(mode="json")
                 assert_minimized(candidate_row)
+                _validate_candidates({candidate.candidate_id: candidate_row})  # must remain loadable
                 data["candidates"][candidate.candidate_id] = candidate_row
             if progress is not None:
                 key, value = progress
                 assert_minimized(value)
+                _validate_progress({key: value})  # refuse a row the load validator would later reject
                 data["progress"][key] = value
             atomic_write_json(self.path, data)
         return receipt

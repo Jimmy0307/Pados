@@ -34,8 +34,11 @@ from pados.lifecycle.minimization import DataMinimizationViolation, assert_minim
 GENESIS = "0" * 64
 _SHA256 = r"^[0-9a-f]{64}$"
 DEFAULT_MAX_BINDINGS = 100_000
-_LINE_BYTES = 1024  # a binding record is a few hundred bytes; this bounds one JSONL line
-_RECORD_BYTES = _LINE_BYTES - 256  # minimization bound per record (headroom under the line cap)
+# A binding record at contract-maximum sizes (four 96-char ids + a 128-char session ref + two 64-char
+# hashes + timestamp + json overhead) is well under ~1 KiB; 2 KiB gives ample headroom so every value
+# GovernedSessionBinding accepts fits, and the minimization bound stays under the per-line cap.
+_LINE_BYTES = 2048
+_RECORD_BYTES = _LINE_BYTES - 256
 
 
 class _BindingRecord(BaseModel):
@@ -184,17 +187,39 @@ class AnchoredSessionBindingAuthority:
 
     def _commit(self, before: list[_BindingRecord], after: list[_BindingRecord]) -> None:
         """Append the new record, then advance the anchor by compare-and-set from the validated head; on any
-        anchor refusal/unavailability restore ``before`` and fail closed, so the anchor keeps the trusted head
-        and a substituted chain is never laundered (mirrors the advice-log commit ordering)."""
-        self._file.append_line(_minimized(after[-1]))
+        anchor refusal/unavailability reconcile against the anchor's actual head and fail closed, so the anchor
+        keeps the trusted head and a substituted chain is never laundered (mirrors the advice-log ordering).
+
+        Any persistence failure (oversized/minimization/IO) is normalized to ``BindingAuthorityError`` so the
+        caller always sees the authority contract, never a raw store exception.
+        """
         anchored = before[-1].checkpoint if before else None
         try:
+            self._file.append_line(_minimized(after[-1]))
+        except (DataMinimizationViolation, LearningStoreError, OSError, ValueError) as exc:
+            raise BindingAuthorityError("BINDING_LOG_WRITE_FAILED") from exc
+        try:
             self._anchor.record(anchored, after[-1].checkpoint)
-        except Exception as exc:  # noqa: BLE001 - the anchor decides; any failure restores the previous state
-            self._file.rewrite([_minimized(record) for record in before])
-            refused = isinstance(exc, AnchorError) and exc.code in {"ANCHOR_CONFLICT", "ANCHOR_NOT_CONTINUING"}
-            raise BindingAuthorityError("BINDING_ANCHOR_REFUSED" if refused
-                                        else "BINDING_ANCHOR_UNAVAILABLE") from exc
+        except Exception as exc:  # noqa: BLE001 - the anchor decides; reconcile, then fail closed
+            self._reconcile_failed_anchor(exc, before, after, anchored)
+
+    def _reconcile_failed_anchor(self, exc: Exception, before: list[_BindingRecord],
+                                 after: list[_BindingRecord], anchored: Checkpoint | None) -> None:
+        """``record()`` may have committed the new checkpoint before raising (e.g. os.replace succeeded but a
+        following fsync failed). Inspect the anchor's actual head rather than assuming nothing changed.
+        """
+        try:
+            current = self._anchor.latest()
+        except Exception as read_exc:  # noqa: BLE001 - an unreadable anchor after the write fails closed
+            raise BindingAuthorityError("BINDING_ANCHOR_UNAVAILABLE") from read_exc
+        if current == after[-1].checkpoint:
+            return  # the anchor DID advance; log and anchor are consistent -- keep the appended record
+        if current != anchored:
+            raise BindingAuthorityError("BINDING_ANCHOR_UNAVAILABLE") from exc  # unexpected head: never guess
+        self._file.rewrite([_minimized(record) for record in before])  # anchor unchanged: roll the log back
+        refused = isinstance(exc, AnchorError) and exc.code in {"ANCHOR_CONFLICT", "ANCHOR_NOT_CONTINUING"}
+        raise BindingAuthorityError("BINDING_ANCHOR_REFUSED" if refused
+                                    else "BINDING_ANCHOR_UNAVAILABLE") from exc
 
 
 def _minimized(record: _BindingRecord) -> dict[str, Any]:
