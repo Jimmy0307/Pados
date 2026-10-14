@@ -90,6 +90,10 @@ class ReaDiscoveryProvider:
         try:
             session = self._session(transport)
             version = _runtime_version(session)
+            # Enforce runtime compatibility before opening the target or invoking any discovery tool: an
+            # incompatible REA runtime never gets to open the target or contribute candidate evidence.
+            if self._expected_version is not None and version is not None and version != self._expected_version:
+                return self._failed(FailureCode.INCOMPATIBLE_VERSION, ProviderStatus.DEGRADED, version)
             self._open(transport, target_path)
             evidence_doc = transport.call_tool(SESSION_TOOL, {}, timeout_seconds=self._timeout)
             return self._normalize(evidence_doc, version)
