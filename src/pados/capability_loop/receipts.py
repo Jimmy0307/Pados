@@ -25,11 +25,17 @@ GENESIS = "0" * 64
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
 _ID = re.compile(r"^[a-z][a-z0-9_.:-]{2,95}$")
 _CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+_SESSION_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
 def is_valid_receipt_id(value: object) -> bool:
     """True when ``value`` is a valid receipt identifier (project_id / provider_id contract)."""
     return isinstance(value, str) and bool(_ID.fullmatch(value))
+
+
+def is_valid_receipt_code(value: object) -> bool:
+    """True when ``value`` is a valid receipt code (capability_id / policy_code contract)."""
+    return isinstance(value, str) and bool(_CODE.fullmatch(value))
 
 
 class OperationKind(StrEnum):
@@ -72,6 +78,7 @@ class OperationReceipt(BaseModel):
     state_after: CapabilityState | None = None
     core_receipt_ref: str | None = None  # a Core StageReceipt / PlanReceipt hash, referenced only
     binding_digest: str | None = None  # digest of a session's governed binding; anchors it in this chain
+    session_ref: str | None = None  # the external session a learning receipt is about (for binding lineage)
     recorded_at: str = Field(min_length=1, max_length=40)
     semantic_authority: Literal["NONE"] = "NONE"
 
@@ -117,13 +124,22 @@ class OperationReceipt(BaseModel):
             raise ValueError("RECEIPT_CODE_INVALID")
         return value
 
+    @field_validator("session_ref")
+    @classmethod
+    def _session_ref(cls, value: str | None) -> str | None:
+        if value is not None and not _SESSION_REF.fullmatch(value):
+            raise ValueError("RECEIPT_SESSION_REF_INVALID")
+        return value
+
     @property
     def state_changed(self) -> bool:
         return self.state_before != self.state_after
 
     @property
     def receipt_hash(self) -> str:
-        return canonical_hash(self.model_dump(mode="json"))
+        # Exclude absent/default (None) fields so adding an optional field never changes the hash of
+        # receipts that do not use it: a store written before a field existed still verifies after upgrade.
+        return canonical_hash(self.model_dump(mode="json", exclude_none=True))
 
 
 def verify_chain(receipts: tuple[OperationReceipt, ...] | list[OperationReceipt]) -> bool:

@@ -40,6 +40,7 @@ from pados.capability_loop.receipts import (
     OperationKind,
     OperationReceipt,
     OperationResult,
+    is_valid_receipt_code,
     is_valid_receipt_id,
 )
 from pados.capability_loop.store import LoopStore
@@ -129,7 +130,7 @@ class LearningService:
         binding, bind_code = self._resolve_binding(session_ref, contract)
         if bind_code is not None:
             project = _safe_project_id(binding.project_id if binding is not None else contract.get("project_id"))
-            capability = _gap_capability(binding.capability_gap_ref) if binding is not None \
+            capability = _safe_capability_code(binding.capability_gap_ref) if binding is not None \
                 else _UNRESOLVED_CAPABILITY
             return self._coded_refusal(kind, project, None, request_digest, bind_code, None,
                                        capability_override=capability)
@@ -143,9 +144,10 @@ class LearningService:
         if not decision.allowed:
             return self._refusal(kind, binding.project_id, binding.capability_gap_ref, request_digest, decision)
         outcome = call(binding)
-        # The provider must answer about the session we asked for; a foreign session_ref never inherits this
-        # binding's authorization. Reject before any store/binding update.
-        if outcome.session is not None and outcome.session.session_ref != binding.session_ref:
+        # The provider must answer about the session we asked for, and any assessment it returns must carry
+        # the bound session/gap/provider identity. A foreign session or a mis-attributed assessment never
+        # inherits this binding's authorization: reject before any store/binding update.
+        if not _outcome_matches_binding(outcome, binding):
             return self._record(kind, binding, request_digest, decision, outcome,
                                 forced_failure=FailureCode.MALFORMED_RESPONSE)
         return self._record(kind, binding, request_digest, decision, outcome)
@@ -164,9 +166,12 @@ class LearningService:
                 provider_id=str(row["provider_id"]))
         except (KeyError, ValueError):
             return None, GateCode.SESSION_NOT_BOUND  # a row without a complete governed binding is not usable
-        # Tamper-evidence: the advisory row is authoritative only if its binding digest is anchored by a
-        # creation receipt in the hash-chained log. A mutated row no longer matches, even with a valid grant.
-        if binding.digest not in self._creation_binding_digests():
+        # Tamper-evidence: the advisory row is authoritative only if its binding digest matches the digest
+        # anchored by the LATEST creation receipt that currently owns this session id in the hash-chained
+        # log. A mutated row -- or a replay of an earlier owner after the session id was reused -- no longer
+        # matches, even with a valid current grant.
+        anchor = self._latest_creation_digest(session_ref)
+        if anchor is None or binding.digest != anchor:
             return binding, GateCode.SESSION_BINDING_TAMPERED
         if binding.provider_id != self._provider.provider_id:
             return binding, GateCode.SESSION_PROVIDER_MISMATCH
@@ -175,10 +180,14 @@ class LearningService:
             return binding, GateCode.SESSION_PROJECT_MISMATCH
         return binding, None
 
-    def _creation_binding_digests(self) -> set[str]:
-        """Binding digests anchored by creation receipts in the (chain-verified) receipt log."""
-        return {receipt.binding_digest for receipt in self._store.receipts()
-                if receipt.operation is OperationKind.LEARN_CREATE_SESSION and receipt.binding_digest is not None}
+    def _latest_creation_digest(self, session_ref: str) -> str | None:
+        """The binding digest of the LATEST creation receipt that owns ``session_ref`` (chain-verified)."""
+        latest: str | None = None
+        for receipt in self._store.receipts():  # receipts() returns the chain in sequence order
+            if (receipt.operation is OperationKind.LEARN_CREATE_SESSION
+                    and receipt.session_ref == session_ref and receipt.binding_digest is not None):
+                latest = receipt.binding_digest
+        return latest
 
     # -- recording ----------------------------------------------------------
     def _refusal(self, kind: OperationKind, project_id: str, capability_gap_ref: str,
@@ -190,7 +199,10 @@ class LearningService:
                        request_digest: str, policy_code: str, policy_decision_hash: str | None, *,
                        capability_override: str | None = None) -> OperationReceipt:
         capability_id = capability_override or (
-            _gap_capability(capability_gap_ref) if capability_gap_ref is not None else _UNRESOLVED_CAPABILITY)
+            _safe_capability_code(capability_gap_ref) if capability_gap_ref is not None
+            else _UNRESOLVED_CAPABILITY)
+        if not is_valid_receipt_code(capability_id):  # final guard against any malformed code reaching the model
+            capability_id = _UNRESOLVED_CAPABILITY
         return self._store.append({
             "operation": kind, "project_id": _safe_project_id(project_id), "request_digest": request_digest,
             "provider_id": self._provider.provider_id, "capability_id": capability_id,
@@ -204,7 +216,7 @@ class LearningService:
         return self._store.append({
             "operation": OperationKind.LEARN_CREATE_SESSION, "project_id": request.project_id,
             "request_digest": request_digest, "provider_id": self._provider.provider_id,
-            "capability_id": _gap_capability(request.capability_gap_ref), "policy_code": decision.code,
+            "capability_id": _safe_capability_code(request.capability_gap_ref), "policy_code": decision.code,
             "policy_decision_hash": decision.policy_decision_hash,
             "result": OperationResult.PROVIDER_FAILED, "failure": outcome.failure, "evidence_digests": (),
             "limitations": (), "accepted_into_loop": False, "state_before": None, "state_after": None})
@@ -228,9 +240,9 @@ class LearningService:
         return self._store.append({
             "operation": kind, "project_id": binding.project_id, "request_digest": request_digest,
             "provider_id": self._provider.provider_id,
-            "capability_id": _gap_capability(binding.capability_gap_ref),
+            "capability_id": _safe_capability_code(binding.capability_gap_ref),
             "policy_code": decision.code, "policy_decision_hash": decision.policy_decision_hash,
-            "binding_digest": binding.digest,
+            "binding_digest": binding.digest, "session_ref": binding.session_ref,
             "result": OperationResult.PROVIDER_FAILED if failed else OperationResult.RECORDED,
             "failure": failure, "evidence_digests": evidence_digests, "limitations": limitations,
             "accepted_into_loop": not failed, "state_before": None, "state_after": None},
@@ -246,10 +258,39 @@ def _safe_project_id(candidate: object) -> str:
     return str(candidate) if is_valid_receipt_id(candidate) else _SAFE_PROJECT_PLACEHOLDER
 
 
+def _outcome_matches_binding(outcome: LearningOutcome, binding: _SessionBinding) -> bool:
+    """The provider's own session/assessment identity must match the authorized binding.
+
+    Guards against a well-typed but mis-attributed response: a session object for a different session_ref,
+    or an assessment whose own session/gap/provider identity differs from the binding (its evidence would
+    otherwise be recorded against the wrong progress row).
+    """
+    session = outcome.session
+    if session is not None and session.session_ref != binding.session_ref:
+        return False
+    assessment = outcome.assessment
+    if assessment is not None and (
+            assessment.session_ref != binding.session_ref
+            or assessment.capability_gap_ref != binding.capability_gap_ref
+            or assessment.provider_id != binding.provider_id):
+        return False
+    return True
+
+
+def _safe_capability_code(capability_gap_ref: str) -> str:
+    """A receipt-valid capability code for a gap ref, or the unresolved placeholder if none can be formed."""
+    code = _gap_capability(capability_gap_ref)
+    return code if is_valid_receipt_code(code) else _UNRESOLVED_CAPABILITY
+
+
 def _gap_capability(capability_gap_ref: str) -> str:
-    """A gap ref like ``gap:cad_edit`` maps to a capability-id-shaped code for the receipt."""
+    """A gap ref like ``gap:cad_edit`` maps to a capability-id-shaped code for the receipt.
+
+    Only ASCII alphanumerics survive: a tampered gap ref carrying Unicode alphanumerics (e.g. ``gap:ééé``)
+    must not produce a code that fails the receipt's ASCII code contract and raises.
+    """
     tail = capability_gap_ref.split(":")[-1].split(".")[-1]
-    code = "".join(ch if ch.isalnum() else "_" for ch in tail).upper().strip("_")
+    code = "".join(ch if (ch.isascii() and ch.isalnum()) else "_" for ch in tail).upper().strip("_")
     if not code or not code[0].isalpha():
         code = f"GAP_{code}" if code else "GAP"
     return code[:63] if len(code) >= 3 else f"{code}_GAP"

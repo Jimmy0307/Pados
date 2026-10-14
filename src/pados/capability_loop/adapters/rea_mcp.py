@@ -69,7 +69,7 @@ class ReaDiscoveryProvider:
         try:
             session = self._session(transport)
             version = _runtime_version(session)
-            if self._expected_version is not None and version is not None and version != self._expected_version:
+            if self._expected_version is not None and version != self._expected_version:
                 return ProviderHealth(provider_id=self.provider_id, status=ProviderStatus.DEGRADED,
                                       code=FailureCode.INCOMPATIBLE_VERSION.value, runtime_version=version)
             return ProviderHealth(provider_id=self.provider_id, status=ProviderStatus.AVAILABLE,
@@ -91,8 +91,10 @@ class ReaDiscoveryProvider:
             session = self._session(transport)
             version = _runtime_version(session)
             # Enforce runtime compatibility before opening the target or invoking any discovery tool: an
-            # incompatible REA runtime never gets to open the target or contribute candidate evidence.
-            if self._expected_version is not None and version is not None and version != self._expected_version:
+            # incompatible REA runtime never gets to open the target or contribute candidate evidence. When a
+            # version is pinned, a runtime that omits/malforms its version is incompatible (cannot be proven
+            # compatible), so a missing version is rejected too.
+            if self._expected_version is not None and version != self._expected_version:
                 return self._failed(FailureCode.INCOMPATIBLE_VERSION, ProviderStatus.DEGRADED, version)
             self._open(transport, target_path)
             evidence_doc = transport.call_tool(SESSION_TOOL, {}, timeout_seconds=self._timeout)

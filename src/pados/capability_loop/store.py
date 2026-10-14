@@ -39,7 +39,12 @@ _SCALAR = (str, int, float, bool, type(None))
 
 
 def _validate_candidates(candidates: dict[Any, Any]) -> None:
-    """Every candidate validates as a model and its key equals its ``candidate_id``."""
+    """Every candidate validates as a model, its key equals its ``candidate_id``, and it is minimized.
+
+    The data-minimization guard enforced on write is reapplied on load: a tampered row that satisfies the
+    model (for example a ``description`` carrying a credential-shaped value) but violates minimization is
+    refused.
+    """
     for key, value in candidates.items():
         if not isinstance(key, str):
             raise LoopStoreError("LOOP_STORE_CORRUPT")
@@ -49,6 +54,10 @@ def _validate_candidates(candidates: dict[Any, Any]) -> None:
             raise LoopStoreError("LOOP_STORE_CORRUPT") from exc
         if candidate.candidate_id != key:
             raise LoopStoreError("LOOP_STORE_CANDIDATE_KEY_MISMATCH")
+        try:
+            assert_minimized(candidate.model_dump(mode="json"))
+        except DataMinimizationViolation as exc:
+            raise LoopStoreError("LOOP_STORE_CORRUPT") from exc
 
 
 def _validate_progress(progress: dict[Any, Any]) -> None:
