@@ -16,6 +16,7 @@ from loop_learning_support import (
     LEARNING_ADAPTER,
     LEARNING_CAPABILITY,
     FakeHttp,
+    binding_authority,
     contract,
     grant,
 )
@@ -31,7 +32,7 @@ _BAD_PROJECTS = ["x", "../../bad", "bad\nproject", "p" * 300, "", "UPPER_CASE"]
 
 def _service(tmp_path: Path, http: FakeHttp) -> LearningService:
     return LearningService(OpenMaicLearningProvider(ENDPOINT, http), LoopStore(tmp_path / "loop.json"),
-                           capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER)
+                           capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER, authority=binding_authority())
 
 
 def test_valid_project_id_gives_normal_unknown_session_receipt(tmp_path: Path) -> None:

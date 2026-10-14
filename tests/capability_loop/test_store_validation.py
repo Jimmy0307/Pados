@@ -16,6 +16,7 @@ from loop_learning_support import (
     LEARNING_ADAPTER,
     LEARNING_CAPABILITY,
     FakeHttp,
+    binding_authority,
     generate_ok,
     learning_request,
 )
@@ -51,7 +52,7 @@ def _valid_store(tmp_path: Path) -> Path:
                      capability=DISCOVERY_CAPABILITY, adapter=DISCOVERY_ADAPTER).discover(
         request, target=target(tmp_path), contract=contract(), grant=grant())
     LearningService(OpenMaicLearningProvider(ENDPOINT, FakeHttp({**generate_ok()})), store,
-                    capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER).create_session(
+                    capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER, authority=binding_authority()).create_session(
         learning_request(), contract=l_contract(), grant=l_grant(), classification=DataClassification.INTERNAL)
     return path
 

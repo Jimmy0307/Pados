@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Round-4 Finding 2: ownership is re-checked atomically with the record (resolve-then-record race).
+"""Concurrent reuse of a session id cannot hijack ownership: the authority binding is immutable.
 
-If a session id is concurrently reused after a follow-up resolves its binding but before it records, the
-record must fail closed instead of overwriting the progress row with the now-stale binding. We force that
-interleaving deterministically: the provider call, mid-operation, lets another project re-create the same
-session id; the follow-up's atomic ownership precondition then refuses the write.
+Two services sharing one authority (as two processes would share one authoritative binding log) can never
+both own the same session id. The second, concurrent bind of the same id to a different project fails closed,
+so there is no resolve-then-record ownership race to exploit.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 
 from loop_learning_support import (
@@ -17,77 +15,51 @@ from loop_learning_support import (
     LEARNING_ADAPTER,
     LEARNING_CAPABILITY,
     FakeHttp,
+    binding_authority,
     contract,
     generate_ok,
     grant,
     learning_request,
 )
 
-from pados.capability_loop.adapters.openmaic_http import OPENMAIC_PROVIDER_ID, OpenMaicLearningProvider
-from pados.capability_loop.contracts import ProviderHealth, ProviderStatus
+from pados.capability_loop.adapters.openmaic_http import OpenMaicLearningProvider
+from pados.capability_loop.gate import GateCode
 from pados.capability_loop.learning import LearningService
-from pados.capability_loop.learning_contracts import (
-    LearningOutcome,
-    LearningRequest,
-    LearningSession,
-    LearningSessionStatus,
-    ModelRouting,
-)
 from pados.capability_loop.receipts import OperationResult
 from pados.capability_loop.store import LoopStore
 from pados.enterprise.classification import DataClassification
 
 SESSION = "job-123"
+_STATE = {("GET", f"/api/generate-classroom/{SESSION}"): (200, {"jobId": SESSION, "step": "completed",
+                                                                "progress": 100})}
 
 
-def _session() -> LearningSession:
-    return LearningSession(provider_id=OPENMAIC_PROVIDER_ID, session_ref=SESSION,
-                           status=LearningSessionStatus.READY,
-                           model_routing=ModelRouting.EXTERNAL_PROVIDER_CONTROLLED, materials_bound=0,
-                           progress_percent=100)
+def _service(store: LoopStore, http: FakeHttp, authority: object) -> LearningService:
+    return LearningService(OpenMaicLearningProvider(ENDPOINT, http), store, capability=LEARNING_CAPABILITY,
+                           adapter=LEARNING_ADAPTER, authority=authority)
 
 
-class _HookedProvider:
-    """Creates SESSION for project A; on a later poll it runs a hook (a concurrent takeover) mid-call."""
-
-    provider_id = OPENMAIC_PROVIDER_ID
-
-    def __init__(self, on_poll: Callable[[], None]) -> None:
-        self._on_poll = on_poll
-
-    def health(self) -> ProviderHealth:
-        return ProviderHealth(provider_id=self.provider_id, status=ProviderStatus.AVAILABLE)
-
-    def create_session(self, request: LearningRequest) -> LearningOutcome:
-        return LearningOutcome(provider_id=self.provider_id, status=ProviderStatus.AVAILABLE, session=_session())
-
-    def session_state(self, session_ref: str) -> LearningOutcome:
-        self._on_poll()  # another project re-creates the same session id between resolve and record
-        return LearningOutcome(provider_id=self.provider_id, status=ProviderStatus.AVAILABLE, session=_session())
-
-    def assessment(self, session_ref: str, capability_gap_ref: str) -> LearningOutcome:  # pragma: no cover
-        return LearningOutcome(provider_id=self.provider_id, status=ProviderStatus.AVAILABLE, session=_session())
-
-
-def test_concurrent_reuse_during_poll_fails_closed(tmp_path: Path) -> None:
+def test_concurrent_reuse_is_refused_and_owner_can_poll(tmp_path: Path) -> None:
     store = LoopStore(tmp_path / "loop.json")
+    authority = binding_authority()  # shared, as two processes share one authoritative binding log
+    http_a = FakeHttp({**HEALTH_OK, **generate_ok(job_id=SESSION), **_STATE})
+    http_b = FakeHttp({**HEALTH_OK, **generate_ok(job_id=SESSION)})
+    service_a = _service(store, http_a, authority)
+    service_b = _service(store, http_b, authority)
 
-    def takeover() -> None:
-        # Project B re-creates the SAME session id, becoming the latest owner and overwriting the row.
-        http_b = FakeHttp({**HEALTH_OK, **generate_ok(job_id=SESSION)})
-        LearningService(OpenMaicLearningProvider(ENDPOINT, http_b), store,
-                        capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER).create_session(
-            learning_request(project_id="proj-b", work_contract_id="wc-2", request_id="req-b"),
-            contract=contract(project_id="proj-b", work_contract_id="wc-2"),
-            grant=grant(project_id="proj-b", work_contract_id="wc-2"),
-            classification=DataClassification.INTERNAL)
+    assert service_a.create_session(learning_request(), contract=contract(), grant=grant(),
+                                    classification=DataClassification.INTERNAL).result is OperationResult.RECORDED
 
-    service_a = LearningService(_HookedProvider(takeover), store,
-                                capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER)
-    service_a.create_session(learning_request(), contract=contract(), grant=grant(),
-                             classification=DataClassification.INTERNAL)
+    # Project B, concurrently, reuses the same session id against the shared authority: refused at bind.
+    receipt_b = service_b.create_session(
+        learning_request(project_id="proj-b", work_contract_id="wc-2", request_id="req-b"),
+        contract=contract(project_id="proj-b", work_contract_id="wc-2"),
+        grant=grant(project_id="proj-b", work_contract_id="wc-2"),
+        classification=DataClassification.INTERNAL)
+    assert receipt_b.result is OperationResult.REFUSED_BY_POLICY
+    assert receipt_b.policy_code == GateCode.SESSION_BIND_REFUSED
 
-    receipt = service_a.session_state(session_ref=SESSION, contract=contract(), grant=grant())
-    assert receipt.result is OperationResult.REFUSED_BY_POLICY  # A's stale binding is refused at record time
-    # The progress row was NOT overwritten back to project A by the losing follow-up.
-    assert store.progress()[SESSION]["project_id"] == "proj-b"
+    # Project A (the owner) can still poll; the progress projection stays project A.
+    poll = service_a.session_state(session_ref=SESSION, contract=contract(), grant=grant())
+    assert poll.result is OperationResult.RECORDED
+    assert store.progress()[SESSION]["project_id"] == "proj-a"

@@ -16,6 +16,7 @@ from loop_learning_support import (
     LEARNING_ADAPTER,
     LEARNING_CAPABILITY,
     FakeHttp,
+    binding_authority,
     contract,
     generate_ok,
     grant,
@@ -38,13 +39,13 @@ def _http() -> FakeHttp:
     return FakeHttp({**HEALTH_OK, **generate_ok(step="researching", progress=20), **_STATE_ROUTE})
 
 
-def _service(store: LoopStore, http: FakeHttp) -> LearningService:
+def _service(store: LoopStore, http: FakeHttp, authority: object) -> LearningService:
     return LearningService(OpenMaicLearningProvider(ENDPOINT, http), store,
-                           capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER)
+                           capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER, authority=authority)
 
 
-def _created(store: LoopStore, http: FakeHttp) -> None:
-    receipt = _service(store, http).create_session(
+def _created(store: LoopStore, http: FakeHttp, authority: object) -> None:
+    receipt = _service(store, http, authority).create_session(
         learning_request(), contract=contract(), grant=grant(), classification=DataClassification.INTERNAL)
     assert receipt.result is OperationResult.RECORDED
 
@@ -57,8 +58,9 @@ def _get_calls(http: FakeHttp) -> list[tuple[str, str]]:
 def test_authorized_poll_records_real_policy_decision_hash(tmp_path: Path) -> None:
     http = _http()
     store = LoopStore(tmp_path / "loop.json")
-    _created(store, http)
-    receipt = _service(store, http).session_state(session_ref=SESSION, contract=contract(), grant=grant())
+    auth = binding_authority()
+    _created(store, http, auth)
+    receipt = _service(store, http, auth).session_state(session_ref=SESSION, contract=contract(), grant=grant())
     assert receipt.policy_code == GateCode.ALLOWED and receipt.result is OperationResult.RECORDED
     assert receipt.policy_decision_hash is not None and len(receipt.policy_decision_hash) == 64
     assert verify_chain(store.receipts())
@@ -67,8 +69,9 @@ def test_authorized_poll_records_real_policy_decision_hash(tmp_path: Path) -> No
 def test_authorized_assessment_is_allowed(tmp_path: Path) -> None:
     http = _http()
     store = LoopStore(tmp_path / "loop.json")
-    _created(store, http)
-    receipt = _service(store, http).assessment(session_ref=SESSION, contract=contract(), grant=grant())
+    auth = binding_authority()
+    _created(store, http, auth)
+    receipt = _service(store, http, auth).assessment(session_ref=SESSION, contract=contract(), grant=grant())
     assert receipt.result is OperationResult.RECORDED
     assert receipt.policy_decision_hash is not None
 
@@ -77,8 +80,9 @@ def test_authorized_assessment_is_allowed(tmp_path: Path) -> None:
 def test_unknown_session_is_refused_before_provider(tmp_path: Path) -> None:
     http = _http()
     store = LoopStore(tmp_path / "loop.json")
-    _created(store, http)
-    receipt = _service(store, http).session_state(
+    auth = binding_authority()
+    _created(store, http, auth)
+    receipt = _service(store, http, auth).session_state(
         session_ref="job-guessed", contract=contract(), grant=grant())
     assert receipt.result is OperationResult.REFUSED_BY_POLICY
     assert receipt.policy_code == GateCode.SESSION_NOT_BOUND
@@ -88,8 +92,9 @@ def test_unknown_session_is_refused_before_provider(tmp_path: Path) -> None:
 def test_wrong_project_is_refused(tmp_path: Path) -> None:
     http = _http()
     store = LoopStore(tmp_path / "loop.json")
-    _created(store, http)
-    receipt = _service(store, http).session_state(
+    auth = binding_authority()
+    _created(store, http, auth)
+    receipt = _service(store, http, auth).session_state(
         session_ref=SESSION, contract=contract(project_id="proj-other"), grant=grant(project_id="proj-other"))
     assert receipt.result is OperationResult.REFUSED_BY_POLICY
     assert receipt.policy_code == GateCode.SESSION_PROJECT_MISMATCH
@@ -99,8 +104,9 @@ def test_wrong_project_is_refused(tmp_path: Path) -> None:
 def test_missing_grant_is_refused(tmp_path: Path) -> None:
     http = _http()
     store = LoopStore(tmp_path / "loop.json")
-    _created(store, http)
-    receipt = _service(store, http).session_state(
+    auth = binding_authority()
+    _created(store, http, auth)
+    receipt = _service(store, http, auth).session_state(
         session_ref=SESSION, contract=contract(), grant=grant(capabilities=[]))
     assert receipt.result is OperationResult.REFUSED_BY_POLICY
     assert receipt.policy_code == GateCode.GRANT_REFUSED
@@ -111,8 +117,9 @@ def test_revoked_capability_grant_is_refused(tmp_path: Path) -> None:
     # The grant now authorizes a different capability than the session's: follow-up must fail closed.
     http = _http()
     store = LoopStore(tmp_path / "loop.json")
-    _created(store, http)
-    receipt = _service(store, http).session_state(
+    auth = binding_authority()
+    _created(store, http, auth)
+    receipt = _service(store, http, auth).session_state(
         session_ref=SESSION, contract=contract(required_capabilities=["CAPABILITY:OTHER_THING"]),
         grant=grant(capabilities=["CAPABILITY:OTHER_THING"]))
     assert receipt.result is OperationResult.REFUSED_BY_POLICY

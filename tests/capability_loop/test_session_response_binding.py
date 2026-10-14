@@ -16,6 +16,7 @@ from loop_learning_support import (
     LEARNING_ADAPTER,
     LEARNING_CAPABILITY,
     FakeHttp,
+    binding_authority,
     contract,
     generate_ok,
     grant,
@@ -38,13 +39,13 @@ _MATCHING_RESPONSE = {("GET", f"/api/generate-classroom/{SESSION}"): (200, {"job
                                                                            "progress": 100})}
 
 
-def _service(store: LoopStore, http: FakeHttp) -> LearningService:
+def _service(store: LoopStore, http: FakeHttp, authority: object) -> LearningService:
     return LearningService(OpenMaicLearningProvider(ENDPOINT, http), store,
-                           capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER)
+                           capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER, authority=authority)
 
 
-def _created(store: LoopStore, http: FakeHttp) -> None:
-    assert _service(store, http).create_session(
+def _created(store: LoopStore, http: FakeHttp, authority: object) -> None:
+    assert _service(store, http, authority).create_session(
         learning_request(), contract=contract(), grant=grant(),
         classification=DataClassification.INTERNAL).result is OperationResult.RECORDED
 
@@ -52,16 +53,18 @@ def _created(store: LoopStore, http: FakeHttp) -> None:
 def test_matching_session_response_is_accepted(tmp_path: Path) -> None:
     http = FakeHttp({**HEALTH_OK, **generate_ok(), **_MATCHING_RESPONSE})
     store = LoopStore(tmp_path / "loop.json")
-    _created(store, http)
-    receipt = _service(store, http).session_state(session_ref=SESSION, contract=contract(), grant=grant())
+    auth = binding_authority()
+    _created(store, http, auth)
+    receipt = _service(store, http, auth).session_state(session_ref=SESSION, contract=contract(), grant=grant())
     assert receipt.result is OperationResult.RECORDED
 
 
 def test_foreign_session_in_poll_is_rejected(tmp_path: Path) -> None:
     http = FakeHttp({**HEALTH_OK, **generate_ok(), **_FOREIGN_RESPONSE})
     store = LoopStore(tmp_path / "loop.json")
-    _created(store, http)
-    receipt = _service(store, http).session_state(session_ref=SESSION, contract=contract(), grant=grant())
+    auth = binding_authority()
+    _created(store, http, auth)
+    receipt = _service(store, http, auth).session_state(session_ref=SESSION, contract=contract(), grant=grant())
     assert receipt.result is OperationResult.PROVIDER_FAILED
     assert receipt.failure is FailureCode.MALFORMED_RESPONSE
     progress = store.progress()
@@ -73,8 +76,9 @@ def test_foreign_session_in_poll_is_rejected(tmp_path: Path) -> None:
 def test_foreign_session_in_assessment_is_rejected(tmp_path: Path) -> None:
     http = FakeHttp({**HEALTH_OK, **generate_ok(), **_FOREIGN_RESPONSE})
     store = LoopStore(tmp_path / "loop.json")
-    _created(store, http)
-    receipt = _service(store, http).assessment(session_ref=SESSION, contract=contract(), grant=grant())
+    auth = binding_authority()
+    _created(store, http, auth)
+    receipt = _service(store, http, auth).assessment(session_ref=SESSION, contract=contract(), grant=grant())
     assert receipt.result is OperationResult.PROVIDER_FAILED
     assert receipt.failure is FailureCode.MALFORMED_RESPONSE
     assert FOREIGN not in store.progress()

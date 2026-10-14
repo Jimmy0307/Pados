@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from loop_learning_support import LEARNING_ADAPTER, LEARNING_CAPABILITY, contract, grant, learning_request
+from loop_learning_support import LEARNING_ADAPTER, LEARNING_CAPABILITY, binding_authority, contract, grant, learning_request
 
 from pados.capability_loop.contracts import FailureCode, ProviderHealth, ProviderStatus
 from pados.capability_loop.learning import LearningService
@@ -38,7 +38,7 @@ class _NoSessionProvider:
 def test_no_session_creation_records_malformed_response(tmp_path: Path) -> None:
     store = LoopStore(tmp_path / "loop.json")
     service = LearningService(_NoSessionProvider(), store, capability=LEARNING_CAPABILITY,
-                              adapter=LEARNING_ADAPTER)
+                              adapter=LEARNING_ADAPTER, authority=binding_authority())
     receipt = service.create_session(learning_request(), contract=contract(), grant=grant(),
                                      classification=DataClassification.INTERNAL)
     assert receipt.result is OperationResult.PROVIDER_FAILED

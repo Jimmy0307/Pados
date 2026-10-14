@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Round-3 Finding 3: a follow-up is anchored to the LATEST creation of a reused session id.
+"""Reusing a session id for a different governed context is refused by the authority (no rebind).
 
-If a session id is reused (project B re-creates the same id after project A), replaying project A's old
-progress row must not re-authorize polling the now-B session with project A's grant. The binding is anchored
-to the digest of the latest creation receipt that owns the session id, so an earlier owner's row fails
-closed even though its digest still exists somewhere in history.
+Once an external session id is bound to a project, a second create that reuses the same id for a different
+project fails closed at bind time, so the original owner keeps the session and no replay can hand it to
+another project.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from loop_learning_support import (
@@ -17,6 +15,7 @@ from loop_learning_support import (
     LEARNING_ADAPTER,
     LEARNING_CAPABILITY,
     FakeHttp,
+    binding_authority,
     contract,
     generate_ok,
     grant,
@@ -24,59 +23,61 @@ from loop_learning_support import (
 )
 
 from pados.capability_loop.adapters.openmaic_http import OpenMaicLearningProvider
+from pados.capability_loop.gate import GateCode
 from pados.capability_loop.learning import LearningService
 from pados.capability_loop.receipts import OperationResult
 from pados.capability_loop.store import LoopStore
 from pados.enterprise.classification import DataClassification
 
 SESSION = "job-123"
+_STATE = {("GET", f"/api/generate-classroom/{SESSION}"): (200, {"jobId": SESSION, "step": "completed",
+                                                                "progress": 100})}
 
 
-def _service(store: LoopStore, http: FakeHttp) -> LearningService:
-    return LearningService(OpenMaicLearningProvider(ENDPOINT, http), store,
-                           capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER)
+def _service(store: LoopStore, http: FakeHttp, authority: object) -> LearningService:
+    return LearningService(OpenMaicLearningProvider(ENDPOINT, http), store, capability=LEARNING_CAPABILITY,
+                           adapter=LEARNING_ADAPTER, authority=authority)
 
 
-def test_replayed_old_owner_row_fails_closed_after_id_reuse(tmp_path: Path) -> None:
-    path = tmp_path / "loop.json"
-    http = FakeHttp({**HEALTH_OK, **generate_ok(job_id=SESSION)})
-    store = LoopStore(path)
-    service = _service(store, http)
+def test_reuse_for_a_different_project_is_refused_and_owner_retained(tmp_path: Path) -> None:
+    http = FakeHttp({**HEALTH_OK, **generate_ok(job_id=SESSION), **_STATE})
+    store = LoopStore(tmp_path / "loop.json")
+    auth = binding_authority()
+    service = _service(store, http, auth)
 
-    # Project A creates session SESSION, then we snapshot A's progress row.
     assert service.create_session(
         learning_request(project_id="proj-a", work_contract_id="wc-1", request_id="req-a"),
         contract=contract(project_id="proj-a", work_contract_id="wc-1"),
         grant=grant(project_id="proj-a", work_contract_id="wc-1"),
         classification=DataClassification.INTERNAL).result is OperationResult.RECORDED
-    row_a = json.loads(path.read_text(encoding="utf-8"))["progress"][SESSION]
 
-    # Project B re-creates the SAME session id, overwriting the progress row with B's binding.
-    assert service.create_session(
+    # Project B reuses the SAME external session id for a different project: the authority refuses the bind.
+    reuse = service.create_session(
         learning_request(project_id="proj-b", work_contract_id="wc-2", request_id="req-b"),
         contract=contract(project_id="proj-b", work_contract_id="wc-2"),
         grant=grant(project_id="proj-b", work_contract_id="wc-2"),
-        classification=DataClassification.INTERNAL).result is OperationResult.RECORDED
+        classification=DataClassification.INTERNAL)
+    assert reuse.result is OperationResult.REFUSED_BY_POLICY
+    assert reuse.policy_code == GateCode.SESSION_BIND_REFUSED
 
-    # Replay A's old row and try to poll with A's (still valid) grant.
-    data = json.loads(path.read_text(encoding="utf-8"))
-    data["progress"][SESSION] = row_a
-    path.write_text(json.dumps(data), encoding="utf-8")
-    receipt = service.session_state(
-        session_ref=SESSION, contract=contract(project_id="proj-a", work_contract_id="wc-1"),
-        grant=grant(project_id="proj-a", work_contract_id="wc-1"))
-    assert receipt.result is OperationResult.REFUSED_BY_POLICY  # earlier owner no longer owns the id
-    assert ("GET", f"/api/generate-classroom/{SESSION}") not in http.calls
+    # The original owner still owns the session.
+    poll = service.session_state(session_ref=SESSION, contract=contract(project_id="proj-a", work_contract_id="wc-1"),
+                                 grant=grant(project_id="proj-a", work_contract_id="wc-1"))
+    assert poll.result is OperationResult.RECORDED
+
+    # Project B cannot poll it even with B's valid grant (not the bound project).
+    hijack = service.session_state(session_ref=SESSION, contract=contract(project_id="proj-b", work_contract_id="wc-2"),
+                                   grant=grant(project_id="proj-b", work_contract_id="wc-2"))
+    assert hijack.result is OperationResult.REFUSED_BY_POLICY
 
 
-def test_current_owner_poll_still_works(tmp_path: Path) -> None:
-    path = tmp_path / "loop.json"
-    http = FakeHttp({**HEALTH_OK, **generate_ok(job_id=SESSION),
-                     ("GET", f"/api/generate-classroom/{SESSION}"): (200, {"jobId": SESSION, "step": "completed",
-                                                                          "progress": 100})})
-    store = LoopStore(path)
-    service = _service(store, http)
-    service.create_session(learning_request(), contract=contract(), grant=grant(),
-                           classification=DataClassification.INTERNAL)
-    receipt = service.session_state(session_ref=SESSION, contract=contract(), grant=grant())
-    assert receipt.result is OperationResult.RECORDED
+def test_identical_rebind_is_idempotent(tmp_path: Path) -> None:
+    http = FakeHttp({**HEALTH_OK, **generate_ok(job_id=SESSION)})
+    store = LoopStore(tmp_path / "loop.json")
+    auth = binding_authority()
+    service = _service(store, http, auth)
+    for request_id in ("req-a", "req-a-again"):
+        receipt = service.create_session(
+            learning_request(request_id=request_id), contract=contract(), grant=grant(),
+            classification=DataClassification.INTERNAL)
+        assert receipt.result is OperationResult.RECORDED  # same identity + context rebinds idempotently

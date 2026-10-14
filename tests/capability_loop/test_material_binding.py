@@ -17,6 +17,7 @@ from loop_learning_support import (
     LEARNING_CAPABILITY,
     PROJECT,
     FakeHttp,
+    binding_authority,
     contract,
     generate_ok,
     grant,
@@ -46,7 +47,7 @@ def _registration(ref: str = "material:cad-primer", project_id: str = PROJECT,
 
 def _service(store: LoopStore, http: FakeHttp) -> LearningService:
     return LearningService(OpenMaicLearningProvider(ENDPOINT, http), store,
-                           capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER)
+                           capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER, authority=binding_authority())
 
 
 # -- pure resolver ---------------------------------------------------------

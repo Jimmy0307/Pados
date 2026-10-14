@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from loop_learning_support import LEARNING_ADAPTER, LEARNING_CAPABILITY, contract, grant, learning_request
+from loop_learning_support import LEARNING_ADAPTER, LEARNING_CAPABILITY, binding_authority, contract, grant, learning_request
 
 from pados.capability_loop.contracts import Confidence, ProviderHealth, ProviderStatus
 from pados.capability_loop.learning import LearningService
@@ -62,13 +62,14 @@ class _StubProvider:
                                session=_session(), assessment=_assessment(self._assessment_gap))
 
 
-def _service(store: LoopStore, provider: _StubProvider) -> LearningService:
-    return LearningService(provider, store, capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER)
+def _service(store: LoopStore, provider: _StubProvider, authority: object) -> LearningService:
+    return LearningService(provider, store, capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER,
+                           authority=authority)
 
 
-def _create(store: LoopStore, provider: _StubProvider) -> None:
+def _create(store: LoopStore, provider: _StubProvider, authority: object) -> None:
     # binding.capability_gap_ref is the request's gap (gap:cad_edit from the fixture).
-    assert _service(store, provider).create_session(
+    assert _service(store, provider, authority).create_session(
         learning_request(), contract=contract(), grant=grant(),
         classification=DataClassification.INTERNAL).result is OperationResult.RECORDED
 
@@ -76,8 +77,9 @@ def _create(store: LoopStore, provider: _StubProvider) -> None:
 def test_assessment_for_another_gap_is_rejected(tmp_path: Path) -> None:
     provider = _StubProvider(assessment_gap="gap:other")  # not the bound gap:cad_edit
     store = LoopStore(tmp_path / "loop.json")
-    _create(store, provider)
-    receipt = _service(store, provider).assessment(session_ref=SESSION, contract=contract(), grant=grant())
+    auth = binding_authority()
+    _create(store, provider, auth)
+    receipt = _service(store, provider, auth).assessment(session_ref=SESSION, contract=contract(), grant=grant())
     assert receipt.result is OperationResult.PROVIDER_FAILED
     # The mis-attributed evidence is not recorded against the bound progress row.
     assert "human_mastery" not in store.progress().get(SESSION, {})
@@ -86,7 +88,8 @@ def test_assessment_for_another_gap_is_rejected(tmp_path: Path) -> None:
 def test_assessment_for_the_bound_gap_is_accepted(tmp_path: Path) -> None:
     provider = _StubProvider(assessment_gap="gap:cad_edit")  # the bound gap
     store = LoopStore(tmp_path / "loop.json")
-    _create(store, provider)
-    receipt = _service(store, provider).assessment(session_ref=SESSION, contract=contract(), grant=grant())
+    auth = binding_authority()
+    _create(store, provider, auth)
+    receipt = _service(store, provider, auth).assessment(session_ref=SESSION, contract=contract(), grant=grant())
     assert receipt.result is OperationResult.RECORDED
     assert store.progress()[SESSION]["human_mastery"] == MasteryLevel.PASSED.value

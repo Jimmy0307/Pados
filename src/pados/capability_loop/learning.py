@@ -3,26 +3,31 @@
 
 The P7.2 vertical slice. Every operation -- create session, poll state, assessment -- is authorized by the
 PADOS learning gate before the provider is called, records one hash-chained ``OperationReceipt``, and stores
-the normalized session / assessment projection. It never promotes a capability and never writes PADOS
-semantic state; OpenMAIC's own model choice is recorded as an external boundary, not as PADOS routing.
+a normalized session / assessment projection. It never promotes a capability and never writes PADOS semantic
+state; OpenMAIC's own model choice is recorded as an external boundary, not as PADOS routing.
 
-Authorization is never delegated to the external session. At creation, the governed binding (session,
-project, work contract, capability gap, classification, provider) is recorded, and its digest is anchored in
-the hash-chained creation receipt. The mutable progress row is only an advisory projection: a follow-up
-reconstructs the binding from it, then proves the binding is authentic by matching its digest to a creation
-receipt in the (chain-verified) receipt log -- so a mutated row fails closed even with a valid current grant.
-A follow-up then verifies the supplied contract is for the same project/work, re-runs the authoritative gate
-against the *current* grant, and only then calls the provider. The provider must answer about the session
-that was asked for: a response naming a different session_ref is rejected before any binding update. All of
-this stays inside the capability_loop boundary; no Core model, receipt or authority is changed.
+Authorization of a follow-up rests on an authoritative, externally anchored ``SessionBindingAuthority``
+(injected; see ``pados.capability_loop.binding_authority``), never on the mutable progress projection, a
+caller-supplied project, or a provider-returned project. At creation the governed binding is recorded through
+the authority and the session is accepted only if that bind succeeds. A follow-up resolves the original
+governed context from the authority (integrity- and anchor-verified), re-runs the gate against the *current*
+grant, calls the provider only then, and rejects any response whose session/assessment identity differs from
+the binding. The ``progress`` row is an ADVISORY_PROJECTION_ONLY and is never an authorization source;
+tampering it cannot change authorization. Every authority/anchor/binding failure fails closed -- there is no
+fallback.
 """
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from pados.capability.model import AdapterDescriptor, CapabilityDescriptor
+from pados.capability_loop.binding_authority import (
+    BindingAuthorityError,
+    GovernedSessionBinding,
+    SessionBindingAuthority,
+)
 from pados.capability_loop.contracts import FailureCode
 from pados.capability_loop.gate import GateCode, GateDecision, evaluate_learning
 from pados.capability_loop.learning_contracts import (
@@ -43,46 +48,32 @@ from pados.capability_loop.receipts import (
     is_valid_receipt_code,
     is_valid_receipt_id,
 )
-from pados.capability_loop.store import LoopStore, LoopStoreError
+from pados.capability_loop.store import LoopStore
 from pados.connectivity.requirements import NetworkRequirement
-from pados.enterprise.classification import DataClassification, parse_classification
+from pados.enterprise.classification import DataClassification
 from pados.execution.context import canonical_hash
 
-_UNRESOLVED_CAPABILITY = "UNRESOLVED"  # receipt capability id when no session binding could be resolved
+_UNRESOLVED_CAPABILITY = "UNRESOLVED"  # receipt capability id when no binding could be resolved
 _SAFE_PROJECT_PLACEHOLDER = "unresolved-project"  # bounded, receipt-valid stand-in for a malformed project id
 
 
-@dataclass(frozen=True)
-class _SessionBinding:
-    """The governed context recorded when a session is created; the authorization basis for follow-ups.
-
-    Its ``digest`` is anchored in the hash-chained creation receipt, making the binding tamper-evident.
-    """
-
-    session_ref: str
-    project_id: str
-    work_contract_id: str
-    capability_gap_ref: str
-    classification: DataClassification
-    provider_id: str
-
-    @property
-    def digest(self) -> str:
-        return canonical_hash({
-            "session_ref": self.session_ref, "project_id": self.project_id,
-            "work_contract_id": self.work_contract_id, "capability_gap_ref": self.capability_gap_ref,
-            "classification": self.classification.value, "provider_id": self.provider_id})
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 class LearningService:
     def __init__(self, provider: LearningProvider, store: LoopStore, *,
                  capability: CapabilityDescriptor, adapter: AdapterDescriptor,
-                 network_policy: NetworkRequirement = NetworkRequirement.LOCAL_ONLY) -> None:
+                 authority: SessionBindingAuthority,
+                 network_policy: NetworkRequirement = NetworkRequirement.LOCAL_ONLY,
+                 clock: Callable[[], str] = _utc_now_iso) -> None:
         self._provider = provider
         self._store = store
         self._capability = capability
         self._adapter = adapter
+        self._authority = authority  # authoritative, externally anchored; the sole binding source of truth
         self._network_policy = network_policy
+        self._clock = clock
 
     def create_session(self, request: LearningRequest, *, contract: Mapping[str, Any],
                        grant: Mapping[str, Any], classification: DataClassification,
@@ -97,7 +88,6 @@ class LearningService:
         if not decision.allowed:
             return self._refusal(OperationKind.LEARN_CREATE_SESSION, request.project_id,
                                  request.capability_gap_ref, request_digest, decision)
-        # Bind every material to this project before the provider is called; fail closed on any mismatch.
         resolution = resolve_materials(request, material_registrations or {})
         if resolution.code is not MaterialResolutionCode.RESOLVED:
             return self._coded_refusal(OperationKind.LEARN_CREATE_SESSION, request.project_id,
@@ -106,8 +96,20 @@ class LearningService:
         outcome = self._provider.create_session(request)
         if outcome.failure is not None or outcome.session is None:
             return self._creation_failure(request, request_digest, decision, outcome)
-        binding = _SessionBinding(outcome.session.session_ref, request.project_id, request.work_contract_id,
-                                  request.capability_gap_ref, classification, self._provider.provider_id)
+        # Authoritatively bind the external session to this governed context BEFORE accepting it. If the
+        # authority refuses (a conflicting prior binding, or an unavailable/mismatched anchor), the session is
+        # not accepted and no follow-up is ever authorized against it.
+        binding = self._governed_binding(request, outcome.session.session_ref, classification)
+        if binding is None:
+            return self._coded_refusal(OperationKind.LEARN_CREATE_SESSION, request.project_id,
+                                       request.capability_gap_ref, request_digest,
+                                       GateCode.SESSION_BIND_REFUSED, decision.policy_decision_hash)
+        try:
+            self._authority.bind(binding)
+        except BindingAuthorityError:
+            return self._coded_refusal(OperationKind.LEARN_CREATE_SESSION, request.project_id,
+                                       request.capability_gap_ref, request_digest,
+                                       GateCode.SESSION_BIND_REFUSED, decision.policy_decision_hash)
         return self._record(OperationKind.LEARN_CREATE_SESSION, binding, request_digest, decision, outcome)
 
     def session_state(self, *, session_ref: str, contract: Mapping[str, Any], grant: Mapping[str, Any],
@@ -124,17 +126,26 @@ class LearningService:
     # -- follow-up authorization --------------------------------------------
     def _followup(self, kind: OperationKind, session_ref: str, contract: Mapping[str, Any],
                   grant: Mapping[str, Any], registered_mcp_capabilities: frozenset[str],
-                  call: Callable[[_SessionBinding], LearningOutcome]) -> OperationReceipt:
+                  call: Callable[[GovernedSessionBinding], LearningOutcome]) -> OperationReceipt:
         request_digest = canonical_hash(
             {"op": kind.value, "session": session_ref, "project": contract.get("project_id")})
-        binding, bind_code = self._resolve_binding(session_ref, contract)
-        if bind_code is not None:
-            project = _safe_project_id(binding.project_id if binding is not None else contract.get("project_id"))
-            capability = _safe_capability_code(binding.capability_gap_ref) if binding is not None \
-                else _UNRESOLVED_CAPABILITY
-            return self._coded_refusal(kind, project, None, request_digest, bind_code, None,
-                                       capability_override=capability)
-        assert binding is not None
+        caller_project = _safe_project_id(contract.get("project_id"))
+        try:
+            binding = self._authority.resolve(self._provider.provider_id, session_ref)
+        except BindingAuthorityError:
+            return self._coded_refusal(kind, caller_project, None, request_digest,
+                                       GateCode.SESSION_BINDING_UNVERIFIABLE, None)
+        if binding is None:
+            return self._coded_refusal(kind, caller_project, None, request_digest,
+                                       GateCode.SESSION_NOT_BOUND, None)
+        gap_capability = _safe_capability_code(binding.capability_gap_ref)
+        if binding.provider_id != self._provider.provider_id:
+            return self._coded_refusal(kind, _safe_project_id(binding.project_id), None, request_digest,
+                                       GateCode.SESSION_PROVIDER_MISMATCH, None, capability_override=gap_capability)
+        if (contract.get("project_id") != binding.project_id
+                or contract.get("work_contract_id") != binding.work_contract_id):
+            return self._coded_refusal(kind, _safe_project_id(binding.project_id), None, request_digest,
+                                       GateCode.SESSION_PROJECT_MISMATCH, None, capability_override=gap_capability)
         decision = evaluate_learning(
             project_id=binding.project_id, work_contract_id=binding.work_contract_id,
             request_id=f"{kind.value.lower()}:{session_ref}", classification=binding.classification,
@@ -144,53 +155,23 @@ class LearningService:
         if not decision.allowed:
             return self._refusal(kind, binding.project_id, binding.capability_gap_ref, request_digest, decision)
         outcome = call(binding)
-        # The provider must answer about the session we asked for, and any assessment it returns must carry
-        # the bound session/gap/provider identity. A foreign session or a mis-attributed assessment never
-        # inherits this binding's authorization: reject before any store/binding update. Recording also
-        # re-checks, atomically under the write lock, that this binding is still the session's latest owner
-        # (closing a resolve-then-record race when the id is concurrently reused).
+        # The provider must answer about the bound session, and any assessment must carry the bound
+        # session/gap/provider identity; otherwise reject before any projection update.
         forced = None if _outcome_matches_binding(outcome, binding) else FailureCode.MALFORMED_RESPONSE
-        return self._record(kind, binding, request_digest, decision, outcome,
-                            forced_failure=forced, enforce_current_owner=True)
-
-    def _resolve_binding(self, session_ref: str,
-                         contract: Mapping[str, Any]) -> tuple[_SessionBinding | None, str | None]:
-        row = self._store.progress().get(session_ref)
-        if row is None:
-            return None, GateCode.SESSION_NOT_BOUND
-        try:
-            binding = _SessionBinding(
-                session_ref=session_ref,
-                project_id=str(row["project_id"]), work_contract_id=str(row["work_contract_id"]),
-                capability_gap_ref=str(row["capability_gap_ref"]),
-                classification=parse_classification(row["classification"]),
-                provider_id=str(row["provider_id"]))
-        except (KeyError, ValueError):
-            return None, GateCode.SESSION_NOT_BOUND  # a row without a complete governed binding is not usable
-        # Tamper-evidence: the advisory row is authoritative only if its binding digest matches the digest
-        # anchored by the LATEST creation receipt that currently owns this session id in the hash-chained
-        # log. A mutated row -- or a replay of an earlier owner after the session id was reused -- no longer
-        # matches, even with a valid current grant.
-        anchor = self._latest_creation_digest(session_ref)
-        if anchor is None or binding.digest != anchor:
-            return binding, GateCode.SESSION_BINDING_TAMPERED
-        if binding.provider_id != self._provider.provider_id:
-            return binding, GateCode.SESSION_PROVIDER_MISMATCH
-        if (contract.get("project_id") != binding.project_id
-                or contract.get("work_contract_id") != binding.work_contract_id):
-            return binding, GateCode.SESSION_PROJECT_MISMATCH
-        return binding, None
-
-    def _latest_creation_digest(self, session_ref: str) -> str | None:
-        """The binding digest of the LATEST creation receipt that owns ``session_ref`` (chain-verified)."""
-        latest: str | None = None
-        for receipt in self._store.receipts():  # receipts() returns the chain in sequence order
-            if (receipt.operation is OperationKind.LEARN_CREATE_SESSION
-                    and receipt.session_ref == session_ref and receipt.binding_digest is not None):
-                latest = receipt.binding_digest
-        return latest
+        return self._record(kind, binding, request_digest, decision, outcome, forced_failure=forced)
 
     # -- recording ----------------------------------------------------------
+    def _governed_binding(self, request: LearningRequest, external_session_ref: str,
+                          classification: DataClassification) -> GovernedSessionBinding | None:
+        try:
+            return GovernedSessionBinding(
+                provider_id=self._provider.provider_id, external_session_ref=external_session_ref,
+                project_id=request.project_id, work_contract_id=request.work_contract_id,
+                classification=classification, capability_gap_ref=request.capability_gap_ref,
+                created_at=self._clock())
+        except ValueError:
+            return None  # a malformed external session ref can never be bound
+
     def _refusal(self, kind: OperationKind, project_id: str, capability_gap_ref: str,
                  request_digest: str, decision: GateDecision) -> OperationReceipt:
         return self._coded_refusal(kind, _safe_project_id(project_id), capability_gap_ref, request_digest,
@@ -213,11 +194,7 @@ class LearningService:
 
     def _creation_failure(self, request: LearningRequest, request_digest: str, decision: GateDecision,
                           outcome: LearningOutcome) -> OperationReceipt:
-        """The provider did not create a session: record a normalized failure, no binding, no progress.
-
-        A well-typed but incomplete outcome (no session and no explicit failure) is itself malformed, so a
-        normalized reason is always recorded.
-        """
+        """The provider did not create a session: record a normalized failure, no binding, no projection."""
         failure = outcome.failure if outcome.failure is not None else FailureCode.MALFORMED_RESPONSE
         return self._store.append({
             "operation": OperationKind.LEARN_CREATE_SESSION, "project_id": request.project_id,
@@ -227,10 +204,9 @@ class LearningService:
             "result": OperationResult.PROVIDER_FAILED, "failure": failure, "evidence_digests": (),
             "limitations": (), "accepted_into_loop": False, "state_before": None, "state_after": None})
 
-    def _record(self, kind: OperationKind, binding: _SessionBinding, request_digest: str,
+    def _record(self, kind: OperationKind, binding: GovernedSessionBinding, request_digest: str,
                 decision: GateDecision, outcome: LearningOutcome, *,
-                forced_failure: FailureCode | None = None,
-                enforce_current_owner: bool = False) -> OperationReceipt:
+                forced_failure: FailureCode | None = None) -> OperationReceipt:
         failure = forced_failure if forced_failure is not None else outcome.failure
         failed = failure is not None
         limitations: tuple[str, ...] = ()
@@ -240,73 +216,39 @@ class LearningService:
             limitations = tuple(dict.fromkeys(limitations + outcome.assessment.limitations))[:16]
         progress: tuple[str, dict[str, Any]] | None = None
         if not failed and outcome.session is not None:
-            # The progress row is keyed by the BOUND session_ref (never a provider-chosen foreign ref).
-            progress = (binding.session_ref, _progress_row(binding, outcome))
+            # ADVISORY_PROJECTION_ONLY, keyed by the bound external session ref; never an authorization source.
+            progress = (binding.external_session_ref, _progress_row(binding, outcome))
         evidence_digests = (outcome.assessment.evidence_digest,) if (
             not failed and outcome.assessment is not None) else ()
-        # For a follow-up, the binding must still be the session's latest owner at the instant of the write.
-        precondition = None
-        if enforce_current_owner:
-            def precondition(data: dict[str, Any]) -> bool:
-                return _latest_creation_digest_in(data["receipts"], binding.session_ref) == binding.digest
-        try:
-            return self._store.append({
-                "operation": kind, "project_id": binding.project_id, "request_digest": request_digest,
-                "provider_id": self._provider.provider_id,
-                "capability_id": _safe_capability_code(binding.capability_gap_ref),
-                "policy_code": decision.code, "policy_decision_hash": decision.policy_decision_hash,
-                "binding_digest": binding.digest, "session_ref": binding.session_ref,
-                "result": OperationResult.PROVIDER_FAILED if failed else OperationResult.RECORDED,
-                "failure": failure, "evidence_digests": evidence_digests, "limitations": limitations,
-                "accepted_into_loop": not failed, "state_before": None, "state_after": None},
-                progress=None if failed else progress, precondition=precondition)
-        except LoopStoreError as exc:
-            if exc.code != "LOOP_STORE_PRECONDITION_FAILED":
-                raise
-            # Ownership changed between resolve and record: fail closed, record a refusal, do not overwrite.
-            return self._coded_refusal(kind, binding.project_id, binding.capability_gap_ref, request_digest,
-                                       GateCode.SESSION_BINDING_TAMPERED, None)
+        return self._store.append({
+            "operation": kind, "project_id": binding.project_id, "request_digest": request_digest,
+            "provider_id": self._provider.provider_id,
+            "capability_id": _safe_capability_code(binding.capability_gap_ref),
+            "policy_code": decision.code, "policy_decision_hash": decision.policy_decision_hash,
+            "binding_digest": binding.context_hash, "session_ref": binding.external_session_ref,
+            "result": OperationResult.PROVIDER_FAILED if failed else OperationResult.RECORDED,
+            "failure": failure, "evidence_digests": evidence_digests, "limitations": limitations,
+            "accepted_into_loop": not failed, "state_before": None, "state_after": None},
+            progress=None if failed else progress)
 
 
-def _latest_creation_digest_in(rows: list[dict[str, Any]], session_ref: str) -> str | None:
-    """The binding digest of the latest creation receipt owning ``session_ref``, read from raw receipt rows.
-
-    Used inside the write lock (via a store precondition) so the ownership check is atomic with the write.
-    """
-    latest: str | None = None
-    for row in rows:
-        if (row.get("operation") == OperationKind.LEARN_CREATE_SESSION.value
-                and row.get("session_ref") == session_ref and row.get("binding_digest")):
-            latest = row.get("binding_digest")
-    return latest
-
-
-def _safe_project_id(candidate: object) -> str:
-    """The caller/row project id if it is a valid receipt identifier, else a bounded safe placeholder.
-
-    A guessed-session request (or a tampered row) may carry a malformed project id; it must never reach
-    OperationReceipt validation and raise -- the refusal receipt uses the placeholder instead.
-    """
-    return str(candidate) if is_valid_receipt_id(candidate) else _SAFE_PROJECT_PLACEHOLDER
-
-
-def _outcome_matches_binding(outcome: LearningOutcome, binding: _SessionBinding) -> bool:
-    """The provider's own session/assessment identity must match the authorized binding.
-
-    Guards against a well-typed but mis-attributed response: a session object for a different session_ref,
-    or an assessment whose own session/gap/provider identity differs from the binding (its evidence would
-    otherwise be recorded against the wrong progress row).
-    """
+def _outcome_matches_binding(outcome: LearningOutcome, binding: GovernedSessionBinding) -> bool:
+    """The provider's own session/assessment identity must match the authoritative binding."""
     session = outcome.session
-    if session is not None and session.session_ref != binding.session_ref:
+    if session is not None and session.session_ref != binding.external_session_ref:
         return False
     assessment = outcome.assessment
     if assessment is not None and (
-            assessment.session_ref != binding.session_ref
+            assessment.session_ref != binding.external_session_ref
             or assessment.capability_gap_ref != binding.capability_gap_ref
             or assessment.provider_id != binding.provider_id):
         return False
     return True
+
+
+def _safe_project_id(candidate: object) -> str:
+    """The caller/binding project id if it is a valid receipt identifier, else a bounded safe placeholder."""
+    return str(candidate) if is_valid_receipt_id(candidate) else _SAFE_PROJECT_PLACEHOLDER
 
 
 def _safe_capability_code(capability_gap_ref: str) -> str:
@@ -318,8 +260,8 @@ def _safe_capability_code(capability_gap_ref: str) -> str:
 def _gap_capability(capability_gap_ref: str) -> str:
     """A gap ref like ``gap:cad_edit`` maps to a capability-id-shaped code for the receipt.
 
-    Only ASCII alphanumerics survive: a tampered gap ref carrying Unicode alphanumerics (e.g. ``gap:ééé``)
-    must not produce a code that fails the receipt's ASCII code contract and raises.
+    Only ASCII alphanumerics survive, so a gap ref carrying Unicode alphanumerics can never produce a code
+    that fails the receipt's ASCII code contract and raises.
     """
     tail = capability_gap_ref.split(":")[-1].split(".")[-1]
     code = "".join(ch if (ch.isascii() and ch.isalnum()) else "_" for ch in tail).upper().strip("_")
@@ -328,11 +270,10 @@ def _gap_capability(capability_gap_ref: str) -> str:
     return code[:63] if len(code) >= 3 else f"{code}_GAP"
 
 
-def _progress_row(binding: _SessionBinding, outcome: LearningOutcome) -> dict[str, Any]:
+def _progress_row(binding: GovernedSessionBinding, outcome: LearningOutcome) -> dict[str, Any]:
     session = outcome.session
     assert session is not None
-    # The row carries the governed binding so follow-up operations can re-authorize from it (advisory only;
-    # its authenticity is proven against the creation receipt's binding digest, not trusted on its own).
+    # ADVISORY_PROJECTION_ONLY: a convenience view of the latest provider state. Authorization never reads it.
     row: dict[str, Any] = {
         "project_id": binding.project_id, "work_contract_id": binding.work_contract_id,
         "capability_gap_ref": binding.capability_gap_ref, "classification": binding.classification.value,

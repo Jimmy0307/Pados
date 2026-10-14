@@ -16,6 +16,7 @@ from loop_learning_support import (
     LEARNING_CAPABILITY,
     PROJECT,
     FakeHttp,
+    binding_authority,
     contract,
     generate_ok,
     grant,
@@ -56,7 +57,7 @@ def test_miskeyed_registration_refused_before_provider(tmp_path: Path) -> None:
     http = FakeHttp({**HEALTH_OK, **generate_ok()})
     store = LoopStore(tmp_path / "loop.json")
     service = LearningService(OpenMaicLearningProvider(ENDPOINT, http), store,
-                              capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER)
+                              capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER, authority=binding_authority())
     reg = MaterialRegistration(material_ref="material:b", project_id=PROJECT, content_digest=DIGEST)
     receipt = service.create_session(
         learning_request(materials=(_material("material:a"),)), contract=contract(), grant=grant(),

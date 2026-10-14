@@ -1,25 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Round-2 Finding 2: the follow-up authorization binding must be tamper-evident.
+"""The mutable progress row is an ADVISORY_PROJECTION_ONLY, never an authorization source.
 
-Follow-up authorization must not trust a mutable progress row as its source of truth. The binding
-(session_ref, project, work contract, classification, capability gap, provider) is anchored by a digest
-recorded in the hash-chained creation receipt. If the advisory progress row is mutated, its recomputed
-digest no longer matches any creation receipt and the follow-up fails closed -- a valid current grant alone
-cannot make a tampered binding pass. No Core semantics change; the anchor lives in the capability_loop
-receipt chain.
+Tampering the progress row cannot change authorization: a follow-up resolves the original governed context
+from the authoritative, externally anchored binding, so a tampered project in the row is ignored (and
+overwritten from the authority), while a caller claiming the tampered project is still refused.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-import pytest
 from loop_learning_support import (
     ENDPOINT,
     HEALTH_OK,
     LEARNING_ADAPTER,
     LEARNING_CAPABILITY,
     FakeHttp,
+    binding_authority,
     contract,
     generate_ok,
     grant,
@@ -37,20 +34,19 @@ _STATE = {("GET", f"/api/generate-classroom/{SESSION}"): (200, {"jobId": SESSION
                                                                 "progress": 100})}
 
 
-def _http() -> FakeHttp:
-    return FakeHttp({**HEALTH_OK, **generate_ok(), **_STATE})
+def _service(store: LoopStore, http: FakeHttp, authority: object) -> LearningService:
+    return LearningService(OpenMaicLearningProvider(ENDPOINT, http), store, capability=LEARNING_CAPABILITY,
+                           adapter=LEARNING_ADAPTER, authority=authority)
 
 
-def _service(store: LoopStore, http: FakeHttp) -> LearningService:
-    return LearningService(OpenMaicLearningProvider(ENDPOINT, http), store,
-                           capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER)
-
-
-def _create(path: Path, http: FakeHttp) -> LoopStore:
+def _created(tmp_path: Path) -> tuple[Path, FakeHttp, LoopStore, object]:
+    path = tmp_path / "loop.json"
+    http = FakeHttp({**HEALTH_OK, **generate_ok(job_id=SESSION), **_STATE})
     store = LoopStore(path)
-    _service(store, http).create_session(learning_request(), contract=contract(), grant=grant(),
-                                         classification=DataClassification.INTERNAL)
-    return store
+    auth = binding_authority()
+    _service(store, http, auth).create_session(learning_request(), contract=contract(), grant=grant(),
+                                               classification=DataClassification.INTERNAL)
+    return path, http, store, auth
 
 
 def _tamper(path: Path, field: str, value: object) -> None:
@@ -59,37 +55,26 @@ def _tamper(path: Path, field: str, value: object) -> None:
     path.write_text(json.dumps(data), encoding="utf-8")
 
 
-def test_untouched_binding_is_accepted(tmp_path: Path) -> None:
-    path = tmp_path / "loop.json"
-    http = _http()
-    store = _create(path, http)
-    receipt = _service(store, http).session_state(session_ref=SESSION, contract=contract(), grant=grant())
+def test_untouched_poll_is_recorded(tmp_path: Path) -> None:
+    path, http, store, auth = _created(tmp_path)
+    receipt = _service(store, http, auth).session_state(session_ref=SESSION, contract=contract(), grant=grant())
     assert receipt.result is OperationResult.RECORDED
 
 
-def test_mutated_project_fails_closed_even_with_matching_grant(tmp_path: Path) -> None:
-    path = tmp_path / "loop.json"
-    http = _http()
-    store = _create(path, http)
+def test_progress_tamper_does_not_change_authority(tmp_path: Path) -> None:
+    path, http, store, auth = _created(tmp_path)
+    _tamper(path, "project_id", "proj-evil")  # advisory projection tamper
+    # Authorization uses the authoritative binding (proj-a), not the tampered row: the poll still succeeds.
+    receipt = _service(store, http, auth).session_state(session_ref=SESSION, contract=contract(), grant=grant())
+    assert receipt.result is OperationResult.RECORDED
+    assert store.progress()[SESSION]["project_id"] == "proj-a"  # row overwritten from the authority
+
+
+def test_caller_claiming_the_tampered_project_is_refused(tmp_path: Path) -> None:
+    path, http, store, auth = _created(tmp_path)
     _tamper(path, "project_id", "proj-evil")
-    # A fully valid grant for the tampered project must NOT make the tampered binding pass.
-    receipt = _service(store, http).session_state(
+    # A caller whose contract claims the tampered project does not match the authoritative binding.
+    receipt = _service(store, http, auth).session_state(
         session_ref=SESSION, contract=contract(project_id="proj-evil"), grant=grant(project_id="proj-evil"))
-    assert receipt.result is OperationResult.REFUSED_BY_POLICY
-    assert ("GET", f"/api/generate-classroom/{SESSION}") not in http.calls
-
-
-@pytest.mark.parametrize("field,value", [
-    ("work_contract_id", "wc-evil"),
-    ("classification", "RESTRICTED"),
-    ("capability_gap_ref", "gap:evil"),
-    ("provider_id", "evil.provider"),
-])
-def test_mutated_binding_field_fails_closed(tmp_path: Path, field: str, value: str) -> None:
-    path = tmp_path / "loop.json"
-    http = _http()
-    store = _create(path, http)
-    _tamper(path, field, value)
-    receipt = _service(store, http).session_state(session_ref=SESSION, contract=contract(), grant=grant())
     assert receipt.result is OperationResult.REFUSED_BY_POLICY
     assert ("GET", f"/api/generate-classroom/{SESSION}") not in http.calls

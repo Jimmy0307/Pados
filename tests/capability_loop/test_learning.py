@@ -10,6 +10,7 @@ from loop_learning_support import (
     LEARNING_ADAPTER,
     LEARNING_CAPABILITY,
     FakeHttp,
+    binding_authority,
     contract,
     generate_ok,
     grant,
@@ -35,7 +36,7 @@ def _provider(http: FakeHttp, *, endpoint: str | None = ENDPOINT) -> OpenMaicLea
 
 
 def _service(store: LoopStore, provider: OpenMaicLearningProvider) -> LearningService:
-    return LearningService(provider, store, capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER)
+    return LearningService(provider, store, capability=LEARNING_CAPABILITY, adapter=LEARNING_ADAPTER, authority=binding_authority())
 
 
 def test_create_session_records_external_routing_and_chained_receipt(tmp_path: Path) -> None:
