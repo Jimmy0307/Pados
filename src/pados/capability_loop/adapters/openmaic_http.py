@@ -20,8 +20,10 @@ Boundaries:
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from typing import Any
+from urllib.parse import quote
 
 from pados.capability_loop.contracts import (
     Confidence,
@@ -37,12 +39,32 @@ from pados.capability_loop.learning_contracts import (
     LearningSessionStatus,
     MasteryLevel,
     ModelRouting,
+    is_valid_session_ref,
 )
-from pados.connectivity.egress import EndpointLocality, endpoint_locality
+from pados.connectivity.egress import endpoint_is_loopback
 from pados.execution.context import canonical_hash
 
 OPENMAIC_PROVIDER_ID = "openmaic.adaptive_learning"
 DEFAULT_TIMEOUT_SECONDS = 60.0
+
+
+def _normalized_percent(value: Any) -> int | None:
+    """Guarded numeric normalization for a provider percent: clamp to [0, 100], or signal malformed.
+
+    Returns an int in [0, 100] for an absent (-> 0), finite int or finite float value (out-of-range values
+    clamp). Returns ``None`` for a present-but-malformed number (a bool, a non-number, or a non-finite
+    NaN/Inf), which the caller turns into a normalized MALFORMED_RESPONSE rather than letting ``int()``
+    raise into the loop.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return max(0, min(100, int(value)))
+
+
 # Normalized HTTP transport: (method, path, body, timeout) -> (status, json | None). Injectable for tests.
 LearningTransport = Callable[[str, str, dict[str, Any] | None, float], tuple[int, Any]]
 
@@ -77,7 +99,7 @@ class OpenMaicLearningProvider:
         if self._endpoint is None:
             return ProviderHealth(provider_id=self.provider_id, status=ProviderStatus.UNAVAILABLE,
                                   code=FailureCode.PROVIDER_NOT_CONFIGURED.value)
-        if endpoint_locality(self._endpoint) is not EndpointLocality.LOCAL:
+        if not endpoint_is_loopback(self._endpoint):
             return ProviderHealth(provider_id=self.provider_id, status=ProviderStatus.DEGRADED,
                                   code=FailureCode.UNAUTHORIZED.value)
         status, body = self._safe("GET", "/api/health", None)
@@ -115,7 +137,11 @@ class OpenMaicLearningProvider:
         guard = self._guard()
         if guard is not None:
             return guard
-        status, body = self._safe("GET", f"/api/generate-classroom/{session_ref}", None)
+        # Re-validate the session ref against the closed syntax and percent-encode it as a single path
+        # segment, so a forged ref can never add a path, query or fragment to the request URL.
+        if not is_valid_session_ref(session_ref):
+            return self._failed(FailureCode.MALFORMED_RESPONSE)
+        status, body = self._safe("GET", f"/api/generate-classroom/{quote(session_ref, safe='')}", None)
         if status == 404:
             return self._failed(FailureCode.UNSUPPORTED_CAPABILITY)
         if status != 200 or not isinstance(body, Mapping):
@@ -149,7 +175,7 @@ class OpenMaicLearningProvider:
     def _guard(self) -> LearningOutcome | None:
         if self._endpoint is None:
             return self._failed(FailureCode.PROVIDER_NOT_CONFIGURED, ProviderStatus.UNAVAILABLE)
-        if endpoint_locality(self._endpoint) is not EndpointLocality.LOCAL:
+        if not endpoint_is_loopback(self._endpoint):
             return self._failed(FailureCode.UNAUTHORIZED)
         return None
 
@@ -160,8 +186,9 @@ class OpenMaicLearningProvider:
         step = body.get("step")
         status = _STEP_STATUS.get(step, LearningSessionStatus.UNKNOWN) if isinstance(step, str) \
             else LearningSessionStatus.UNKNOWN
-        progress = body.get("progress")
-        progress_int = max(0, min(100, int(progress))) if isinstance(progress, (int, float)) else 0
+        progress_int = _normalized_percent(body.get("progress"))
+        if progress_int is None:  # a present-but-malformed number (non-finite / wrong type) is malformed
+            return None
         try:
             return LearningSession(
                 provider_id=self.provider_id, session_ref=job_id, status=status,

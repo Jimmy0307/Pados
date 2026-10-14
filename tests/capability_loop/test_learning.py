@@ -104,12 +104,15 @@ def test_connection_error_is_normalized(tmp_path: Path) -> None:
 
 
 def test_assessment_reports_unassessed_with_external_limitation(tmp_path: Path) -> None:
-    http = FakeHttp({**HEALTH_OK,
+    http = FakeHttp({**HEALTH_OK, **generate_ok(step="researching", progress=20),
                      ("GET", "/api/generate-classroom/job-123"): (200, {"jobId": "job-123", "step": "completed",
                                                                         "progress": 100})})
     store = LoopStore(tmp_path / "loop.json")
-    receipt = _service(store, _provider(http)).assessment(
-        project_id="proj-a", capability_gap_ref="gap:cad_edit", session_ref="job-123")
+    service = _service(store, _provider(http))
+    # The session (and its governed binding) must exist before a follow-up assessment is authorized.
+    service.create_session(learning_request(), contract=contract(), grant=grant(),
+                           classification=DataClassification.INTERNAL)
+    receipt = service.assessment(session_ref="job-123", contract=contract(), grant=grant())
     assert receipt.result is OperationResult.RECORDED
     assert "OPENMAIC_PROGRESS_API_EXTERNAL" in receipt.limitations
     progress = store.progress()
