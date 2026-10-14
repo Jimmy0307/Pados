@@ -15,6 +15,7 @@ it is for ephemeral / test use where durable external anchoring is not the prope
 """
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -272,8 +273,19 @@ def _find(records: list[_BindingRecord], identity: tuple[str, str]) -> _BindingR
 
 
 def anchored_session_binding_authority(log_path: Path, anchor_directory: Path) -> AnchoredSessionBindingAuthority:
-    """Build the authority from a binding-log path and a SEPARATE anchor directory (owner-only, outside the log)."""
-    return AnchoredSessionBindingAuthority(Path(log_path), FileAnchor(Path(anchor_directory)))
+    """Build the authority from a binding-log path and a SEPARATE anchor directory (owner-only, outside the log).
+
+    The anchor is the independent tamper-evidence root: it must not live in, contain, or equal the directory
+    that holds the binding log. A colocated anchor shares the log's write scope, so a single whole-directory
+    rewrite could restamp both and defeat the anchoring; such a layout is rejected (fail closed) at construction.
+    """
+    log = Path(log_path)
+    anchor = Path(anchor_directory)
+    log_dir = log.resolve().parent
+    anchor_dir = anchor.resolve()
+    if anchor_dir.is_relative_to(log_dir) or log_dir.is_relative_to(anchor_dir):
+        raise BindingAuthorityError("BINDING_ANCHOR_NOT_SEPARATED")
+    return AnchoredSessionBindingAuthority(log, FileAnchor(anchor))
 
 
 class InMemorySessionBindingAuthority:
@@ -286,18 +298,21 @@ class InMemorySessionBindingAuthority:
     def __init__(self) -> None:
         self._bindings: dict[tuple[str, str], GovernedSessionBinding] = {}
         self._seq = 0
+        self._lock = threading.Lock()  # serialize the check/increment/store so no concurrent rebind slips in
 
     def bind(self, binding: GovernedSessionBinding) -> BindingProof:
-        existing = self._bindings.get(binding.identity)
-        if existing is not None:
-            if existing.context_hash != binding.context_hash:
-                raise BindingAuthorityError("BINDING_CONFLICT")
+        with self._lock:
+            existing = self._bindings.get(binding.identity)
+            if existing is not None:
+                if existing.context_hash != binding.context_hash:
+                    raise BindingAuthorityError("BINDING_CONFLICT")
+                return BindingProof(context_hash=binding.context_hash, sequence=self._seq,
+                                    anchor_checkpoint_hash=GENESIS)
+            self._seq += 1
+            self._bindings[binding.identity] = binding
             return BindingProof(context_hash=binding.context_hash, sequence=self._seq,
                                 anchor_checkpoint_hash=GENESIS)
-        self._seq += 1
-        self._bindings[binding.identity] = binding
-        return BindingProof(context_hash=binding.context_hash, sequence=self._seq,
-                            anchor_checkpoint_hash=GENESIS)
 
     def resolve(self, provider_id: str, external_session_ref: str) -> GovernedSessionBinding | None:
-        return self._bindings.get((provider_id, external_session_ref))
+        with self._lock:
+            return self._bindings.get((provider_id, external_session_ref))

@@ -51,7 +51,6 @@ class GateCode:
     WORK_CONTRACT_MISMATCH = "WORK_CONTRACT_MISMATCH"
     GRANT_REFUSED = "GRANT_REFUSED"
     SESSION_NOT_BOUND = "SESSION_NOT_BOUND"  # the binding authority has no binding for this session
-    SESSION_CREATION_UNCOMMITTED = "SESSION_CREATION_UNCOMMITTED"  # bound but its creation receipt is not committed
     SESSION_BIND_REFUSED = "SESSION_BIND_REFUSED"  # the authority refused to bind the new session (fail closed)
     SESSION_BINDING_UNVERIFIABLE = "SESSION_BINDING_UNVERIFIABLE"  # authority integrity/anchor check failed
     SESSION_PROVIDER_MISMATCH = "SESSION_PROVIDER_MISMATCH"  # session was created by a different provider

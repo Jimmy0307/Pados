@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Round-5: an orphaned binding fails closed, and the binding log's byte bound fits its record cap.
+"""Round-5 / Round-11: binding authority is the sole commit, and the binding log's byte bound fits its cap.
 
-R5-F1: a binding whose creation receipt was never committed (e.g. a crash after bind, before record) does
-not authorize follow-ups -- the creation must be durably committed in the receipt chain first.
+R11-F2 (supersedes the original R5-F1): authorization depends only on the authoritative binding, never on the
+DELETABLE, non-authoritative LoopStore receipt chain. A binding present in the authority therefore resolves
+and authorizes a follow-up even when the operational store holds no creation receipt -- deleting that
+operational evidence must never change effective authority. (The earlier ``SESSION_CREATION_UNCOMMITTED`` gate
+is removed: it wrongly tied authority to deletable state and would have denied valid sessions.)
 R5-F2: the binding log's readable byte bound accommodates the full record cap, so the log can never exceed
 the read limit before the record cap and brick existing sessions.
 """
@@ -25,7 +28,6 @@ from loop_learning_support import (
 
 from pados.capability_loop.adapters.openmaic_http import OPENMAIC_PROVIDER_ID, OpenMaicLearningProvider
 from pados.capability_loop.binding_authority import GovernedSessionBinding
-from pados.capability_loop.gate import GateCode
 from pados.capability_loop.learning import LearningService
 from pados.capability_loop_runtime.binding import (
     InMemorySessionBindingAuthority,
@@ -43,7 +45,7 @@ _STATE = {("GET", f"/api/generate-classroom/{SESSION}"): (200, {"jobId": SESSION
                                                                "progress": 100})}
 
 
-def test_orphaned_binding_without_a_committed_creation_fails_closed(tmp_path: Path) -> None:
+def test_binding_in_the_authority_authorizes_a_followup_without_a_store_receipt(tmp_path: Path) -> None:
     http = FakeHttp({**HEALTH_OK, **generate_ok(job_id=SESSION), **_STATE})
     authority = InMemorySessionBindingAuthority()
     store = LoopStore(tmp_path / "loop.json")
@@ -55,19 +57,21 @@ def test_orphaned_binding_without_a_committed_creation_fails_closed(tmp_path: Pa
     assert service.session_state(session_ref=SESSION, contract=contract(),
                                  grant=grant()).result is OperationResult.RECORDED
 
-    # An orphan: a binding exists in the authority, but no creation receipt was ever recorded.
+    # A binding exists in the AUTHORITY, but the deletable LoopStore holds no creation receipt for it. Because
+    # the authoritative binding IS the commit, the follow-up still resolves and the provider is polled:
+    # deleting the non-authoritative operational receipt must never deny a validly bound session.
     authority.bind(GovernedSessionBinding(
         provider_id=OPENMAIC_PROVIDER_ID, external_session_ref=ORPHAN, project_id="proj-a",
         work_contract_id="wc-1", classification=DataClassification.INTERNAL, capability_gap_ref="gap:cad_edit",
         created_at=datetime.now(UTC).isoformat(timespec="seconds")))
     receipt = service.session_state(session_ref=ORPHAN, contract=contract(), grant=grant())
-    assert receipt.result is OperationResult.REFUSED_BY_POLICY
-    assert receipt.policy_code == GateCode.SESSION_CREATION_UNCOMMITTED
-    assert ("GET", f"/api/generate-classroom/{ORPHAN}") not in http.calls  # provider never polled
+    assert receipt.result is OperationResult.RECORDED
+    assert ("GET", f"/api/generate-classroom/{ORPHAN}") in http.calls  # provider WAS polled
 
 
 def test_binding_log_byte_bound_accommodates_the_record_cap(tmp_path: Path) -> None:
-    auth = anchored_session_binding_authority(tmp_path / "binding.jsonl", tmp_path / "anchor")
+    log = tmp_path / "log" / "binding.jsonl"
+    auth = anchored_session_binding_authority(log, tmp_path / "anchor")
     # The readable byte bound is at least the record cap times the per-line cap: the log can never exceed the
     # read limit before hitting the record cap.
     assert auth._file.max_bytes >= auth._max * auth._file.max_line_bytes
@@ -76,5 +80,5 @@ def test_binding_log_byte_bound_accommodates_the_record_cap(tmp_path: Path) -> N
         provider_id=OPENMAIC_PROVIDER_ID, external_session_ref="job-size", project_id="proj-a",
         work_contract_id="wc-1", classification=DataClassification.RESTRICTED,
         capability_gap_ref="gap:some_long_capability_gap_reference_name", created_at="2026-10-14T00:00:00+00:00"))
-    line = (tmp_path / "binding.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    line = log.read_text(encoding="utf-8").splitlines()[0]
     assert len(line.encode("utf-8")) < auth._file.max_line_bytes

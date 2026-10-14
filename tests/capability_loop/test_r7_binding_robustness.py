@@ -58,7 +58,7 @@ def test_rollback_failure_is_normalized(tmp_path: Path, monkeypatch: pytest.Monk
 
 # -- R7-F2: cache avoids re-parsing, but never masks a tamper --------------
 def test_repeated_resolve_reuses_the_parsed_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    auth = anchored_session_binding_authority(tmp_path / "binding.jsonl", tmp_path / "anchor")
+    auth = anchored_session_binding_authority(tmp_path / "log" / "binding.jsonl", tmp_path / "anchor")
     auth.bind(_binding())
     calls = [0]
     original = auth._file.read_lines
@@ -74,7 +74,7 @@ def test_repeated_resolve_reuses_the_parsed_log(tmp_path: Path, monkeypatch: pyt
 
 
 def test_cache_does_not_mask_a_later_tamper(tmp_path: Path) -> None:
-    log = tmp_path / "binding.jsonl"
+    log = tmp_path / "log" / "binding.jsonl"
     auth = anchored_session_binding_authority(log, tmp_path / "anchor")
     auth.bind(_binding(project="proj-a"))
     assert auth.resolve(PROVIDER, "job-1").project_id == "proj-a"  # type: ignore[union-attr]  # populates cache

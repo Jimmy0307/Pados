@@ -128,7 +128,8 @@ class LearningService:
                   grant: Mapping[str, Any], registered_mcp_capabilities: frozenset[str],
                   call: Callable[[GovernedSessionBinding], LearningOutcome]) -> OperationReceipt:
         request_digest = canonical_hash(
-            {"op": kind.value, "session": session_ref, "project": contract.get("project_id")})
+            {"op": kind.value, "session": session_ref, "project": contract.get("project_id"),
+             "work_contract": contract.get("work_contract_id")})
         caller_project = _safe_project_id(contract.get("project_id"))
         try:
             binding = self._authority.resolve(self._provider.provider_id, session_ref)
@@ -146,13 +147,9 @@ class LearningService:
                 or contract.get("work_contract_id") != binding.work_contract_id):
             return self._coded_refusal(kind, _safe_project_id(binding.project_id), None, request_digest,
                                        GateCode.SESSION_PROJECT_MISMATCH, None, capability_override=gap_capability)
-        # The binding authorizes a follow-up only once the session's creation receipt is durably committed in
-        # the receipt chain; a binding whose creation never recorded (e.g. a crash after bind, before record)
-        # is treated as uncommitted and fails closed.
-        if not self._creation_committed(binding):
-            return self._coded_refusal(kind, _safe_project_id(binding.project_id), None, request_digest,
-                                       GateCode.SESSION_CREATION_UNCOMMITTED, None,
-                                       capability_override=gap_capability)
+        # The authoritative binding IS the commit: its presence means the session is committed. Authorization
+        # never depends on the non-authoritative LoopStore receipt chain (deleting that operational evidence
+        # must never change effective authority), so there is no loop-store commit gate here.
         decision = evaluate_learning(
             project_id=binding.project_id, work_contract_id=binding.work_contract_id,
             request_id=f"{kind.value.lower()}:{session_ref}", classification=binding.classification,
@@ -166,15 +163,6 @@ class LearningService:
         # session/gap/provider identity; otherwise reject before any projection update.
         forced = None if _outcome_matches_binding(outcome, binding) else FailureCode.MALFORMED_RESPONSE
         return self._record(kind, binding, request_digest, decision, outcome, forced_failure=forced)
-
-    def _creation_committed(self, binding: GovernedSessionBinding) -> bool:
-        """True when a durably committed creation receipt anchors this binding in the chain-verified log."""
-        return any(
-            receipt.operation is OperationKind.LEARN_CREATE_SESSION
-            and receipt.session_ref == binding.external_session_ref
-            and receipt.binding_digest == binding.context_hash
-            and receipt.accepted_into_loop
-            for receipt in self._store.receipts())
 
     # -- recording ----------------------------------------------------------
     def _governed_binding(self, request: LearningRequest, external_session_ref: str,

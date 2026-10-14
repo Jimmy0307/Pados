@@ -27,7 +27,7 @@ def _binding(session: str = "job-1") -> GovernedSessionBinding:
 
 # -- R9-F1: filesystem stat failure is normalized --------------------------
 def test_stat_failure_is_normalized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    auth = anchored_session_binding_authority(tmp_path / "binding.jsonl", tmp_path / "anchor")
+    auth = anchored_session_binding_authority(tmp_path / "log" / "binding.jsonl", tmp_path / "anchor")
 
     def insecure() -> None:
         raise LearningStoreError("LEARNING_STORE_INSECURE")
@@ -70,7 +70,7 @@ def test_failed_first_anchor_init_rolls_the_log_back(tmp_path: Path) -> None:
 
 # -- R9-F4: the cache key includes ctime (which utime cannot restore) ------
 def test_cache_stamp_includes_ctime(tmp_path: Path) -> None:
-    auth = anchored_session_binding_authority(tmp_path / "binding.jsonl", tmp_path / "anchor")
+    auth = anchored_session_binding_authority(tmp_path / "log" / "binding.jsonl", tmp_path / "anchor")
     auth.bind(_binding())
     stamp = auth._stamp()
     assert stamp is not None and len(stamp) == 4  # (ino, size, mtime_ns, ctime_ns)

@@ -37,7 +37,7 @@ _STATE = {("GET", f"/api/generate-classroom/{SESSION}"): (200, {"jobId": SESSION
 
 
 def _service(tmp_path: Path, http: FakeHttp) -> tuple[LearningService, Path]:
-    log = tmp_path / "binding.jsonl"
+    log = tmp_path / "log" / "binding.jsonl"
     authority = anchored_session_binding_authority(log, tmp_path / "anchor")
     store = LoopStore(tmp_path / "loop.json")
     service = LearningService(OpenMaicLearningProvider(ENDPOINT, http), store,

@@ -36,7 +36,7 @@ def _binding(session: str = "job-1", project: str = "proj-a") -> GovernedSession
 
 
 def _auth(tmp_path: Path) -> tuple[AnchoredSessionBindingAuthority, Path, Path]:
-    log, anchor = tmp_path / "binding.jsonl", tmp_path / "anchor"
+    log, anchor = tmp_path / "log" / "binding.jsonl", tmp_path / "anchor"
     return anchored_session_binding_authority(log, anchor), log, anchor
 
 

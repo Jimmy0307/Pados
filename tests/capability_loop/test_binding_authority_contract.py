@@ -36,7 +36,7 @@ def _binding(*, project: str = "proj-a", work: str = "wc-1",
 def _factories(tmp_path: Path) -> list[Callable[[], SessionBindingAuthority]]:
     return [
         InMemorySessionBindingAuthority,
-        lambda: anchored_session_binding_authority(tmp_path / "binding.jsonl", tmp_path / "anchor"),
+        lambda: anchored_session_binding_authority(tmp_path / "log" / "binding.jsonl", tmp_path / "anchor"),
     ]
 
 

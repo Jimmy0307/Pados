@@ -29,14 +29,14 @@ def _binding(provider: str = MAX_ID, session: str = MAX_SESSION) -> GovernedSess
 
 # -- R6-F1: record sizing + normalized write errors ------------------------
 def test_contract_maximum_binding_is_accepted(tmp_path: Path) -> None:
-    auth = anchored_session_binding_authority(tmp_path / "binding.jsonl", tmp_path / "anchor")
+    auth = anchored_session_binding_authority(tmp_path / "log" / "binding.jsonl", tmp_path / "anchor")
     auth.bind(_binding())  # must not raise DataMinimizationViolation
     assert auth.resolve(MAX_ID, MAX_SESSION) is not None
 
 
 def test_persistence_error_is_normalized_to_authority_error(tmp_path: Path,
                                                             monkeypatch: pytest.MonkeyPatch) -> None:
-    auth = anchored_session_binding_authority(tmp_path / "binding.jsonl", tmp_path / "anchor")
+    auth = anchored_session_binding_authority(tmp_path / "log" / "binding.jsonl", tmp_path / "anchor")
 
     def boom(*_a: object, **_k: object) -> None:
         raise OSError("disk full")
