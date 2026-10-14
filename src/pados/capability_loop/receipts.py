@@ -26,6 +26,9 @@ _DIGEST = re.compile(r"^[a-f0-9]{64}$")
 _ID = re.compile(r"^[a-z][a-z0-9_.:-]{2,95}$")
 _CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 _SESSION_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+# Optional fields added after the original receipt schema. They are excluded from the hash only when unused
+# (None) so that adding them never changes the hash of a receipt written before they existed.
+_ADDED_OPTIONAL_FIELDS = ("binding_digest", "session_ref")
 
 
 def is_valid_receipt_id(value: object) -> bool:
@@ -137,9 +140,15 @@ class OperationReceipt(BaseModel):
 
     @property
     def receipt_hash(self) -> str:
-        # Exclude absent/default (None) fields so adding an optional field never changes the hash of
-        # receipts that do not use it: a store written before a field existed still verifies after upgrade.
-        return canonical_hash(self.model_dump(mode="json", exclude_none=True))
+        # Drop ONLY the fields introduced after the original schema when they are unused (None), keeping every
+        # original field (including its null). A receipt written before these fields existed therefore hashes
+        # identically after upgrade, so a legacy chain still verifies; a used (non-null) value stays in the
+        # hash and remains tamper-evident.
+        dump = self.model_dump(mode="json")
+        for added in _ADDED_OPTIONAL_FIELDS:
+            if dump.get(added) is None:
+                dump.pop(added, None)
+        return canonical_hash(dump)
 
 
 def verify_chain(receipts: tuple[OperationReceipt, ...] | list[OperationReceipt]) -> bool:

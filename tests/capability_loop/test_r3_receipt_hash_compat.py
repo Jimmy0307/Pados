@@ -20,12 +20,15 @@ def _receipt(**overrides: object) -> OperationReceipt:
     return OperationReceipt(**base)  # type: ignore[arg-type]
 
 
-def test_hash_ignores_absent_optional_fields() -> None:
+def test_hash_drops_only_the_new_fields_and_preserves_legacy_projection() -> None:
     receipt = _receipt()  # binding_digest and session_ref default to None
     dump = receipt.model_dump(mode="json")
-    assert "binding_digest" in dump and dump["binding_digest"] is None  # persisted row still carries the key
-    legacy = canonical_hash({key: value for key, value in dump.items() if value is not None})
-    assert receipt.receipt_hash == legacy  # the hash is over the non-null projection only
+    assert dump["failure"] is None and dump["runtime_version"] is None  # other optional fields are null
+    # The legacy hash is the full model dump WITHOUT the two newly-added fields, keeping every original
+    # field (including its null). The upgraded receipt must hash identically.
+    legacy = {key: value for key, value in dump.items() if key not in ("binding_digest", "session_ref")}
+    assert "failure" in legacy and "runtime_version" in legacy  # original nulls stay in the projection
+    assert receipt.receipt_hash == canonical_hash(legacy)
 
 
 def test_setting_a_used_optional_field_changes_the_hash() -> None:

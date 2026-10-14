@@ -126,10 +126,19 @@ class LoopStore:
         return {key: dict(value) for key, value in data["progress"].items()}
 
     def append(self, fields: dict[str, Any], *, candidate: CapabilityCandidate | None = None,
-               progress: tuple[str, dict[str, Any]] | None = None) -> OperationReceipt:
-        """Append one receipt (chained to the last) and, atomically with it, the candidate / progress row."""
+               progress: tuple[str, dict[str, Any]] | None = None,
+               precondition: Callable[[dict[str, Any]], bool] | None = None) -> OperationReceipt:
+        """Append one receipt (chained to the last) and, atomically with it, the candidate / progress row.
+
+        ``precondition`` is evaluated under the write lock against the freshly loaded store, before anything
+        is written; if it returns False the append is refused with ``LOOP_STORE_PRECONDITION_FAILED``. This
+        lets a caller assert a still-current invariant (for example that a session binding is still the
+        latest owner) atomically with the write, closing a read-then-write race.
+        """
         with store_lock(self.path):
             data = self._load()
+            if precondition is not None and not precondition(data):
+                raise LoopStoreError("LOOP_STORE_PRECONDITION_FAILED")
             receipts = data["receipts"]
             if len(receipts) >= self.max_receipts:
                 raise LoopStoreError("LOOP_STORE_FULL")

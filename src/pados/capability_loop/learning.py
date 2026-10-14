@@ -43,7 +43,7 @@ from pados.capability_loop.receipts import (
     is_valid_receipt_code,
     is_valid_receipt_id,
 )
-from pados.capability_loop.store import LoopStore
+from pados.capability_loop.store import LoopStore, LoopStoreError
 from pados.connectivity.requirements import NetworkRequirement
 from pados.enterprise.classification import DataClassification, parse_classification
 from pados.execution.context import canonical_hash
@@ -146,11 +146,12 @@ class LearningService:
         outcome = call(binding)
         # The provider must answer about the session we asked for, and any assessment it returns must carry
         # the bound session/gap/provider identity. A foreign session or a mis-attributed assessment never
-        # inherits this binding's authorization: reject before any store/binding update.
-        if not _outcome_matches_binding(outcome, binding):
-            return self._record(kind, binding, request_digest, decision, outcome,
-                                forced_failure=FailureCode.MALFORMED_RESPONSE)
-        return self._record(kind, binding, request_digest, decision, outcome)
+        # inherits this binding's authorization: reject before any store/binding update. Recording also
+        # re-checks, atomically under the write lock, that this binding is still the session's latest owner
+        # (closing a resolve-then-record race when the id is concurrently reused).
+        forced = None if _outcome_matches_binding(outcome, binding) else FailureCode.MALFORMED_RESPONSE
+        return self._record(kind, binding, request_digest, decision, outcome,
+                            forced_failure=forced, enforce_current_owner=True)
 
     def _resolve_binding(self, session_ref: str,
                          contract: Mapping[str, Any]) -> tuple[_SessionBinding | None, str | None]:
@@ -212,18 +213,24 @@ class LearningService:
 
     def _creation_failure(self, request: LearningRequest, request_digest: str, decision: GateDecision,
                           outcome: LearningOutcome) -> OperationReceipt:
-        """The provider did not create a session: record a normalized failure, no binding, no progress."""
+        """The provider did not create a session: record a normalized failure, no binding, no progress.
+
+        A well-typed but incomplete outcome (no session and no explicit failure) is itself malformed, so a
+        normalized reason is always recorded.
+        """
+        failure = outcome.failure if outcome.failure is not None else FailureCode.MALFORMED_RESPONSE
         return self._store.append({
             "operation": OperationKind.LEARN_CREATE_SESSION, "project_id": request.project_id,
             "request_digest": request_digest, "provider_id": self._provider.provider_id,
             "capability_id": _safe_capability_code(request.capability_gap_ref), "policy_code": decision.code,
             "policy_decision_hash": decision.policy_decision_hash,
-            "result": OperationResult.PROVIDER_FAILED, "failure": outcome.failure, "evidence_digests": (),
+            "result": OperationResult.PROVIDER_FAILED, "failure": failure, "evidence_digests": (),
             "limitations": (), "accepted_into_loop": False, "state_before": None, "state_after": None})
 
     def _record(self, kind: OperationKind, binding: _SessionBinding, request_digest: str,
                 decision: GateDecision, outcome: LearningOutcome, *,
-                forced_failure: FailureCode | None = None) -> OperationReceipt:
+                forced_failure: FailureCode | None = None,
+                enforce_current_owner: bool = False) -> OperationReceipt:
         failure = forced_failure if forced_failure is not None else outcome.failure
         failed = failure is not None
         limitations: tuple[str, ...] = ()
@@ -237,16 +244,41 @@ class LearningService:
             progress = (binding.session_ref, _progress_row(binding, outcome))
         evidence_digests = (outcome.assessment.evidence_digest,) if (
             not failed and outcome.assessment is not None) else ()
-        return self._store.append({
-            "operation": kind, "project_id": binding.project_id, "request_digest": request_digest,
-            "provider_id": self._provider.provider_id,
-            "capability_id": _safe_capability_code(binding.capability_gap_ref),
-            "policy_code": decision.code, "policy_decision_hash": decision.policy_decision_hash,
-            "binding_digest": binding.digest, "session_ref": binding.session_ref,
-            "result": OperationResult.PROVIDER_FAILED if failed else OperationResult.RECORDED,
-            "failure": failure, "evidence_digests": evidence_digests, "limitations": limitations,
-            "accepted_into_loop": not failed, "state_before": None, "state_after": None},
-            progress=None if failed else progress)
+        # For a follow-up, the binding must still be the session's latest owner at the instant of the write.
+        precondition = None
+        if enforce_current_owner:
+            def precondition(data: dict[str, Any]) -> bool:
+                return _latest_creation_digest_in(data["receipts"], binding.session_ref) == binding.digest
+        try:
+            return self._store.append({
+                "operation": kind, "project_id": binding.project_id, "request_digest": request_digest,
+                "provider_id": self._provider.provider_id,
+                "capability_id": _safe_capability_code(binding.capability_gap_ref),
+                "policy_code": decision.code, "policy_decision_hash": decision.policy_decision_hash,
+                "binding_digest": binding.digest, "session_ref": binding.session_ref,
+                "result": OperationResult.PROVIDER_FAILED if failed else OperationResult.RECORDED,
+                "failure": failure, "evidence_digests": evidence_digests, "limitations": limitations,
+                "accepted_into_loop": not failed, "state_before": None, "state_after": None},
+                progress=None if failed else progress, precondition=precondition)
+        except LoopStoreError as exc:
+            if exc.code != "LOOP_STORE_PRECONDITION_FAILED":
+                raise
+            # Ownership changed between resolve and record: fail closed, record a refusal, do not overwrite.
+            return self._coded_refusal(kind, binding.project_id, binding.capability_gap_ref, request_digest,
+                                       GateCode.SESSION_BINDING_TAMPERED, None)
+
+
+def _latest_creation_digest_in(rows: list[dict[str, Any]], session_ref: str) -> str | None:
+    """The binding digest of the latest creation receipt owning ``session_ref``, read from raw receipt rows.
+
+    Used inside the write lock (via a store precondition) so the ownership check is atomic with the write.
+    """
+    latest: str | None = None
+    for row in rows:
+        if (row.get("operation") == OperationKind.LEARN_CREATE_SESSION.value
+                and row.get("session_ref") == session_ref and row.get("binding_digest")):
+            latest = row.get("binding_digest")
+    return latest
 
 
 def _safe_project_id(candidate: object) -> str:
