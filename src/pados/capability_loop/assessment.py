@@ -107,8 +107,15 @@ def assess_goal(task: TaskEnvelope, goal: Goal, *, validated_capabilities: froze
     recommendations = {_bare_capability(r.required_capability): r for r in
                        recommend_capability_gap(task, goal, registered_capabilities=registered)}
     # Canonicalize the supplied mastery keys too, so a grant-scoped key still matches the bare lookup below
-    # (otherwise measured mastery/evidence would be silently replaced by the UNASSESSED default).
-    mastery = {_bare_capability(key): value for key, value in (human_mastery or {}).items()}
+    # (otherwise measured mastery/evidence would be silently replaced by the UNASSESSED default). Two keys
+    # that canonicalize to the same bare id must agree: a conflicting alias is rejected rather than resolved
+    # by mapping order.
+    mastery: dict[str, CapabilityDimensions] = {}
+    for key, value in (human_mastery or {}).items():
+        bare_key = _bare_capability(key)
+        if bare_key in mastery and mastery[bare_key] != value:
+            raise ValueError("HUMAN_MASTERY_ALIAS_CONFLICT")
+        mastery[bare_key] = value
     decisions: list[PathDecision] = []
     for required in goal.required_capabilities:
         bare = _bare_capability(required)

@@ -7,6 +7,7 @@ canonicalize to the bare id for every membership check (validated / learnable / 
 """
 from __future__ import annotations
 
+import pytest
 from tests.work_protocol.test_completion import _envelope
 
 from pados.capability_loop.assessment import CapabilityPath, assess_goal
@@ -62,4 +63,28 @@ def test_prefixed_human_mastery_key_is_canonicalized() -> None:
     result = assess_goal(task, goal, validated_capabilities=frozenset(),
                          learnable_capabilities=frozenset({"CAD_EDIT"}), registered_capabilities=frozenset(),
                          human_mastery={"CAPABILITY:CAD_EDIT": dims})  # grant-scoped mastery key
+    assert result.decisions[0].dimensions.human_mastery is MasteryLevel.PASSED
+
+
+def test_conflicting_human_mastery_aliases_are_rejected() -> None:
+    # Round-10: a bare key and its prefixed alias with DIFFERENT values is ambiguous -> reject (deterministic).
+    task, goal = _goal_with("CAD_EDIT")
+    passed = CapabilityDimensions(capability_id="CAD_EDIT", human_mastery=MasteryLevel.PASSED,
+                                  system_availability=SystemAvailability.UNKNOWN,
+                                  validation_status=ValidationStatus.UNVALIDATED)
+    failed = passed.model_copy(update={"human_mastery": MasteryLevel.FAILED})
+    with pytest.raises(ValueError, match="HUMAN_MASTERY_ALIAS_CONFLICT"):
+        assess_goal(task, goal, validated_capabilities=frozenset(),
+                    learnable_capabilities=frozenset({"CAD_EDIT"}), registered_capabilities=frozenset(),
+                    human_mastery={"CAD_EDIT": passed, "CAPABILITY:CAD_EDIT": failed})
+
+
+def test_matching_human_mastery_aliases_are_accepted() -> None:
+    task, goal = _goal_with("CAD_EDIT")
+    dims = CapabilityDimensions(capability_id="CAD_EDIT", human_mastery=MasteryLevel.PASSED,
+                                system_availability=SystemAvailability.UNKNOWN,
+                                validation_status=ValidationStatus.UNVALIDATED)
+    result = assess_goal(task, goal, validated_capabilities=frozenset(),
+                         learnable_capabilities=frozenset({"CAD_EDIT"}), registered_capabilities=frozenset(),
+                         human_mastery={"CAD_EDIT": dims, "CAPABILITY:CAD_EDIT": dims})  # identical -> ok
     assert result.decisions[0].dimensions.human_mastery is MasteryLevel.PASSED
