@@ -28,7 +28,7 @@ from pados.capability_loop.binding_authority import (
     GovernedSessionBinding,
     SessionBindingAuthority,
 )
-from pados.capability_loop.contracts import FailureCode
+from pados.capability_loop.contracts import FailureCode, ProviderStatus
 from pados.capability_loop.gate import GateCode, GateDecision, evaluate_learning
 from pados.capability_loop.learning_contracts import (
     LearningOutcome,
@@ -94,7 +94,12 @@ class LearningService:
                                        request.capability_gap_ref, request_digest,
                                        material_policy_code(resolution.code), decision.policy_decision_hash)
         outcome = self._provider.create_session(request)
-        if outcome.failure is not None or outcome.session is None:
+        # Bind only under the whole-success invariant (AVAILABLE, no failure, complete, with a session), the
+        # same bar discovery uses before accepting a candidate. LearningOutcome permits a session alongside a
+        # DEGRADED/partial status with no failure; such an explicitly incomplete answer must NOT create a
+        # durable authoritative binding that would authorize future calls.
+        if (outcome.failure is not None or outcome.session is None or outcome.partial
+                or outcome.status is not ProviderStatus.AVAILABLE):
             return self._creation_failure(request, request_digest, decision, outcome)
         # Authoritatively bind the external session to this governed context BEFORE accepting it. If the
         # authority refuses (a conflicting prior binding, or an unavailable/mismatched anchor), the session is
@@ -237,9 +242,18 @@ class LearningService:
 
 
 def _outcome_matches_binding(outcome: LearningOutcome, binding: GovernedSessionBinding) -> bool:
-    """The provider's own session/assessment identity must match the authoritative binding."""
+    """The provider's own identity and its session/assessment identity must match the authoritative binding.
+
+    The response is attributed to the bound provider, and any session/assessment it carries names the bound
+    provider too; a response whose provider differs (even with a matching session ref) is rejected so a
+    foreign provider's answer can never be recorded under this binding's provider.
+    """
+    if outcome.provider_id != binding.provider_id:
+        return False
     session = outcome.session
-    if session is not None and session.session_ref != binding.external_session_ref:
+    if session is not None and (
+            session.session_ref != binding.external_session_ref
+            or session.provider_id != binding.provider_id):
         return False
     assessment = outcome.assessment
     if assessment is not None and (

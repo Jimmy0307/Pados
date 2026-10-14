@@ -226,6 +226,11 @@ class AnchoredSessionBindingAuthority:
         try:
             self._file.append_line(_minimized(after[-1]))
         except (DataMinimizationViolation, LearningStoreError, OSError, ValueError) as exc:
+            # The append may have made the record visible on disk before raising (e.g. the bytes landed but a
+            # following fsync failed). The anchor has NOT advanced yet, so reconcile the log back to the
+            # validated pre-append state; otherwise the log would sit one entry ahead of the anchor and every
+            # later bind/resolve would fail closed (BINDING_HEAD_NOT_ANCHORED), disabling all existing sessions.
+            self._rollback_log(before)
             raise BindingAuthorityError("BINDING_LOG_WRITE_FAILED") from exc
         try:
             self._anchor.record(anchored, after[-1].checkpoint)
@@ -296,7 +301,9 @@ class InMemorySessionBindingAuthority:
     """
 
     def __init__(self) -> None:
-        self._bindings: dict[tuple[str, str], GovernedSessionBinding] = {}
+        # Each identity maps to its binding AND the sequence it was assigned at, so an idempotent rebind
+        # returns the ORIGINAL sequence (as the anchored log does), never the latest counter value.
+        self._bindings: dict[tuple[str, str], tuple[GovernedSessionBinding, int]] = {}
         self._seq = 0
         self._lock = threading.Lock()  # serialize the check/increment/store so no concurrent rebind slips in
 
@@ -304,15 +311,17 @@ class InMemorySessionBindingAuthority:
         with self._lock:
             existing = self._bindings.get(binding.identity)
             if existing is not None:
-                if existing.context_hash != binding.context_hash:
+                existing_binding, existing_seq = existing
+                if existing_binding.context_hash != binding.context_hash:
                     raise BindingAuthorityError("BINDING_CONFLICT")
-                return BindingProof(context_hash=binding.context_hash, sequence=self._seq,
+                return BindingProof(context_hash=binding.context_hash, sequence=existing_seq,
                                     anchor_checkpoint_hash=GENESIS)
             self._seq += 1
-            self._bindings[binding.identity] = binding
+            self._bindings[binding.identity] = (binding, self._seq)
             return BindingProof(context_hash=binding.context_hash, sequence=self._seq,
                                 anchor_checkpoint_hash=GENESIS)
 
     def resolve(self, provider_id: str, external_session_ref: str) -> GovernedSessionBinding | None:
         with self._lock:
-            return self._bindings.get((provider_id, external_session_ref))
+            entry = self._bindings.get((provider_id, external_session_ref))
+            return None if entry is None else entry[0]
