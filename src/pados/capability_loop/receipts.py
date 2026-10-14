@@ -27,6 +27,11 @@ _ID = re.compile(r"^[a-z][a-z0-9_.:-]{2,95}$")
 _CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 
 
+def is_valid_receipt_id(value: object) -> bool:
+    """True when ``value`` is a valid receipt identifier (project_id / provider_id contract)."""
+    return isinstance(value, str) and bool(_ID.fullmatch(value))
+
+
 class OperationKind(StrEnum):
     DISCOVER = "DISCOVER"
     LEARN_CREATE_SESSION = "LEARN_CREATE_SESSION"
@@ -66,6 +71,7 @@ class OperationReceipt(BaseModel):
     state_before: CapabilityState | None = None
     state_after: CapabilityState | None = None
     core_receipt_ref: str | None = None  # a Core StageReceipt / PlanReceipt hash, referenced only
+    binding_digest: str | None = None  # digest of a session's governed binding; anchors it in this chain
     recorded_at: str = Field(min_length=1, max_length=40)
     semantic_authority: Literal["NONE"] = "NONE"
 
@@ -76,7 +82,7 @@ class OperationReceipt(BaseModel):
             raise ValueError("RECEIPT_DIGEST_INVALID")
         return value
 
-    @field_validator("policy_decision_hash", "core_receipt_ref")
+    @field_validator("policy_decision_hash", "core_receipt_ref", "binding_digest")
     @classmethod
     def _optional_digest(cls, value: str | None) -> str | None:
         if value is not None and not _DIGEST.fullmatch(value):

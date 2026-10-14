@@ -51,6 +51,8 @@ class GateCode:
     WORK_CONTRACT_MISMATCH = "WORK_CONTRACT_MISMATCH"
     GRANT_REFUSED = "GRANT_REFUSED"
     SESSION_NOT_BOUND = "SESSION_NOT_BOUND"  # follow-up op names a session the store never bound
+    SESSION_BINDING_TAMPERED = "SESSION_BINDING_TAMPERED"  # advisory binding row no longer matches its receipt anchor
+    SESSION_PROVIDER_MISMATCH = "SESSION_PROVIDER_MISMATCH"  # session was created by a different provider
     SESSION_PROJECT_MISMATCH = "SESSION_PROJECT_MISMATCH"  # follow-up contract is for another project
 
 

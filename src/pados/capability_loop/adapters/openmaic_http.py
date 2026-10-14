@@ -48,21 +48,37 @@ OPENMAIC_PROVIDER_ID = "openmaic.adaptive_learning"
 DEFAULT_TIMEOUT_SECONDS = 60.0
 
 
+# A provider percent beyond this magnitude is corrupt, not a mis-scaled percent: it is malformed, not
+# clamped. The bound also keeps integer handling away from float conversion, which an oversized int would
+# make raise OverflowError.
+_SANE_PERCENT_BOUND = 1000
+
+
 def _normalized_percent(value: Any) -> int | None:
     """Guarded numeric normalization for a provider percent: clamp to [0, 100], or signal malformed.
 
-    Returns an int in [0, 100] for an absent (-> 0), finite int or finite float value (out-of-range values
-    clamp). Returns ``None`` for a present-but-malformed number (a bool, a non-number, or a non-finite
-    NaN/Inf), which the caller turns into a normalized MALFORMED_RESPONSE rather than letting ``int()``
-    raise into the loop.
+    Branches on type so no path can raise into the loop:
+    * ``None`` -> 0 (absent progress);
+    * ``bool`` -> malformed (never treated as the int 0/1);
+    * ``int``  -> compared as an integer (never converted to float, so an oversized int cannot raise);
+      moderate out-of-range values clamp, an absurd magnitude is malformed;
+    * ``float`` -> ``math.isfinite`` then bounds (NaN/Inf malformed), moderate out-of-range clamps;
+    * anything else -> malformed.
+    A ``None`` return becomes a normalized MALFORMED_RESPONSE at the call site.
     """
     if value is None:
         return 0
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool):
         return None
-    if not math.isfinite(value):
-        return None
-    return max(0, min(100, int(value)))
+    if isinstance(value, int):
+        if not -_SANE_PERCENT_BOUND <= value <= _SANE_PERCENT_BOUND:
+            return None
+        return max(0, min(100, value))
+    if isinstance(value, float):
+        if not math.isfinite(value) or not -_SANE_PERCENT_BOUND <= value <= _SANE_PERCENT_BOUND:
+            return None
+        return max(0, min(100, int(value)))
+    return None
 
 
 # Normalized HTTP transport: (method, path, body, timeout) -> (status, json | None). Injectable for tests.

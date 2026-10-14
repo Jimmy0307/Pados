@@ -22,6 +22,7 @@ from pados.capability_loop.learning_contracts import LearningRequest
 class MaterialResolutionCode(StrEnum):
     RESOLVED = "RESOLVED"
     UNKNOWN_MATERIAL = "UNKNOWN_MATERIAL"  # no operator registration for this material ref
+    REGISTRATION_IDENTITY_MISMATCH = "REGISTRATION_IDENTITY_MISMATCH"  # key / ref / request ref disagree
     CROSS_PROJECT = "CROSS_PROJECT"  # registered to a different project than the request
     DIGEST_MISMATCH = "DIGEST_MISMATCH"  # the request's content digest disagrees with the registration
 
@@ -29,6 +30,7 @@ class MaterialResolutionCode(StrEnum):
 # The policy code recorded on a receipt when a material fails to bind.
 _POLICY_CODE = {
     MaterialResolutionCode.UNKNOWN_MATERIAL: "MATERIAL_UNKNOWN",
+    MaterialResolutionCode.REGISTRATION_IDENTITY_MISMATCH: "MATERIAL_IDENTITY_MISMATCH",
     MaterialResolutionCode.CROSS_PROJECT: "MATERIAL_CROSS_PROJECT",
     MaterialResolutionCode.DIGEST_MISMATCH: "MATERIAL_DIGEST_MISMATCH",
 }
@@ -66,6 +68,11 @@ def resolve_materials(request: LearningRequest,
         registration = registrations.get(material.material_ref)
         if registration is None:
             return MaterialResolution(MaterialResolutionCode.UNKNOWN_MATERIAL, offending_ref=material.material_ref)
+        # The mapping key, the registration's declared ref and the requested ref must be one identity; a
+        # mis-keyed registration must never be used in place of the requested material.
+        if registration.material_ref != material.material_ref:
+            return MaterialResolution(MaterialResolutionCode.REGISTRATION_IDENTITY_MISMATCH,
+                                      offending_ref=material.material_ref)
         if registration.project_id != request.project_id:
             return MaterialResolution(MaterialResolutionCode.CROSS_PROJECT, offending_ref=material.material_ref)
         if registration.content_digest != material.content_digest:
