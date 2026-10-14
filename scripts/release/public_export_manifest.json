@@ -397,6 +397,13 @@
         "private_ipv4"
       ],
       "reason": "non-loopback runtime URL fixture that runtime discovery must refuse"
+    },
+    {
+      "path": "tests/capability_loop/test_openmaic_loopback.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "synthetic RFC 1918 / CGNAT endpoints proving the OpenMAIC adapter accepts only loopback"
     }
   ],
   "release_blocker_findings": [],
