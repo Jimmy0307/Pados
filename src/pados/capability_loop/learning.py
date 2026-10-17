@@ -34,6 +34,7 @@ from pados.capability_loop.learning_contracts import (
     LearningOutcome,
     LearningProvider,
     LearningRequest,
+    LearningSessionStatus,
 )
 from pados.capability_loop.materials import (
     MaterialRegistration,
@@ -94,12 +95,13 @@ class LearningService:
                                        request.capability_gap_ref, request_digest,
                                        material_policy_code(resolution.code), decision.policy_decision_hash)
         outcome = self._provider.create_session(request)
-        # Bind only under the whole-success invariant (AVAILABLE, no failure, complete, with a session), the
-        # same bar discovery uses before accepting a candidate. LearningOutcome permits a session alongside a
-        # DEGRADED/partial status with no failure; such an explicitly incomplete answer must NOT create a
-        # durable authoritative binding that would authorize future calls.
+        # Bind only under the whole-success invariant (AVAILABLE, no failure, complete, with a non-failed
+        # session), the same bar discovery uses before accepting a candidate. LearningOutcome permits a
+        # session alongside a DEGRADED/partial status with no failure; an explicitly failed or incomplete
+        # answer must NOT create a durable authoritative binding that would authorize future calls.
         if (outcome.failure is not None or outcome.session is None or outcome.partial
-                or outcome.status is not ProviderStatus.AVAILABLE):
+                or outcome.status is not ProviderStatus.AVAILABLE
+                or outcome.session.status is LearningSessionStatus.FAILED):
             return self._creation_failure(request, request_digest, decision, outcome)
         # Authoritatively bind the external session to this governed context BEFORE accepting it. If the
         # authority refuses (a conflicting prior binding, or an unavailable/mismatched anchor), the session is
