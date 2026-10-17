@@ -15,6 +15,7 @@ it is for ephemeral / test use where durable external anchoring is not the prope
 """
 from __future__ import annotations
 
+import sys
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -109,10 +110,9 @@ class AnchoredSessionBindingAuthority:
         self._file = JsonlFile(Path(log_path), max_bytes=max_bindings * _LINE_BYTES, max_line_bytes=_LINE_BYTES)
         self._anchor = anchor
         self._max = max_bindings
-        # Parsed-log cache keyed by the file identity/size/mtime AND ctime (inode-change time, which utime
-        # cannot restore), so a same-size in-place rewrite invalidates the cache. The anchor is also checked
-        # on every lookup, so a cache hit never skips the tamper-evidence, only the re-parse of unchanged
-        # content.
+        # Parsed-log cache uses inode/size/mtime/ctime on POSIX. Windows st_ctime_ns is creation time rather
+        # than inode-change time, so caching is disabled there; every lookup re-parses before checking the
+        # independent anchor and a same-size rewrite with restored mtime cannot reuse stale parsed records.
         self._cache: tuple[tuple[int, int, int, int], tuple[_BindingRecord, ...]] | None = None
 
     # -- public contract ----------------------------------------------------
@@ -167,17 +167,19 @@ class AnchoredSessionBindingAuthority:
 
     def _stamp(self) -> tuple[int, int, int, int] | None:
         info = self._file.stat()  # LearningStoreError here is normalized to BindingAuthorityError by bind/resolve
-        return None if info is None else (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if info is None or sys.platform == "win32":
+            return None
+        return (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
     def _load(self) -> list[_BindingRecord]:
         stamp = self._stamp()
         if stamp is not None and self._cache is not None and self._cache[0] == stamp:
             return list(self._cache[1])  # file unchanged since the last parse (anchor still checked by caller)
+        records: list[_BindingRecord] = []
         try:
             lines = self._file.read_lines()
         except LearningStoreError as exc:
             raise BindingAuthorityError("BINDING_LOG_CORRUPT") from exc
-        records: list[_BindingRecord] = []
         contexts: dict[tuple[str, str], str] = {}
         for index, line in enumerate(lines, start=1):
             try:
