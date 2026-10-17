@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,6 +27,7 @@ from pados.capability_loop.contracts import FailureCode
 from pados.capability_loop.learning import LearningService
 from pados.capability_loop.receipts import OperationResult
 from pados.capability_loop.store import LoopStore
+from pados.capability_loop_runtime import binding as binding_runtime
 from pados.capability_loop_runtime.binding import AnchoredSessionBindingAuthority, anchored_session_binding_authority
 from pados.enterprise.classification import DataClassification
 from pados.learning.anchor import Checkpoint
@@ -86,9 +87,9 @@ def test_windows_binding_cache_does_not_trust_creation_time(
     log_path.write_bytes(tampered)
     os.utime(log_path, ns=(stable.st_atime_ns, stable.st_mtime_ns))
 
-    # Simulate Windows metadata semantics: ctime is creation time and therefore unchanged by the rewrite.
+    # Simulate only binding.py's Windows cache semantics; do not switch the Linux lock implementation.
     monkeypatch.setattr(authority._file, "stat", lambda: stable)
-    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(binding_runtime, "sys", SimpleNamespace(platform="win32"), raising=False)
 
     with pytest.raises(BindingAuthorityError):
         authority.resolve(PROVIDER, SESSION)
