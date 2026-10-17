@@ -28,6 +28,17 @@ def endpoint_locality(url: str) -> EndpointLocality:
             else EndpointLocality.CLOUD)
 
 
+def endpoint_is_loopback(url: str) -> bool:
+    """True only when the endpoint host is true loopback (127.0.0.1, ::1, localhost).
+
+    Stricter than ``endpoint_locality``: a loopback-only runtime must not accept the private/overlay ranges
+    (RFC1918, CGNAT, IPv6 ULA) that LOCAL also covers. The host is classified, never DNS-resolved, so no
+    rebinding can turn a non-loopback name into an accepted one. This does not change ``endpoint_locality``.
+    """
+    host = urlparse(url).hostname or ""
+    return classify_bind_address(host) == "LOOPBACK"
+
+
 class ProviderUnreachable(ConnectionError):
     code = PROVIDER_UNREACHABLE
 

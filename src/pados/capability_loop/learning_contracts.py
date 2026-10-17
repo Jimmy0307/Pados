@@ -31,7 +31,14 @@ LEARNING_CONTRACT_VERSION = "pados.capability_loop.learning.v1"
 _ID = re.compile(r"^[a-z][a-z0-9_.:-]{2,95}$")
 _CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
+# The single closed syntax for an external session reference. It must start alphanumeric and hold only
+# url-path-safe id characters; it can never contain a path separator, query, fragment or control char.
+SESSION_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 MAX_MATERIALS = 32
+
+
+def is_valid_session_ref(value: str) -> bool:
+    return bool(SESSION_REF_PATTERN.fullmatch(value))
 MAX_LIMITATIONS = 16
 
 
@@ -140,7 +147,7 @@ class LearningSession(_Frozen):
     @field_validator("session_ref")
     @classmethod
     def _session(cls, value: str) -> str:
-        if not re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$", value):
+        if not SESSION_REF_PATTERN.fullmatch(value):
             raise ValueError("SESSION_REF_INVALID")
         return value
 
@@ -175,7 +182,7 @@ class LearningAssessment(_Frozen):
     @field_validator("session_ref")
     @classmethod
     def _session(cls, value: str) -> str:
-        if not re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$", value):
+        if not SESSION_REF_PATTERN.fullmatch(value):
             raise ValueError("SESSION_REF_INVALID")
         return value
 

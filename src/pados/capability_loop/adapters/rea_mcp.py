@@ -69,7 +69,7 @@ class ReaDiscoveryProvider:
         try:
             session = self._session(transport)
             version = _runtime_version(session)
-            if self._expected_version is not None and version is not None and version != self._expected_version:
+            if self._expected_version is not None and version != self._expected_version:
                 return ProviderHealth(provider_id=self.provider_id, status=ProviderStatus.DEGRADED,
                                       code=FailureCode.INCOMPATIBLE_VERSION.value, runtime_version=version)
             return ProviderHealth(provider_id=self.provider_id, status=ProviderStatus.AVAILABLE,
@@ -90,6 +90,12 @@ class ReaDiscoveryProvider:
         try:
             session = self._session(transport)
             version = _runtime_version(session)
+            # Enforce runtime compatibility before opening the target or invoking any discovery tool: an
+            # incompatible REA runtime never gets to open the target or contribute candidate evidence. When a
+            # version is pinned, a runtime that omits/malforms its version is incompatible (cannot be proven
+            # compatible), so a missing version is rejected too.
+            if self._expected_version is not None and version != self._expected_version:
+                return self._failed(FailureCode.INCOMPATIBLE_VERSION, ProviderStatus.DEGRADED, version)
             self._open(transport, target_path)
             evidence_doc = transport.call_tool(SESSION_TOOL, {}, timeout_seconds=self._timeout)
             return self._normalize(evidence_doc, version)
@@ -111,12 +117,21 @@ class ReaDiscoveryProvider:
         if result.get("isError"):
             raise McpError("MCP_RPC_ERROR")
 
-    def _normalize(self, result: Mapping[str, Any], version: str | None) -> DiscoveryOutcome:
+    def _normalize(self, result: Mapping[str, Any], first_version: str | None) -> DiscoveryOutcome:
         if result.get("isError"):
-            return self._failed(FailureCode.PROVIDER_ERROR, ProviderStatus.DEGRADED, version)
+            return self._failed(FailureCode.PROVIDER_ERROR, ProviderStatus.DEGRADED, first_version)
         session = _structured(result)
         if session is None:
-            return self._failed(FailureCode.MALFORMED_RESPONSE, ProviderStatus.DEGRADED, version)
+            return self._failed(FailureCode.MALFORMED_RESPONSE, ProviderStatus.DEGRADED, first_version)
+        # Re-check the version carried by the POST-OPEN evidence document: a runtime that restarted between
+        # the first session call and this one could return incompatible evidence. The evidence is accepted
+        # and labelled only with the version actually in this document, and only when it matches both the
+        # pin (if any) and the first call's version.
+        version = _runtime_version(session)
+        if self._expected_version is not None and version != self._expected_version:
+            return self._failed(FailureCode.INCOMPATIBLE_VERSION, ProviderStatus.DEGRADED, version)
+        if version != first_version:
+            return self._failed(FailureCode.INCOMPATIBLE_VERSION, ProviderStatus.DEGRADED, version)
         limitations: list[str] = []
         supported = False
         for group in _groups(session):

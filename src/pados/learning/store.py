@@ -164,16 +164,26 @@ class JsonlFile:
 
     def append_line(self, record: Mapping[str, Any]) -> None:
         line = self.encode(record)
-        self.stat()
+        created = self.stat() is None
         flags = (os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
                  | getattr(os, "O_BINARY", 0))
         descriptor = os.open(self.path, flags, 0o600)
         try:
             check_secure(os.fstat(descriptor))
-            os.write(descriptor, line)
+            written = 0
+            while written < len(line):
+                count = os.write(descriptor, line[written:])
+                if count <= 0:
+                    raise OSError("JSONL_APPEND_SHORT_WRITE")
+                written += count
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        if created:
+            # A newly-created name is not crash-durable until the containing directory is fsynced. Callers
+            # may persist an external anchor immediately after this method returns, so make the directory
+            # entry durable before returning as well as the file contents above.
+            fsync_directory(self.path.parent)
 
     def rewrite(self, records: Sequence[Mapping[str, Any]]) -> None:
         payload = b"".join(self.encode(record) for record in records)
