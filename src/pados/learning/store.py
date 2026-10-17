@@ -170,7 +170,12 @@ class JsonlFile:
         descriptor = os.open(self.path, flags, 0o600)
         try:
             check_secure(os.fstat(descriptor))
-            os.write(descriptor, line)
+            written = 0
+            while written < len(line):
+                count = os.write(descriptor, line[written:])
+                if count <= 0:
+                    raise OSError("JSONL_APPEND_SHORT_WRITE")
+                written += count
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
