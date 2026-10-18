@@ -111,6 +111,11 @@ class LearningService:
             return self._coded_refusal(OperationKind.LEARN_CREATE_SESSION, request.project_id,
                                        request.capability_gap_ref, request_digest,
                                        GateCode.SESSION_BIND_REFUSED, decision.policy_decision_hash)
+        # Creation outcomes can already carry an assessment. Validate its provider/session/gap identity
+        # against the would-be authoritative binding before authority.bind(), so foreign assessment evidence
+        # can never make an otherwise valid session durable or enter the advisory projection.
+        if not _outcome_matches_binding(outcome, binding):
+            return self._creation_failure(request, request_digest, decision, outcome)
         try:
             self._authority.bind(binding)
         except BindingAuthorityError:
