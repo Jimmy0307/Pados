@@ -84,9 +84,11 @@ class DiscoveryService:
 
     def _record_outcome(self, request: DiscoveryRequest, decision: GateDecision, request_digest: str,
                         outcome: DiscoveryOutcome) -> OperationReceipt:
-        # Accept into the loop only under the whole success invariant (available, no failure, complete). A
-        # partial or otherwise non-successful answer is recorded as a failure and creates no candidate.
-        accepted = outcome.is_successful
+        # Accept into the loop only under the whole-success invariant. A positive support claim additionally
+        # requires at least one evidence item; otherwise there is no digest supporting the discovered
+        # capability and the model-valid response is normalized as malformed rather than accepted.
+        missing_supported_evidence = outcome.capability_supported and not outcome.evidence
+        accepted = outcome.is_successful and not missing_supported_evidence
         evidence_digests = tuple(item.evidence_digest for item in outcome.evidence)
         candidate = None
         state: CapabilityState | None = None
@@ -98,8 +100,7 @@ class DiscoveryService:
                 provider_id=self._provider.provider_id, state=state, reason_code=reason,
                 evidence=outcome.evidence, limitations=outcome.limitations)
         elif failure is None:
-            # The only non-accepted outcome the model permits with no failure code is a partial answer.
-            failure = FailureCode.PARTIAL_RESULT
+            failure = FailureCode.MALFORMED_RESPONSE if missing_supported_evidence else FailureCode.PARTIAL_RESULT
         return self._store.append({
             "operation": OperationKind.DISCOVER, "project_id": request.project_id,
             "request_digest": request_digest, "provider_id": self._provider.provider_id,
