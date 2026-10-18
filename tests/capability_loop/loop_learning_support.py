@@ -16,8 +16,15 @@ from pados.capability.model import (
     VerificationMethod,
 )
 from pados.capability_loop.learning_contracts import LearningRequest
+from pados.capability_loop_runtime.binding import InMemorySessionBindingAuthority
 from pados.connectivity.requirements import NetworkRequirement
 from pados.enterprise.classification import DataClassification
+
+
+def binding_authority() -> InMemorySessionBindingAuthority:
+    """A fresh in-memory (immutable, un-anchored) binding authority for a test. Share ONE per test flow so a
+    session bound at create is resolvable by its follow-ups; file-anchor behaviour is tested separately."""
+    return InMemorySessionBindingAuthority()
 
 PROJECT = "proj-a"
 WORK = "wc-1"

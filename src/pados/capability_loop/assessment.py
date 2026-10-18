@@ -99,23 +99,37 @@ def assess_goal(task: TaskEnvelope, goal: Goal, *, validated_capabilities: froze
     ``human_mastery`` optionally supplies measured per-capability dimensions (from the learning progress
     store); absent entries default to UNASSESSED.
     """
-    recommendations = {r.required_capability: r for r in
-                       recommend_capability_gap(task, goal, registered_capabilities=registered_capabilities)}
-    mastery = dict(human_mastery or {})
+    # Canonicalize every membership set and the recommendation keys to the bare capability id, so a
+    # grant-scoped ``CAPABILITY:X`` and a bare ``X`` are the same capability for every lookup below.
+    validated = {_bare_capability(item) for item in validated_capabilities}
+    learnable = {_bare_capability(item) for item in learnable_capabilities}
+    registered = frozenset(_bare_capability(item) for item in registered_capabilities)
+    recommendations = {_bare_capability(r.required_capability): r for r in
+                       recommend_capability_gap(task, goal, registered_capabilities=registered)}
+    # Canonicalize the supplied mastery keys too, so a grant-scoped key still matches the bare lookup below
+    # (otherwise measured mastery/evidence would be silently replaced by the UNASSESSED default). Two keys
+    # that canonicalize to the same bare id must agree: a conflicting alias is rejected rather than resolved
+    # by mapping order.
+    mastery: dict[str, CapabilityDimensions] = {}
+    for key, value in (human_mastery or {}).items():
+        bare_key = _bare_capability(key)
+        if bare_key in mastery and mastery[bare_key] != value:
+            raise ValueError("HUMAN_MASTERY_ALIAS_CONFLICT")
+        mastery[bare_key] = value
     decisions: list[PathDecision] = []
     for required in goal.required_capabilities:
         bare = _bare_capability(required)
-        recommendation = recommendations.get(required)
+        recommendation = recommendations.get(bare)
         base = mastery.get(bare)
-        if required in validated_capabilities:
+        if bare in validated:
             path, reason = CapabilityPath.READY, "VALIDATED_CAPABILITY_AVAILABLE"
             availability, validation = SystemAvailability.AVAILABLE, ValidationStatus.VALIDATED
-        elif required in learnable_capabilities:
+        elif bare in learnable:
             path, reason = CapabilityPath.LEARN, "HUMAN_SKILL_GAP"
             availability, validation = SystemAvailability.UNKNOWN, ValidationStatus.UNVALIDATED
         else:
             path, reason = CapabilityPath.DISCOVER, "SYSTEM_CAPABILITY_GAP"
-            availability = (SystemAvailability.CANDIDATE if required in registered_capabilities
+            availability = (SystemAvailability.CANDIDATE if bare in registered
                             else SystemAvailability.UNKNOWN)
             validation = ValidationStatus.VALIDATION_REQUIRED
         dimensions = base or CapabilityDimensions(

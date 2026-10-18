@@ -241,6 +241,13 @@
       "reason": "synthetic fake secret used by the secret-scanner tests"
     },
     {
+      "path": "tests/capability_loop/test_r3_candidate_minimization.py",
+      "rules": [
+        "secret_like"
+      ],
+      "reason": "synthetic credential-shaped value proving the loop store refuses a non-minimized candidate"
+    },
+    {
       "path": "web/package-lock.json",
       "rules": [
         "company_marker"
@@ -397,6 +404,13 @@
         "private_ipv4"
       ],
       "reason": "non-loopback runtime URL fixture that runtime discovery must refuse"
+    },
+    {
+      "path": "tests/capability_loop/test_openmaic_loopback.py",
+      "rules": [
+        "private_ipv4"
+      ],
+      "reason": "synthetic RFC 1918 / CGNAT endpoints proving the OpenMAIC adapter accepts only loopback"
     }
   ],
   "release_blocker_findings": [],
