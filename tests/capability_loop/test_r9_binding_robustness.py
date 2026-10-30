@@ -60,14 +60,19 @@ class _InitFailAnchor:
         return ()
 
 
-def test_failed_first_anchor_init_rolls_the_log_back(tmp_path: Path) -> None:
+def test_unreadable_anchor_after_a_failed_record_fails_closed_without_deleting(tmp_path: Path) -> None:
+    # Superseded semantics (Codex review of 77f2c87): when the anchor cannot be read after record() raised, it is
+    # unknown whether the anchor advanced, so the appended record is KEPT (deleting it could strand the anchor
+    # ahead of the log). Every operation fails closed while the anchor stays unreadable; nothing resolves.
     log = tmp_path / "binding.jsonl"
     auth = AnchoredSessionBindingAuthority(log, _InitFailAnchor())
     with pytest.raises(BindingAuthorityError) as excinfo:
         auth.bind(_binding())
     assert excinfo.value.code == "BINDING_ANCHOR_UNAVAILABLE"
-    # the orphan record was rolled back: the log holds no binding records.
-    assert log.read_text(encoding="utf-8").strip() == ""
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 1  # kept while ambiguous
+    with pytest.raises(BindingAuthorityError) as again:
+        auth.resolve(PROVIDER, "job-1")
+    assert again.value.code == "BINDING_ANCHOR_UNAVAILABLE"
 
 
 # -- R9-F4 (superseded in R17): the cache key is the content digest, not restorable metadata ------

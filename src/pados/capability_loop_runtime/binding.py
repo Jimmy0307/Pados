@@ -376,9 +376,10 @@ class AnchoredSessionBindingAuthority:
         try:
             current = self._anchor.latest()
         except Exception as read_exc:  # noqa: BLE001 - an unreadable anchor after the write fails closed
-            # Includes a failed first-anchor initialization (sentinel written, head write failed -> head lost):
-            # roll the orphan log record back so the log is clean; the anchor stays in its fail-closed state.
-            self._rollback_log(before)
+            # AMBIGUOUS: nothing establishes whether record() advanced the anchor. Rolling the log back could
+            # leave the anchor AHEAD of the log (unrepairable), so the appended record is KEPT and the operation
+            # reports unavailability. The next operation that can read the anchor finds either a matching head
+            # (the commit landed) or exactly one unanchored tail, which _recover discards and preserves.
             raise BindingAuthorityError("BINDING_ANCHOR_UNAVAILABLE") from read_exc
         if current == after[-1].checkpoint:
             return  # the anchor DID advance; log and anchor are consistent -- keep the appended record
