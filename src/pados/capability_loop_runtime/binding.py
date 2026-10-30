@@ -32,6 +32,7 @@ for ephemeral / test use where durable external anchoring is not the property un
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import threading
 from collections.abc import Iterator
@@ -164,6 +165,7 @@ class _LogView:
     records: tuple[_BindingRecord, ...]
     heads: dict[tuple[str, str], _BindingRecord]
     torn: bool = False  # bytes after the last newline: an append interrupted mid-write (not parsed)
+    tail: bytes = b""  # those bytes (only meaningful when torn)
 
 
 def _head(records: list[_BindingRecord] | tuple[_BindingRecord, ...]) -> Checkpoint | None:
@@ -187,6 +189,9 @@ class AnchoredSessionBindingAuthority:
         self._file = JsonlFile(Path(log_path), max_bytes=max_bindings * _LINE_BYTES, max_line_bytes=_LINE_BYTES)
         self._anchor = anchor
         self._max = max_bindings
+        # Recovery never deletes silently: every discarded tail is first appended (fsynced) here, owner-only.
+        self._discards = JsonlFile(Path(log_path).with_name(Path(log_path).name + ".discarded"),
+                                   max_line_bytes=2 * _LINE_BYTES)
         # Parsed-log cache keyed on the SHA-256 of the exact bytes read, never on file metadata: mtime can be
         # restored, Windows st_ctime_ns is creation time, and coarse timestamps can survive a same-size
         # rewrite. Every lookup still reads the whole bounded log; only the parse/validation of identical
@@ -285,7 +290,7 @@ class AnchoredSessionBindingAuthority:
             lines = self._file.parse_payload(complete)
         except LearningStoreError as exc:
             raise BindingAuthorityError("BINDING_LOG_CORRUPT") from exc
-        view = _parse_log(lines, torn=torn)
+        view = _parse_log(lines, torn=torn, tail=payload[len(complete):])
         self._cache = (digest, view)
         return view
 
@@ -313,18 +318,32 @@ class AnchoredSessionBindingAuthority:
         loss and still fail closed.
         """
         records = list(view.records)
-        if view.torn and _head(records) == anchored:
-            kept = records  # drop only the partial line
+        completed = _completed_tail(view) if view.torn else None
+        discard: dict[str, Any] | None = None
+        if completed is not None and _head(completed.records) == anchored:
+            kept = list(completed.records)  # a complete, ANCHORED last line that only lost its newline: keep it
+        elif view.torn and _head(records) == anchored:
+            kept, discard = records, _discard_entry("TORN_TAIL", None, view.tail, anchored)
         elif not view.torn and records and _head(records[:-1]) == anchored:
-            kept = records[:-1]  # drop only the single unanchored record
+            tail = records[-1].model_dump(mode="json")
+            kept = records[:-1]
+            discard = _discard_entry("UNANCHORED_TAIL", tail, self._file.encode(tail), anchored)
         elif records and anchored is None:
             raise BindingAuthorityError("BINDING_NOT_ANCHORED")
         elif records:
             raise BindingAuthorityError("BINDING_HEAD_NOT_ANCHORED")
         else:
             raise BindingAuthorityError("BINDING_ANCHOR_AHEAD_OF_LOG")
+        if discard is not None:
+            self._preserve(discard)  # durable copy first; if this fails nothing is truncated
         self._rollback_log(kept)
         return _parse_log([_minimized(record) for record in kept])
+
+    def _preserve(self, entry: dict[str, Any]) -> None:
+        try:
+            self._discards.append_line(entry)
+        except (LearningStoreError, OSError, ValueError) as exc:
+            raise BindingAuthorityError("BINDING_LOG_WRITE_FAILED") from exc
 
     def _commit(self, before: list[_BindingRecord], after: list[_BindingRecord]) -> None:
         """Append the new record, then advance the anchor by compare-and-set from the validated head; on any
@@ -378,7 +397,7 @@ class AnchoredSessionBindingAuthority:
             raise BindingAuthorityError("BINDING_LOG_WRITE_FAILED") from exc
 
 
-def _parse_log(lines: list[dict[str, Any]], *, torn: bool = False) -> _LogView:
+def _parse_log(lines: list[dict[str, Any]], *, torn: bool = False, tail: bytes = b"") -> _LogView:
     """Validate every record, the hash chain, and each identity's transition grammar (fail closed)."""
     records: list[_BindingRecord] = []
     heads: dict[tuple[str, str], _BindingRecord] = {}
@@ -402,7 +421,27 @@ def _parse_log(lines: list[dict[str, Any]], *, torn: bool = False) -> _LogView:
             raise BindingAuthorityError("BINDING_LOG_INCONSISTENT")  # illegal transition or second context
         heads[record.binding.identity] = record
         records.append(record)
-    return _LogView(tuple(records), heads, torn)
+    return _LogView(tuple(records), heads, torn, tail if torn else b"")
+
+
+def _completed_tail(view: _LogView) -> _LogView | None:
+    """The log with its newline-less tail parsed as one more record, if that tail is a complete, valid, chained
+    transition; else None (a genuinely torn write). Whether it is kept is decided against the anchor."""
+    try:
+        value = json.loads(view.tail.decode("utf-8"))
+        if not isinstance(value, dict):
+            return None
+        return _parse_log([*(record.model_dump(mode="json") for record in view.records), value])
+    except (ValueError, BindingAuthorityError):
+        return None
+
+
+def _discard_entry(reason: str, record: dict[str, Any] | None, raw: bytes,
+                   anchored: Checkpoint | None) -> dict[str, Any]:
+    """What recovery preserves before truncating: the record itself (an unanchored transition) or, for a torn
+    write whose bytes are not a record, only their length and digest."""
+    return {"reason": reason, "record": record, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+            "anchored_seq": 0 if anchored is None else anchored.seq}
 
 
 def _bind_once(authority: AnchoredSessionBindingAuthority | InMemorySessionBindingAuthority,

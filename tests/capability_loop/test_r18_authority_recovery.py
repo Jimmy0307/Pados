@@ -160,3 +160,79 @@ def test_anchored_record_is_never_truncated(tmp_path: Path) -> None:
     log.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
     with pytest.raises(BindingAuthorityError, match="BINDING_HEAD_NOT_ANCHORED"):
         _open(tmp_path).resolve(PROVIDER, "job-a")
+
+
+def test_complete_anchored_final_line_without_newline_is_kept(tmp_path: Path) -> None:
+    # R18 re-review MEDIUM: a tool stripping the final newline must not turn the ANCHORED head into a "torn" tail.
+    _committed_a(tmp_path)
+    log, _ = _paths(tmp_path)
+    log.write_bytes(log.read_bytes().rstrip(b"\n"))
+    authority = _open(tmp_path)
+    assert authority.resolve(PROVIDER, "job-a") is not None  # the anchor authenticates the unterminated line
+    assert log.read_bytes().endswith(b"\n")  # normalized
+    _assert_healthy(tmp_path)
+
+
+def _discarded(tmp_path: Path) -> list[dict[str, Any]]:
+    log, _ = _paths(tmp_path)
+    sidecar = log.with_name(log.name + ".discarded")
+    return [json.loads(line) for line in sidecar.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_a_discarded_unanchored_record_is_preserved_before_truncation(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # R18 re-review MEDIUM: recovery never deletes silently (e.g. an anchor restored one step behind): the
+    # discarded record is kept, intact, in an owner-only sidecar before the log is rewritten.
+    authority = _committed_a(tmp_path)
+
+    def killed(*_args: Any, **_kwargs: Any) -> None:
+        raise SystemExit("killed")
+
+    monkeypatch.setattr(FileAnchor, "record", killed)
+    with pytest.raises(SystemExit):
+        authority.stage(_binding("job-b"))
+    monkeypatch.undo()
+    _assert_healthy(tmp_path)
+    kept = _discarded(tmp_path)
+    assert len(kept) == 1
+    assert kept[0]["reason"] == "UNANCHORED_TAIL"
+    assert kept[0]["record"]["external_session_ref"] == "job-b" and kept[0]["record"]["state"] == "STAGED"
+
+
+def test_a_discarded_torn_tail_is_recorded_by_digest(tmp_path: Path) -> None:
+    import hashlib
+
+    _committed_a(tmp_path)
+    log, _ = _paths(tmp_path)
+    torn = b'{"seq": 3, "state": "STA'
+    with log.open("ab") as handle:
+        handle.write(torn)
+    _assert_healthy(tmp_path)
+    kept = _discarded(tmp_path)
+    assert kept == [{"reason": "TORN_TAIL", "record": None, "bytes": len(torn),
+                     "sha256": hashlib.sha256(torn).hexdigest(), "anchored_seq": kept[0]["anchored_seq"]}]
+
+
+def test_failure_to_preserve_the_tail_aborts_recovery_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    authority = _committed_a(tmp_path)
+
+    def killed(*_args: Any, **_kwargs: Any) -> None:
+        raise SystemExit("killed")
+
+    monkeypatch.setattr(FileAnchor, "record", killed)
+    with pytest.raises(SystemExit):
+        authority.stage(_binding("job-b"))
+    monkeypatch.undo()
+    log, _ = _paths(tmp_path)
+    before = log.read_bytes()
+    restarted = _open(tmp_path)
+
+    def sidecar_denied(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(restarted._discards, "append_line", sidecar_denied)
+    with pytest.raises(BindingAuthorityError, match="BINDING_LOG_WRITE_FAILED"):
+        restarted.resolve(PROVIDER, "job-a")
+    assert log.read_bytes() == before  # nothing truncated without its preserved copy
+    monkeypatch.undo()
+    _assert_healthy(tmp_path)
