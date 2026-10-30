@@ -104,9 +104,6 @@ class LearningService:
         # session alongside a DEGRADED/partial status with no failure; an explicitly failed or incomplete
         # answer must NOT create a durable authoritative binding that would authorize future calls.
         failure = _not_whole_success(outcome, OperationKind.LEARN_CREATE_SESSION)
-        if failure is None and outcome.session is not None and (
-                outcome.session.status is LearningSessionStatus.FAILED):
-            failure = FailureCode.MALFORMED_RESPONSE  # a session that already failed cannot be continued
         if failure is not None or outcome.session is None:
             return self._creation_failure(request, request_digest, decision,
                                           failure or FailureCode.MALFORMED_RESPONSE)
@@ -151,6 +148,8 @@ class LearningService:
         try:
             self._authority.commit(binding, evidence_ref=receipt.receipt_hash)
         except BindingAuthorityError as exc:
+            if self._committed(binding):
+                return receipt  # the finalize landed before its error surfaced: report the truth, not a refusal
             abort_failure = self._abort_stage(binding)
             return self._coded_refusal(
                 kind, request.project_id, request.capability_gap_ref, request_digest,
@@ -158,6 +157,14 @@ class LearningService:
                 limitations=tuple(code for code in (exc.code, abort_failure)
                                   if code is not None and is_valid_receipt_code(code)))
         return receipt
+
+    def _committed(self, binding: GovernedSessionBinding) -> bool:
+        """Whether ``binding`` is in fact resolvable with this governed context (an unreadable authority is not)."""
+        try:
+            current = self._authority.resolve(binding.provider_id, binding.external_session_ref)
+        except BindingAuthorityError:
+            return False
+        return current is not None and current.context_hash == binding.context_hash
 
     def _abort_stage(self, binding: GovernedSessionBinding) -> str | None:
         """Retire a pending stage. Returns the authority's failure code if it could not (the stage then stays
@@ -300,14 +307,17 @@ class LearningService:
 def _not_whole_success(outcome: LearningOutcome, kind: OperationKind) -> FailureCode | None:
     """The normalized failure when ``outcome`` is not a whole success for ``kind``, else ``None``.
 
-    Whole success: AVAILABLE, no failure, not partial, and the payload the operation exists to return (a
-    session for create/poll, an assessment for assessment). An explicit provider failure code is preserved; a
-    partial answer is PARTIAL_RESULT; any other incomplete or contradictory answer is MALFORMED_RESPONSE.
+    Whole success: AVAILABLE, no failure, not partial, no session the provider itself reports FAILED, and the
+    payload the operation exists to return (a session for create/poll, an assessment for assessment). An explicit
+    provider failure code is preserved; a partial answer is PARTIAL_RESULT; a FAILED session is PROVIDER_ERROR;
+    any other incomplete or contradictory answer is MALFORMED_RESPONSE.
     """
     if outcome.failure is not None:
         return outcome.failure
     if outcome.partial:
         return FailureCode.PARTIAL_RESULT
+    if outcome.session is not None and outcome.session.status is LearningSessionStatus.FAILED:
+        return FailureCode.PROVIDER_ERROR  # the provider reports its own session failed: never accepted
     needs_session = kind in (OperationKind.LEARN_CREATE_SESSION, OperationKind.LEARN_SESSION_STATE)
     if (outcome.status is not ProviderStatus.AVAILABLE
             or (needs_session and outcome.session is None)

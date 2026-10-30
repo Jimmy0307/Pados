@@ -68,7 +68,7 @@ def test_failed_provider_session_is_not_authoritatively_bound(tmp_path: Path) ->
     )
 
     assert receipt.result is OperationResult.PROVIDER_FAILED
-    assert receipt.failure is FailureCode.MALFORMED_RESPONSE
+    assert receipt.failure is FailureCode.PROVIDER_ERROR  # R18: a failed job is a provider error, not malformed
     assert authority.resolve(PROVIDER, SESSION) is None
 
 
