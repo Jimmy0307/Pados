@@ -99,10 +99,13 @@ class LearningService:
         # session), the same bar discovery uses before accepting a candidate. LearningOutcome permits a
         # session alongside a DEGRADED/partial status with no failure; an explicitly failed or incomplete
         # answer must NOT create a durable authoritative binding that would authorize future calls.
-        if (outcome.failure is not None or outcome.session is None or outcome.partial
-                or outcome.status is not ProviderStatus.AVAILABLE
-                or outcome.session.status is LearningSessionStatus.FAILED):
-            return self._creation_failure(request, request_digest, decision, outcome)
+        failure = _not_whole_success(outcome, OperationKind.LEARN_CREATE_SESSION)
+        if failure is None and outcome.session is not None and (
+                outcome.session.status is LearningSessionStatus.FAILED):
+            failure = FailureCode.MALFORMED_RESPONSE  # a session that already failed cannot be continued
+        if failure is not None or outcome.session is None:
+            return self._creation_failure(request, request_digest, decision,
+                                          failure or FailureCode.MALFORMED_RESPONSE)
         # Authoritatively bind the external session to this governed context BEFORE accepting it. If the
         # authority refuses (a conflicting prior binding, or an unavailable/mismatched anchor), the session is
         # not accepted and no follow-up is ever authorized against it.
@@ -115,14 +118,14 @@ class LearningService:
         # against the would-be authoritative binding before authority.bind(), so foreign assessment evidence
         # can never make an otherwise valid session durable or enter the advisory projection.
         if not _outcome_matches_binding(outcome, binding):
-            return self._creation_failure(request, request_digest, decision, outcome)
+            return self._creation_failure(request, request_digest, decision, FailureCode.MALFORMED_RESPONSE)
         try:
             self._authority.bind(binding)
         except BindingAuthorityError:
             return self._coded_refusal(OperationKind.LEARN_CREATE_SESSION, request.project_id,
                                        request.capability_gap_ref, request_digest,
                                        GateCode.SESSION_BIND_REFUSED, decision.policy_decision_hash)
-        return self._record(OperationKind.LEARN_CREATE_SESSION, binding, request_digest, decision, outcome)
+        return self._record(OperationKind.LEARN_CREATE_SESSION, binding, request_digest, decision, outcome, None)
 
     def session_state(self, *, session_ref: str, contract: Mapping[str, Any], grant: Mapping[str, Any],
                       registered_mcp_capabilities: frozenset[str] = frozenset()) -> OperationReceipt:
@@ -172,9 +175,12 @@ class LearningService:
             return self._refusal(kind, binding.project_id, binding.capability_gap_ref, request_digest, decision)
         outcome = call(binding)
         # The provider must answer about the bound session, and any assessment must carry the bound
-        # session/gap/provider identity; otherwise reject before any projection update.
-        forced = None if _outcome_matches_binding(outcome, binding) else FailureCode.MALFORMED_RESPONSE
-        return self._record(kind, binding, request_digest, decision, outcome, forced_failure=forced)
+        # session/gap/provider identity; otherwise reject before any projection update. A matching answer is
+        # accepted only as a whole success carrying this operation's payload (``failure is None`` alone is not
+        # success).
+        failure = (FailureCode.MALFORMED_RESPONSE if not _outcome_matches_binding(outcome, binding)
+                   else _not_whole_success(outcome, kind))
+        return self._record(kind, binding, request_digest, decision, outcome, failure)
 
     # -- recording ----------------------------------------------------------
     def _governed_binding(self, request: LearningRequest, external_session_ref: str,
@@ -209,9 +215,8 @@ class LearningService:
             "limitations": (), "accepted_into_loop": False, "state_before": None, "state_after": None})
 
     def _creation_failure(self, request: LearningRequest, request_digest: str, decision: GateDecision,
-                          outcome: LearningOutcome) -> OperationReceipt:
+                          failure: FailureCode) -> OperationReceipt:
         """The provider did not create a session: record a normalized failure, no binding, no projection."""
-        failure = outcome.failure if outcome.failure is not None else FailureCode.MALFORMED_RESPONSE
         return self._store.append({
             "operation": OperationKind.LEARN_CREATE_SESSION, "project_id": request.project_id,
             "request_digest": request_digest, "provider_id": self._provider.provider_id,
@@ -221,9 +226,9 @@ class LearningService:
             "limitations": (), "accepted_into_loop": False, "state_before": None, "state_after": None})
 
     def _record(self, kind: OperationKind, binding: GovernedSessionBinding, request_digest: str,
-                decision: GateDecision, outcome: LearningOutcome, *,
-                forced_failure: FailureCode | None = None) -> OperationReceipt:
-        failure = forced_failure if forced_failure is not None else outcome.failure
+                decision: GateDecision, outcome: LearningOutcome,
+                failure: FailureCode | None) -> OperationReceipt:
+        """Record one operation. ``failure`` is the caller's whole-success verdict (None means accepted)."""
         failed = failure is not None
         limitations: tuple[str, ...] = ()
         if outcome.session is not None:
@@ -246,6 +251,25 @@ class LearningService:
             "failure": failure, "evidence_digests": evidence_digests, "limitations": limitations,
             "accepted_into_loop": not failed, "state_before": None, "state_after": None},
             progress=None if failed else progress)
+
+
+def _not_whole_success(outcome: LearningOutcome, kind: OperationKind) -> FailureCode | None:
+    """The normalized failure when ``outcome`` is not a whole success for ``kind``, else ``None``.
+
+    Whole success: AVAILABLE, no failure, not partial, and the payload the operation exists to return (a
+    session for create/poll, an assessment for assessment). An explicit provider failure code is preserved; a
+    partial answer is PARTIAL_RESULT; any other incomplete or contradictory answer is MALFORMED_RESPONSE.
+    """
+    if outcome.failure is not None:
+        return outcome.failure
+    if outcome.partial:
+        return FailureCode.PARTIAL_RESULT
+    needs_session = kind in (OperationKind.LEARN_CREATE_SESSION, OperationKind.LEARN_SESSION_STATE)
+    if (outcome.status is not ProviderStatus.AVAILABLE
+            or (needs_session and outcome.session is None)
+            or (kind is OperationKind.LEARN_ASSESSMENT and outcome.assessment is None)):
+        return FailureCode.MALFORMED_RESPONSE
+    return None
 
 
 def _outcome_matches_binding(outcome: LearningOutcome, binding: GovernedSessionBinding) -> bool:
