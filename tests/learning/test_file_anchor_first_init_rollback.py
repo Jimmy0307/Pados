@@ -62,6 +62,26 @@ def test_sentinel_failure_after_the_head_landed_does_not_fail_the_commit(
     assert (tmp_path / "anchor" / "anchor.initialized").exists()  # completed once the fault cleared
 
 
+def test_no_second_checkpoint_until_initialization_completes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Codex review of 77f2c87 [anchor.py:160]: with a PERSISTENT sentinel fault, advancing to seq 2 without a
+    # sentinel would leave a later-sequence head without its sentinel -> ANCHOR_STATE_INVALID forever. The landed
+    # first checkpoint is kept and readable, but the anchor refuses to advance until initialization completes.
+    anchor = FileAnchor(tmp_path / "anchor")
+
+    def failing_sentinel(_self: FileAnchor) -> None:
+        raise PermissionError(13, "simulated persistent sentinel failure")
+
+    monkeypatch.setattr(FileAnchor, "_create_sentinel", failing_sentinel)
+    anchor.record(None, FIRST)
+    with pytest.raises(AnchorError, match="ANCHOR_INITIALIZATION_INCOMPLETE"):
+        anchor.record(FIRST, SECOND)
+    assert anchor.latest() == FIRST  # never advanced, still readable
+    monkeypatch.undo()
+    anchor.record(FIRST, SECOND)  # the fault cleared: initialization completes, then the anchor advances
+    assert anchor.latest() == SECOND
+    assert (tmp_path / "anchor" / "anchor.initialized").exists()
+
+
 @pytest.mark.parametrize("failure", [OSError("simulated sentinel failure"), SystemExit("killed")])
 def test_head_landed_but_sentinel_missing_is_completed(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> None:

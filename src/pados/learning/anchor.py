@@ -141,8 +141,14 @@ class FileAnchor:
         self._secure(info)
         return True
 
-    def _state(self) -> tuple[Checkpoint | None, tuple[Checkpoint, ...]] | None:
-        """(latest, markers), or None before initialization (caller holds the lock)."""
+    def _state(self, *, advancing: bool = False) -> tuple[Checkpoint | None, tuple[Checkpoint, ...]] | None:
+        """(latest, markers), or None before initialization (caller holds the lock).
+
+        ``advancing`` (the ``record`` path) additionally requires a COMPLETED initialization: advancing a
+        first-checkpoint head whose sentinel could not be written yet would leave a later-sequence head without
+        its sentinel, which is indistinguishable from a removed sentinel (``ANCHOR_STATE_INVALID`` forever).
+        Reads keep returning the landed first checkpoint meanwhile.
+        """
         initialized, present = self._exists(self._sentinel), self._exists(self._head)
         if not present:
             if initialized:
@@ -157,6 +163,8 @@ class FileAnchor:
             if latest is None or latest.seq != 1:
                 raise AnchorError("ANCHOR_STATE_INVALID")
             self._complete_initialization()
+            if advancing and not self._exists(self._sentinel):
+                raise AnchorError("ANCHOR_INITIALIZATION_INCOMPLETE")  # retryable once the sentinel can be written
         return state
 
     def _read_head(self) -> tuple[Checkpoint | None, tuple[Checkpoint, ...]]:
@@ -194,7 +202,7 @@ class FileAnchor:
         if not isinstance(new, Checkpoint) or not (previous is None or isinstance(previous, Checkpoint)):
             raise AnchorError("ANCHOR_CHECKPOINT_INVALID")
         with self._locked():
-            state = self._state()
+            state = self._state(advancing=True)
             current, markers = (None, ()) if state is None else state
             if previous != current:
                 raise AnchorError("ANCHOR_CONFLICT")  # compare-and-set: the caller did not see the latest head
