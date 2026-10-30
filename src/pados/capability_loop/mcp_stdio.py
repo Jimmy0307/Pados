@@ -64,11 +64,17 @@ class StdioMcpClient:
                 shell=False, close_fds=True, env=self._env)
         except (OSError, ValueError) as exc:
             raise McpError("MCP_SPAWN_FAILED") from exc
-        threading.Thread(target=self._reader, daemon=True).start()
-        result = self._request("initialize", {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-                                              "clientInfo": CLIENT_INFO}, timeout_seconds)
-        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        return result
+        # The child is spawned; from here any failure must terminate and reap it (and let the reader thread
+        # drain to EOF) before propagating, so a failed handshake never leaks a process or a pipe.
+        try:
+            threading.Thread(target=self._reader, daemon=True).start()
+            result = self._request("initialize", {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
+                                                  "clientInfo": CLIENT_INFO}, timeout_seconds)
+            self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            return result
+        except BaseException:
+            self.close()
+            raise
 
     def _reader(self) -> None:
         process = self._process

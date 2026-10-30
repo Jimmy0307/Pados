@@ -46,6 +46,7 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from pados.connectivity.storage import store_lock
+from pados.learning.anchor import replace_with_retry
 from pados.lifecycle.fswalk import fsync_directory, is_link
 from pados.lifecycle.locking import ensure_durable_dir
 from pados.lifecycle.minimization import DataMinimizationViolation, assert_minimized
@@ -132,8 +133,12 @@ class JsonlFile:
         return info
 
     def read_lines(self) -> list[dict[str, Any]]:
+        return self.parse_payload(self.read_payload())
+
+    def read_payload(self) -> bytes:
+        """The exact, bounded bytes of the file (``b""`` when absent), read through a checked descriptor."""
         if self.stat() is None:
-            return []
+            return b""
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
         descriptor = os.open(self.path, flags)
         with os.fdopen(descriptor, "rb") as handle:
@@ -141,6 +146,9 @@ class JsonlFile:
             payload = handle.read(self.max_bytes + 1)
         if len(payload) > self.max_bytes:
             raise LearningStoreError("LEARNING_STORE_TOO_LARGE")
+        return payload
+
+    def parse_payload(self, payload: bytes) -> list[dict[str, Any]]:
         lines: list[dict[str, Any]] = []
         for raw in payload.splitlines():
             if not raw.strip():
@@ -164,16 +172,43 @@ class JsonlFile:
 
     def append_line(self, record: Mapping[str, Any]) -> None:
         line = self.encode(record)
-        self.stat()
+        created = self.stat() is None
         flags = (os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
                  | getattr(os, "O_BINARY", 0))
         descriptor = os.open(self.path, flags, 0o600)
         try:
-            check_secure(os.fstat(descriptor))
-            os.write(descriptor, line)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+            try:
+                check_secure(os.fstat(descriptor))
+                written = 0
+                while written < len(line):
+                    count = os.write(descriptor, line[written:])
+                    if count <= 0:
+                        raise OSError("JSONL_APPEND_SHORT_WRITE")
+                    written += count
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except BaseException:
+            # If this call created the file, a failed first append must not leave a visible uncommitted log.
+            # The descriptor is already closed here: Windows refuses to delete a file that is still open, which
+            # would mask the original failure and leave the partial file visible. Existing-file appends are
+            # reconciled by their owning higher-level protocol.
+            if created:
+                self.path.unlink(missing_ok=True)
+            raise
+        if created:
+            # A newly-created name is not crash-durable until the containing directory is fsynced. If this
+            # durability step itself fails, roll the just-created file back before propagating the error so
+            # callers never observe a first log entry without their corresponding authority/anchor commit.
+            try:
+                fsync_directory(self.path.parent)
+            except BaseException:
+                self.path.unlink(missing_ok=True)
+                try:
+                    fsync_directory(self.path.parent)
+                except BaseException:
+                    pass
+                raise
 
     def rewrite(self, records: Sequence[Mapping[str, Any]]) -> None:
         payload = b"".join(self.encode(record) for record in records)
@@ -188,7 +223,9 @@ class JsonlFile:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
+            # Windows scanners/indexers can briefly hold the target open; a rollback that fails on such a
+            # transient sharing violation would otherwise leave the log ahead of its anchor.
+            replace_with_retry(temporary, self.path)
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise
