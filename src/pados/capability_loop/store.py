@@ -14,9 +14,15 @@ from pathlib import Path
 from typing import Any
 
 from pados.capability_loop.contracts import CapabilityCandidate
-from pados.capability_loop.learning_contracts import is_valid_session_ref
-from pados.capability_loop.receipts import GENESIS, OperationReceipt, verify_chain
+from pados.capability_loop.learning_contracts import (
+    LearningSessionStatus,
+    MasteryLevel,
+    ModelRouting,
+    is_valid_session_ref,
+)
+from pados.capability_loop.receipts import GENESIS, OperationReceipt, is_valid_receipt_id, verify_chain
 from pados.connectivity.storage import atomic_write_json, read_json, store_lock
+from pados.enterprise.classification import DataClassification
 from pados.lifecycle.minimization import DataMinimizationViolation, assert_minimized
 
 STORE_SCHEMA = "pados.capability_loop.store.v1"
@@ -33,9 +39,6 @@ class LoopStoreError(RuntimeError):
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-_SCALAR = (str, int, float, bool, type(None))
 
 
 def _validate_candidates(candidates: dict[Any, Any]) -> None:
@@ -60,20 +63,45 @@ def _validate_candidates(candidates: dict[Any, Any]) -> None:
             raise LoopStoreError("LOOP_STORE_CORRUPT") from exc
 
 
+# The learning progress projection (ADVISORY_PROJECTION_ONLY) has one schema, enforced on write AND on load.
+# A legacy (pre-binding) row carries the required fields only; a current row adds the governed work contract
+# and classification together; an assessed row adds mastery and the never-granting flag together.
+_PROGRESS_REQUIRED = frozenset({"project_id", "capability_gap_ref", "provider_id", "session_status",
+                                "model_routing", "progress_percent"})
+_PROGRESS_BINDING = frozenset({"work_contract_id", "classification"})
+_PROGRESS_ASSESSMENT = frozenset({"human_mastery", "grants_capability"})
+_PROGRESS_KEYS = _PROGRESS_REQUIRED | _PROGRESS_BINDING | _PROGRESS_ASSESSMENT
+_PROGRESS_IDS = ("project_id", "capability_gap_ref", "provider_id", "work_contract_id")
+_PROGRESS_ENUMS: dict[str, frozenset[str]] = {
+    "session_status": frozenset(LearningSessionStatus), "model_routing": frozenset(ModelRouting),
+    "classification": frozenset(DataClassification), "human_mastery": frozenset(MasteryLevel)}
+
+
+def _progress_row_valid(row: dict[Any, Any]) -> bool:
+    keys = set(row)
+    if not (keys <= _PROGRESS_KEYS and _PROGRESS_REQUIRED <= keys):
+        return False
+    if len(keys & _PROGRESS_BINDING) == 1 or len(keys & _PROGRESS_ASSESSMENT) == 1:
+        return False  # incoherent: half a binding or half an assessment
+    if any(name in row and not is_valid_receipt_id(row[name]) for name in _PROGRESS_IDS):
+        return False
+    if any(name in row and not (isinstance(row[name], str) and row[name] in allowed)
+           for name, allowed in _PROGRESS_ENUMS.items()):
+        return False
+    percent = row["progress_percent"]
+    if isinstance(percent, bool) or not isinstance(percent, int) or not 0 <= percent <= 100:
+        return False
+    return "grants_capability" not in row or row["grants_capability"] is False  # learning never grants
+
+
 def _validate_progress(progress: dict[Any, Any]) -> None:
-    """Every progress row is a flat, bounded, scalar-valued dict keyed by a well-formed session ref."""
+    """Every progress row matches the projection schema and is keyed by a canonical session ref."""
     for key, row in progress.items():
-        if not isinstance(key, str) or not is_valid_session_ref(key) or not isinstance(row, dict):
-            raise LoopStoreError("LOOP_STORE_CORRUPT")
-        for field_name, field_value in row.items():
-            if not isinstance(field_name, str) or not isinstance(field_value, _SCALAR):
-                raise LoopStoreError("LOOP_STORE_CORRUPT")
-        percent = row.get("progress_percent")
-        if percent is not None and (isinstance(percent, bool) or not isinstance(percent, int)
-                                    or not 0 <= percent <= 100):
+        if (not isinstance(key, str) or not is_valid_session_ref(key) or not isinstance(row, dict)
+                or not _progress_row_valid(row)):
             raise LoopStoreError("LOOP_STORE_CORRUPT")
         try:
-            assert_minimized(row)
+            assert_minimized(row, allowed_keys=_PROGRESS_KEYS)
         except DataMinimizationViolation as exc:
             raise LoopStoreError("LOOP_STORE_CORRUPT") from exc
 
@@ -157,8 +185,7 @@ class LoopStore:
                 data["candidates"][candidate.candidate_id] = candidate_row
             if progress is not None:
                 key, value = progress
-                assert_minimized(value)
-                _validate_progress({key: value})  # refuse a row the load validator would later reject
+                _validate_progress({key: value})  # the load validator itself: never write an unloadable row
                 data["progress"][key] = value
             atomic_write_json(self.path, data)
         return receipt

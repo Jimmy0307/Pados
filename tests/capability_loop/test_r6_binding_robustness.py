@@ -60,9 +60,13 @@ def _receipt_fields(**over: object) -> dict:
 
 def test_append_refuses_an_invalid_progress_row(tmp_path: Path) -> None:
     store = LoopStore(tmp_path / "loop.json")
-    store.append(_receipt_fields(), progress=("job-x", {"progress_percent": 50}))  # valid
+    row = {"project_id": "proj-a", "work_contract_id": "wc-1", "capability_gap_ref": "gap:cad_edit",
+           "classification": "INTERNAL", "provider_id": "openmaic.adaptive_learning",
+           "session_status": "IN_PROGRESS", "model_routing": "EXTERNAL_PROVIDER_CONTROLLED",
+           "progress_percent": 50}
+    store.append(_receipt_fields(), progress=("job-x", row))  # valid (full projection schema)
     with pytest.raises(LoopStoreError):
-        store.append(_receipt_fields(), progress=("job-y", {"progress_percent": 999}))  # out of range
+        store.append(_receipt_fields(), progress=("job-y", {**row, "progress_percent": 999}))  # out of range
     # the store was not corrupted and still loads the one valid row
     assert len(store.receipts()) == 1
     assert "job-y" not in store.progress()
