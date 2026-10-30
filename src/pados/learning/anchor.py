@@ -156,7 +156,7 @@ class FileAnchor:
             latest = state[0]
             if latest is None or latest.seq != 1:
                 raise AnchorError("ANCHOR_STATE_INVALID")
-            self._create_sentinel()
+            self._complete_initialization()
         return state
 
     def _read_head(self) -> tuple[Checkpoint | None, tuple[Checkpoint, ...]]:
@@ -217,8 +217,18 @@ class FileAnchor:
         first-checkpoint head without a sentinel, which the next access completes (see ``_state``). No rollback
         step is needed, so none can fail and strand the anchor.
         """
-        self._write(data)
-        self._create_sentinel()
+        self._write(data)  # the commit point: once this replace landed the first checkpoint is real
+        self._complete_initialization()
+
+    def _complete_initialization(self) -> None:
+        """Write the sentinel after the head landed. An I/O failure here is DEFERRED, not reported: the head is
+        already committed, and reporting the call as failed would make a caller roll its log back while the
+        anchor keeps the new head (anchor ahead of log, forever). The seq-1 head without a sentinel is completed
+        by the next access (``_state``). A non-I/O refusal (an insecure existing sentinel) still propagates."""
+        try:
+            self._create_sentinel()
+        except OSError:
+            return  # deferred to the next access; never a reason to treat the landed head as uncommitted
 
     def _create_sentinel(self) -> None:
         """Mark the anchor initialized; idempotent (an interrupted initialization may already have created it)."""
