@@ -89,10 +89,14 @@ def test_finalize_that_landed_before_raising_is_reported_as_success(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     authority = anchored_session_binding_authority(tmp_path / "log" / "binding.jsonl", tmp_path / "anchor")
     real_commit = authority.commit
+    calls = {"n": 0}
 
     def landed_then_raised(binding: GovernedSessionBinding, *, evidence_ref: str | None) -> Any:
-        real_commit(binding, evidence_ref=evidence_ref)  # the COMMITTED record IS anchored ...
-        raise BindingAuthorityError("BINDING_ANCHOR_UNAVAILABLE")  # ... but the call still reports a failure
+        calls["n"] += 1
+        proof = real_commit(binding, evidence_ref=evidence_ref)  # the COMMITTED record IS anchored ...
+        if calls["n"] == 1:
+            raise BindingAuthorityError("BINDING_ANCHOR_UNAVAILABLE")  # ... but the first call reports a failure
+        return proof  # the evidence-bound reconciliation re-commit is idempotent, like the real authority
 
     monkeypatch.setattr(authority, "commit", landed_then_raised)
     http = FakeHttp({**HEALTH_OK, **generate_ok(step="researching", progress=20, job_id=SESSION)})

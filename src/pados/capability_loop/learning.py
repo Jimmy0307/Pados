@@ -148,8 +148,8 @@ class LearningService:
         try:
             self._authority.commit(binding, evidence_ref=receipt.receipt_hash)
         except BindingAuthorityError as exc:
-            if self._committed(binding):
-                return receipt  # the finalize landed before its error surfaced: report the truth, not a refusal
+            if self._committed_with(binding, receipt.receipt_hash):
+                return receipt  # THIS receipt's finalize landed before its error surfaced: report the truth
             abort_failure = self._abort_stage(binding)
             return self._coded_refusal(
                 kind, request.project_id, request.capability_gap_ref, request_digest,
@@ -158,13 +158,19 @@ class LearningService:
                                   if code is not None and is_valid_receipt_code(code)))
         return receipt
 
-    def _committed(self, binding: GovernedSessionBinding) -> bool:
-        """Whether ``binding`` is in fact resolvable with this governed context (an unreadable authority is not)."""
+    def _committed_with(self, binding: GovernedSessionBinding, evidence_ref: str) -> bool:
+        """Whether the authority is finalized against THIS creation receipt.
+
+        Evidence-bound, never context-only: re-issuing the same commit is idempotent exactly when the binding is
+        committed with this receipt hash, and is refused (``BINDING_ALREADY_COMMITTED``) when a concurrent
+        creation with the same session and context was finalized against another receipt. An unreadable or
+        refusing authority counts as not committed (fail closed).
+        """
         try:
-            current = self._authority.resolve(binding.provider_id, binding.external_session_ref)
+            self._authority.commit(binding, evidence_ref=evidence_ref)
         except BindingAuthorityError:
             return False
-        return current is not None and current.context_hash == binding.context_hash
+        return True
 
     def _abort_stage(self, binding: GovernedSessionBinding) -> str | None:
         """Retire a pending stage. Returns the authority's failure code if it could not (the stage then stays
