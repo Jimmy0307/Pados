@@ -22,7 +22,9 @@ Crash/failure outcomes of the creation protocol (``LearningService.create_sessio
 * after ``stage``, before/while the creation receipt is written: the identity is pending -- never resolvable;
   the service aborts it when it can, otherwise it stays pending (still fail closed);
 * after the receipt, before ``commit`` is anchored: pending -- never resolvable; the receipt chain then shows a
-  RECORDED creation whose binding was never finalized (operational evidence over-reports; authority does not).
+  RECORDED creation whose binding was never finalized (operational evidence over-reports; authority does not);
+* inside any transition, between the log append and the anchor advance (or a torn append): the next operation
+  discards that single unanchored tail (``_recover``) and continues; it is never anchored after the fact.
 
 ``InMemorySessionBindingAuthority`` enforces the same transition semantics without an external anchor; it is
 for ephemeral / test use where durable external anchoring is not the property under test.
@@ -30,6 +32,7 @@ for ephemeral / test use where durable external anchoring is not the property un
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -53,6 +56,7 @@ from pados.lifecycle.minimization import DataMinimizationViolation, assert_minim
 
 GENESIS = "0" * 64
 _SHA256 = r"^[0-9a-f]{64}$"
+_SHA256_RE = re.compile(_SHA256)
 DEFAULT_MAX_BINDINGS = 100_000
 # A binding record at contract-maximum sizes (four 96-char ids + a 128-char session ref + three 64-char
 # hashes + state + timestamp + json overhead) is about 1 KiB; 2 KiB gives ample headroom so every value
@@ -136,6 +140,8 @@ def _advances(head: _Head | None, binding: GovernedSessionBinding, target: Bindi
     STAGED -> COMMITTED | ABORTED; COMMITTED and ABORTED are terminal. Shared by both implementations so the
     anchored and in-memory authorities can never disagree on what a transition means.
     """
+    if evidence_ref is not None and (target is not BindingState.COMMITTED or not _SHA256_RE.fullmatch(evidence_ref)):
+        raise BindingAuthorityError("BINDING_EVIDENCE_REF_INVALID")  # only a finalize names evidence: a SHA-256
     if head is None:
         if target is BindingState.STAGED:
             return True
@@ -157,6 +163,11 @@ def _advances(head: _Head | None, binding: GovernedSessionBinding, target: Bindi
 class _LogView:
     records: tuple[_BindingRecord, ...]
     heads: dict[tuple[str, str], _BindingRecord]
+    torn: bool = False  # bytes after the last newline: an append interrupted mid-write (not parsed)
+
+
+def _head(records: list[_BindingRecord] | tuple[_BindingRecord, ...]) -> Checkpoint | None:
+    return records[-1].checkpoint if records else None
 
 
 def _record_head(record: _BindingRecord) -> _Head:
@@ -236,8 +247,10 @@ class AnchoredSessionBindingAuthority:
             yield
         except BindingAuthorityError:
             raise
-        except (LearningStoreError, DataMinimizationViolation, OSError, ValueError) as exc:
+        except (LearningStoreError, DataMinimizationViolation, ValueError) as exc:
             raise BindingAuthorityError("BINDING_LOG_CORRUPT") from exc
+        except OSError as exc:  # I/O, permissions, lock timeout: unavailable, not evidence of corruption
+            raise BindingAuthorityError("BINDING_LOG_UNAVAILABLE") from exc
 
     def _proof(self, record: _BindingRecord) -> BindingProof:
         return BindingProof(context_hash=record.binding.context_hash, sequence=record.seq,
@@ -263,11 +276,16 @@ class AnchoredSessionBindingAuthority:
         digest = hashlib.sha256(payload).hexdigest()
         if self._cache is not None and self._cache[0] == digest:
             return self._cache[1]  # byte-identical to the last validated parse (anchor checked by caller)
+        # Every append writes one complete newline-terminated line; bytes after the last newline can only be an
+        # append interrupted mid-write. They are never parsed; _validated decides whether they are recoverable.
+        complete, torn = payload, bool(payload) and not payload.endswith(b"\n")
+        if torn:
+            complete = payload[:payload.rfind(b"\n") + 1]
         try:
-            lines = self._file.parse_payload(payload)
+            lines = self._file.parse_payload(complete)
         except LearningStoreError as exc:
             raise BindingAuthorityError("BINDING_LOG_CORRUPT") from exc
-        view = _parse_log(lines)
+        view = _parse_log(lines, torn=torn)
         self._cache = (digest, view)
         return view
 
@@ -275,18 +293,38 @@ class AnchoredSessionBindingAuthority:
         """Chain-verified records whose head IS the independently anchored checkpoint. Fails closed otherwise.
 
         This runs before every transition and before every resolve, so a log advanced past the anchor (or an
-        anchor advanced past the log) is never treated as healthy.
+        anchor advanced past the log) is never treated as healthy; the only repair is ``_recover`` discarding the
+        single unanchored tail an interrupted commit leaves.
         """
         view = self._view()
         anchored = self._anchor_latest()
-        if view.records:
-            if anchored is None:
-                raise BindingAuthorityError("BINDING_NOT_ANCHORED")
-            if view.records[-1].checkpoint != anchored:
-                raise BindingAuthorityError("BINDING_HEAD_NOT_ANCHORED")
-        elif anchored is not None:
-            raise BindingAuthorityError("BINDING_ANCHOR_AHEAD_OF_LOG")
+        if view.torn or _head(view.records) != anchored:
+            view = self._recover(view, anchored)
         return view
+
+    def _recover(self, view: _LogView, anchored: Checkpoint | None) -> _LogView:
+        """Recover the one state an interrupted commit can leave; fail closed on anything else.
+
+        The log is appended (and fsynced) before the anchor advances, under the cross-process lock, so a crash
+        or escaped exception between the two leaves exactly one unanchored record (or a torn, newline-less
+        partial line) after the anchored head. That tail was never authority: it is DISCARDED, never anchored
+        after the fact (anchoring it would let a log writer launder a forged transition). Two or more unanchored
+        records, a substituted anchored head, a truncated log or an anchor ahead of the log are tampering or
+        loss and still fail closed.
+        """
+        records = list(view.records)
+        if view.torn and _head(records) == anchored:
+            kept = records  # drop only the partial line
+        elif not view.torn and records and _head(records[:-1]) == anchored:
+            kept = records[:-1]  # drop only the single unanchored record
+        elif records and anchored is None:
+            raise BindingAuthorityError("BINDING_NOT_ANCHORED")
+        elif records:
+            raise BindingAuthorityError("BINDING_HEAD_NOT_ANCHORED")
+        else:
+            raise BindingAuthorityError("BINDING_ANCHOR_AHEAD_OF_LOG")
+        self._rollback_log(kept)
+        return _parse_log([_minimized(record) for record in kept])
 
     def _commit(self, before: list[_BindingRecord], after: list[_BindingRecord]) -> None:
         """Append the new record, then advance the anchor by compare-and-set from the validated head; on any
@@ -340,7 +378,7 @@ class AnchoredSessionBindingAuthority:
             raise BindingAuthorityError("BINDING_LOG_WRITE_FAILED") from exc
 
 
-def _parse_log(lines: list[dict[str, Any]]) -> _LogView:
+def _parse_log(lines: list[dict[str, Any]], *, torn: bool = False) -> _LogView:
     """Validate every record, the hash chain, and each identity's transition grammar (fail closed)."""
     records: list[_BindingRecord] = []
     heads: dict[tuple[str, str], _BindingRecord] = {}
@@ -364,7 +402,7 @@ def _parse_log(lines: list[dict[str, Any]]) -> _LogView:
             raise BindingAuthorityError("BINDING_LOG_INCONSISTENT")  # illegal transition or second context
         heads[record.binding.identity] = record
         records.append(record)
-    return _LogView(tuple(records), heads)
+    return _LogView(tuple(records), heads, torn)
 
 
 def _bind_once(authority: AnchoredSessionBindingAuthority | InMemorySessionBindingAuthority,

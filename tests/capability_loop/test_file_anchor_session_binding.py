@@ -120,16 +120,19 @@ def test_truncated_log_is_detected(tmp_path: Path) -> None:
 
 
 # -- crash consistency / process interruption ------------------------------
-def test_log_advanced_but_anchor_stale_is_detected(tmp_path: Path) -> None:
-    # Simulates a crash AFTER the log append but BEFORE the anchor compare-and-set.
+def test_log_advanced_but_anchor_stale_is_recovered_by_discarding_the_tail(tmp_path: Path) -> None:
+    # Simulates a crash AFTER the log append but BEFORE the anchor compare-and-set. R18: that single unanchored
+    # record was never authority; it is discarded (never anchored after the fact) instead of bricking every
+    # committed session forever. More than one unanchored record still fails closed (test_r18_authority_recovery).
     auth, log, anchor = _auth(tmp_path)
     auth.bind(_binding("job-1"))
     rows = _lines(log)
+    anchored = list(rows)
     rows.append(_tampered_row("job-2", "proj-a", seq=len(rows) + 1, prev_hash=rows[-1]["entry_hash"]))
     _write(log, rows)  # anchor still at the previous head
-    with pytest.raises(BindingAuthorityError) as excinfo:
-        auth.resolve(PROVIDER, "job-1")
-    assert excinfo.value.code == "BINDING_HEAD_NOT_ANCHORED"
+    assert auth.resolve(PROVIDER, "job-1") is not None
+    assert auth.resolve(PROVIDER, "job-2") is None
+    assert _lines(log) == anchored
 
 
 def test_anchor_ahead_of_log_is_detected(tmp_path: Path) -> None:
