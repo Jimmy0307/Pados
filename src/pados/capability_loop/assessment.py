@@ -109,10 +109,13 @@ def assess_goal(task: TaskEnvelope, goal: Goal, *, validated_capabilities: froze
     # Canonicalize the supplied mastery keys too, so a grant-scoped key still matches the bare lookup below
     # (otherwise measured mastery/evidence would be silently replaced by the UNASSESSED default). Two keys
     # that canonicalize to the same bare id must agree: a conflicting alias is rejected rather than resolved
-    # by mapping order.
+    # by mapping order. A value must also describe the capability its key names; otherwise the decision for
+    # one capability would carry another capability's mastery, evidence and identity.
     mastery: dict[str, CapabilityDimensions] = {}
     for key, value in (human_mastery or {}).items():
         bare_key = _bare_capability(key)
+        if _bare_capability(value.capability_id) != bare_key:
+            raise ValueError("HUMAN_MASTERY_KEY_IDENTITY_MISMATCH")
         if bare_key in mastery and mastery[bare_key] != value:
             raise ValueError("HUMAN_MASTERY_ALIAS_CONFLICT")
         mastery[bare_key] = value
