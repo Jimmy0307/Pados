@@ -160,10 +160,11 @@ jobs:
         run: python -m pytest -q tests/platform tests/consolidation tests/enterprise tests/compute_node tests/productization tests/release_supply_chain
       # Lifecycle (incl. storage flexibility and storage accounting), advisory learning and security hardening on
       # native Windows paths, locks and file modes. The three tests deselected below need the PostgreSQL service
-      # container, which only the linux job has; they run there in the full suite.
-      - name: Lifecycle, storage, learning and security (Windows-native)
+      # container, which only the linux job has; they run there in the full suite. The capability loop's
+      # externally anchored session-binding authority (fsync/rollback/cache/anchor semantics) runs here too.
+      - name: Lifecycle, storage, learning, security and capability loop (Windows-native)
         run: >-
-          python -m pytest -q tests/lifecycle tests/learning tests/security
+          python -m pytest -q tests/lifecycle tests/learning tests/security tests/capability_loop
           --deselect tests/security/test_p6_6_adversarial.py::test_illegal_task_transition_new_to_released_is_rejected
           --deselect tests/security/test_p6_6_adversarial.py::test_index_repository_rejects_roots_outside_registered_project_boundary
           --deselect tests/security/test_p6_6_adversarial.py::test_single_agent_loop_fails_closed_without_provider
