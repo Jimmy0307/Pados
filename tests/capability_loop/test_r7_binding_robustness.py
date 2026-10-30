@@ -61,13 +61,13 @@ def test_repeated_resolve_reuses_the_parsed_log(tmp_path: Path, monkeypatch: pyt
     auth = anchored_session_binding_authority(tmp_path / "log" / "binding.jsonl", tmp_path / "anchor")
     auth.bind(_binding())
     calls = [0]
-    original = auth._file.read_lines
+    original = auth._file.parse_payload
 
-    def counting() -> list[dict]:
+    def counting(payload: bytes) -> list[dict]:
         calls[0] += 1
-        return original()
+        return original(payload)
 
-    monkeypatch.setattr(auth._file, "read_lines", counting)
+    monkeypatch.setattr(auth._file, "parse_payload", counting)
     assert auth.resolve(PROVIDER, "job-1") is not None  # first lookup parses once
     assert auth.resolve(PROVIDER, "job-1") is not None  # second lookup hits the cache
     assert calls[0] == 1  # the unchanged log was parsed only once

@@ -15,7 +15,7 @@ it is for ephemeral / test use where durable external anchoring is not the prope
 """
 from __future__ import annotations
 
-import sys
+import hashlib
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -110,10 +110,12 @@ class AnchoredSessionBindingAuthority:
         self._file = JsonlFile(Path(log_path), max_bytes=max_bindings * _LINE_BYTES, max_line_bytes=_LINE_BYTES)
         self._anchor = anchor
         self._max = max_bindings
-        # Parsed-log cache uses inode/size/mtime/ctime on POSIX. Windows st_ctime_ns is creation time rather
-        # than inode-change time, so caching is disabled there; every lookup re-parses before checking the
-        # independent anchor and a same-size rewrite with restored mtime cannot reuse stale parsed records.
-        self._cache: tuple[tuple[int, int, int, int], tuple[_BindingRecord, ...]] | None = None
+        # Parsed-log cache keyed on the SHA-256 of the exact bytes read, never on file metadata: mtime can be
+        # restored, Windows st_ctime_ns is creation time, and coarse timestamps can survive a same-size
+        # rewrite. Every lookup still reads the whole bounded log; only the parse/validation of identical
+        # bytes is reused, so any byte change is re-validated (and checked against the anchor) on every
+        # platform.
+        self._cache: tuple[str, tuple[_BindingRecord, ...]] | None = None
 
     # -- public contract ----------------------------------------------------
     def bind(self, binding: GovernedSessionBinding) -> BindingProof:
@@ -165,19 +167,17 @@ class AnchoredSessionBindingAuthority:
             raise BindingAuthorityError("BINDING_ANCHOR_UNAVAILABLE")
         return latest
 
-    def _stamp(self) -> tuple[int, int, int, int] | None:
-        info = self._file.stat()  # LearningStoreError here is normalized to BindingAuthorityError by bind/resolve
-        if info is None or sys.platform == "win32":
-            return None
-        return (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-
     def _load(self) -> list[_BindingRecord]:
-        stamp = self._stamp()
-        if stamp is not None and self._cache is not None and self._cache[0] == stamp:
-            return list(self._cache[1])  # file unchanged since the last parse (anchor still checked by caller)
+        try:
+            payload = self._file.read_payload()  # also enforces regular file / owner-only / no link
+        except LearningStoreError as exc:
+            raise BindingAuthorityError("BINDING_LOG_CORRUPT") from exc
+        digest = hashlib.sha256(payload).hexdigest()
+        if self._cache is not None and self._cache[0] == digest:
+            return list(self._cache[1])  # byte-identical to the last validated parse (anchor checked by caller)
         records: list[_BindingRecord] = []
         try:
-            lines = self._file.read_lines()
+            lines = self._file.parse_payload(payload)
         except LearningStoreError as exc:
             raise BindingAuthorityError("BINDING_LOG_CORRUPT") from exc
         contexts: dict[tuple[str, str], str] = {}
@@ -196,7 +196,7 @@ class AnchoredSessionBindingAuthority:
                 raise BindingAuthorityError("BINDING_LOG_INCONSISTENT")  # one identity, two governed contexts
             contexts[record.binding.identity] = record.binding.context_hash
             records.append(record)
-        self._cache = None if stamp is None else (stamp, tuple(records))
+        self._cache = (digest, tuple(records))
         return records
 
     def _validated(self) -> list[_BindingRecord]:

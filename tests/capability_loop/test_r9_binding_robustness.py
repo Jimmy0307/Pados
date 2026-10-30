@@ -2,6 +2,8 @@
 """Round-9: normalize stat/lock failures, roll back on first-anchor-init failure, tamper-resistant cache key."""
 from __future__ import annotations
 
+import hashlib
+
 from pathlib import Path
 
 import pytest
@@ -68,9 +70,11 @@ def test_failed_first_anchor_init_rolls_the_log_back(tmp_path: Path) -> None:
     assert log.read_text(encoding="utf-8").strip() == ""
 
 
-# -- R9-F4: the cache key includes ctime (which utime cannot restore) ------
-def test_cache_stamp_includes_ctime(tmp_path: Path) -> None:
-    auth = anchored_session_binding_authority(tmp_path / "log" / "binding.jsonl", tmp_path / "anchor")
+# -- R9-F4 (superseded in R17): the cache key is the content digest, not restorable metadata ------
+def test_cache_key_is_the_digest_of_the_bytes_read(tmp_path: Path) -> None:
+    log = tmp_path / "log" / "binding.jsonl"
+    auth = anchored_session_binding_authority(log, tmp_path / "anchor")
     auth.bind(_binding())
-    stamp = auth._stamp()
-    assert stamp is not None and len(stamp) == 4  # (ino, size, mtime_ns, ctime_ns)
+    assert auth.resolve(PROVIDER, "job-1") is not None
+    assert auth._cache is not None
+    assert auth._cache[0] == hashlib.sha256(log.read_bytes()).hexdigest()  # no mtime/ctime/inode in the key

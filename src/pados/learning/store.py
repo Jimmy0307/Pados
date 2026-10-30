@@ -132,8 +132,12 @@ class JsonlFile:
         return info
 
     def read_lines(self) -> list[dict[str, Any]]:
+        return self.parse_payload(self.read_payload())
+
+    def read_payload(self) -> bytes:
+        """The exact, bounded bytes of the file (``b""`` when absent), read through a checked descriptor."""
         if self.stat() is None:
-            return []
+            return b""
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
         descriptor = os.open(self.path, flags)
         with os.fdopen(descriptor, "rb") as handle:
@@ -141,6 +145,9 @@ class JsonlFile:
             payload = handle.read(self.max_bytes + 1)
         if len(payload) > self.max_bytes:
             raise LearningStoreError("LEARNING_STORE_TOO_LARGE")
+        return payload
+
+    def parse_payload(self, payload: bytes) -> list[dict[str, Any]]:
         lines: list[dict[str, Any]] = []
         for raw in payload.splitlines():
             if not raw.strip():
