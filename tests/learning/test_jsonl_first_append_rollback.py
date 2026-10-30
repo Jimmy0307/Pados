@@ -21,6 +21,7 @@ def test_failed_first_append_closes_descriptor_before_unlinking(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str) -> None:
     target = tmp_path / "store" / "log.jsonl"
     log = JsonlFile(target)
+    log.stat()  # create the owner-only directory first: on POSIX that fsyncs the parent, before the patch
     events: list[str] = []
     real_close, real_unlink = os.close, Path.unlink
 

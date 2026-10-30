@@ -10,6 +10,7 @@ from evidence. Abort can retire a pending binding but can never revoke a committ
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -281,22 +282,24 @@ def _write_anchored_log(tmp_path: Path, states: list[tuple[str, str | None]]) ->
         anchor.record(previous_point, point)
         previous_hash, previous_point = row["entry_hash"], point
     log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.chmod(log, 0o600)  # owner-only like a real log, so on POSIX the GRAMMAR (not file mode) is what is tested
     return AnchoredSessionBindingAuthority(log, anchor)
 
 
-@pytest.mark.parametrize("states", [
-    [("COMMITTED", "c" * 64)],  # finalized without a stage
-    [("ABORTED", None)],  # aborted without a stage
-    [("STAGED", None), ("STAGED", None)],  # staged twice
-    [("STAGED", None), ("COMMITTED", "c" * 64), ("ABORTED", None)],  # committed then revoked
-    [("STAGED", None), ("ABORTED", None), ("COMMITTED", "c" * 64)],  # aborted then revived
-    [("STAGED", "c" * 64)],  # a stage carrying evidence
+@pytest.mark.parametrize(("states", "code"), [
+    ([("COMMITTED", "c" * 64)], "BINDING_LOG_INCONSISTENT"),  # finalized without a stage
+    ([("ABORTED", None)], "BINDING_LOG_INCONSISTENT"),  # aborted without a stage
+    ([("STAGED", None), ("STAGED", None)], "BINDING_LOG_INCONSISTENT"),  # staged twice
+    ([("STAGED", None), ("COMMITTED", "c" * 64), ("ABORTED", None)], "BINDING_LOG_INCONSISTENT"),  # revoked
+    ([("STAGED", None), ("ABORTED", None), ("COMMITTED", "c" * 64)], "BINDING_LOG_INCONSISTENT"),  # revived
+    ([("STAGED", "c" * 64)], "BINDING_LOG_CORRUPT"),  # a stage carrying evidence: refused by the record model
 ], ids=["commit-first", "abort-first", "double-stage", "revoke", "revive", "staged-evidence"])
 def test_illegal_transition_sequences_fail_closed_even_when_anchored(
-        tmp_path: Path, states: list[tuple[str, str | None]]) -> None:
+        tmp_path: Path, states: list[tuple[str, str | None]], code: str) -> None:
     authority = _write_anchored_log(tmp_path, states)
-    with pytest.raises(BindingAuthorityError, match="BINDING_LOG_INCONSISTENT|BINDING_LOG_CORRUPT"):
+    with pytest.raises(BindingAuthorityError) as excinfo:
         authority.resolve(PROVIDER, SESSION)
+    assert excinfo.value.code == code  # the exact cause, never a file-mode refusal passing for it
 
 
 def test_pending_stage_survives_restart_as_unresolvable(tmp_path: Path) -> None:
