@@ -42,8 +42,8 @@ _WINDOWS_REPLACE_RETRIES = 8
 _WINDOWS_REPLACE_RETRYABLE_ERRORS = frozenset({5, 32, 33})
 
 
-def _replace_state(source: Path, destination: Path) -> None:
-    """Replace anchor state, briefly retrying transient Windows sharing/access failures.
+def replace_with_retry(source: Path, destination: Path) -> None:
+    """``os.replace``, briefly retrying transient Windows sharing/access failures.
 
     Windows readers and on-access scanners can temporarily deny replacement of an open target.
     The retry is bounded and only covers the native sharing/access error codes; every persistent
@@ -58,6 +58,9 @@ def _replace_state(source: Path, destination: Path) -> None:
                     or attempt + 1 == _WINDOWS_REPLACE_RETRIES):
                 raise
             time.sleep(min(0.01 * (2 ** attempt), 0.25))
+
+
+_replace_state = replace_with_retry  # the anchor's own state replace (tests substitute it)
 
 
 class AnchorError(RuntimeError):
@@ -145,8 +148,18 @@ class FileAnchor:
             if initialized:
                 raise AnchorError("ANCHOR_HEAD_LOST")
             return None
+        state = self._read_head()
         if not initialized:
-            raise AnchorError("ANCHOR_STATE_INVALID")
+            # The head is written before the sentinel, so a head without a sentinel is an interrupted FIRST
+            # initialization -- but only while it still holds just the first checkpoint. Complete it; a later
+            # head without its sentinel means the sentinel was removed after initialization: refuse.
+            latest = state[0]
+            if latest is None or latest.seq != 1:
+                raise AnchorError("ANCHOR_STATE_INVALID")
+            self._create_sentinel()
+        return state
+
+    def _read_head(self) -> tuple[Checkpoint | None, tuple[Checkpoint, ...]]:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
         with os.fdopen(os.open(self._head, flags), "rb") as handle:
             self._secure(os.fstat(handle.fileno()))
@@ -196,43 +209,33 @@ class FileAnchor:
                 self._write(state_data)
 
     def _initialize(self, data: dict[str, Any]) -> None:
-        """First record: sentinel, then head. A failure before the head lands undoes the sentinel.
+        """First record: head first (atomic replace), sentinel second.
 
-        A sentinel without a head reads as ``ANCHOR_HEAD_LOST`` forever, so an I/O failure part-way through the
-        first initialization must leave the anchor uninitialized (retryable), never headless. Once the head
-        replace has landed the commit is real and is kept even if the following directory fsync fails; the
-        caller reconciles against ``latest()``.
+        A sentinel without a head is indistinguishable from a head lost after initialization
+        (``ANCHOR_HEAD_LOST``), so the sentinel is never written before the head exists: any failure or crash
+        before the head replace lands leaves the anchor uninitialized (retryable), and a crash after it leaves a
+        first-checkpoint head without a sentinel, which the next access completes (see ``_state``). No rollback
+        step is needed, so none can fail and strand the anchor.
         """
+        self._write(data)
         self._create_sentinel()
-        try:
-            self._write(data)
-        except BaseException:
-            if not self._head.exists():  # the replace never landed: undo this call's initialization
-                self._remove_sentinel()
-            raise
 
     def _create_sentinel(self) -> None:
+        """Mark the anchor initialized; idempotent (an interrupted initialization may already have created it)."""
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
         try:
             descriptor = os.open(self._sentinel, flags, 0o600)
-        except FileExistsError as exc:
-            raise AnchorError("ANCHOR_STATE_INVALID") from exc
+        except FileExistsError:
+            self._exists(self._sentinel)  # still a secure regular file (links/foreign owners refused)
+            return
         try:
-            try:
-                self._secure(os.fstat(descriptor))
-                payload = ANCHOR_SCHEMA.encode("ascii")
-                if os.write(descriptor, payload) != len(payload):
-                    raise OSError("ANCHOR_SENTINEL_SHORT_WRITE")
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)  # closed before any rollback unlink (Windows cannot delete open files)
-            fsync_directory(self.directory)
-        except BaseException:
-            self._remove_sentinel()  # this call created it; a half-written sentinel must not survive
-            raise
-
-    def _remove_sentinel(self) -> None:
-        self._sentinel.unlink(missing_ok=True)
+            self._secure(os.fstat(descriptor))
+            payload = ANCHOR_SCHEMA.encode("ascii")
+            if os.write(descriptor, payload) != len(payload):
+                raise OSError("ANCHOR_SENTINEL_SHORT_WRITE")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         fsync_directory(self.directory)
 
     def _write(self, data: dict[str, Any]) -> None:

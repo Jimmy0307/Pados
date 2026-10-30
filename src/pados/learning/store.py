@@ -46,6 +46,7 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from pados.connectivity.storage import store_lock
+from pados.learning.anchor import replace_with_retry
 from pados.lifecycle.fswalk import fsync_directory, is_link
 from pados.lifecycle.locking import ensure_durable_dir
 from pados.lifecycle.minimization import DataMinimizationViolation, assert_minimized
@@ -222,7 +223,9 @@ class JsonlFile:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
+            # Windows scanners/indexers can briefly hold the target open; a rollback that fails on such a
+            # transient sharing violation would otherwise leave the log ahead of its anchor.
+            replace_with_retry(temporary, self.path)
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise
