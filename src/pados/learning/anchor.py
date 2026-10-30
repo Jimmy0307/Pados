@@ -188,10 +188,28 @@ class FileAnchor:
             if not continues(current, new):
                 raise AnchorError("ANCHOR_NOT_CONTINUING")
             kept = (*markers, new)[-self.max_markers:] if marker else markers
+            state_data = {"schema_version": ANCHOR_SCHEMA, "latest": _plain(new),
+                          "markers": [_plain(item) for item in kept]}
             if state is None:
-                self._create_sentinel()
-            self._write({"schema_version": ANCHOR_SCHEMA, "latest": _plain(new),
-                         "markers": [_plain(item) for item in kept]})
+                self._initialize(state_data)
+            else:
+                self._write(state_data)
+
+    def _initialize(self, data: dict[str, Any]) -> None:
+        """First record: sentinel, then head. A failure before the head lands undoes the sentinel.
+
+        A sentinel without a head reads as ``ANCHOR_HEAD_LOST`` forever, so an I/O failure part-way through the
+        first initialization must leave the anchor uninitialized (retryable), never headless. Once the head
+        replace has landed the commit is real and is kept even if the following directory fsync fails; the
+        caller reconciles against ``latest()``.
+        """
+        self._create_sentinel()
+        try:
+            self._write(data)
+        except BaseException:
+            if not self._head.exists():  # the replace never landed: undo this call's initialization
+                self._remove_sentinel()
+            raise
 
     def _create_sentinel(self) -> None:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
@@ -200,11 +218,21 @@ class FileAnchor:
         except FileExistsError as exc:
             raise AnchorError("ANCHOR_STATE_INVALID") from exc
         try:
-            self._secure(os.fstat(descriptor))
-            os.write(descriptor, ANCHOR_SCHEMA.encode("ascii"))
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+            try:
+                self._secure(os.fstat(descriptor))
+                payload = ANCHOR_SCHEMA.encode("ascii")
+                if os.write(descriptor, payload) != len(payload):
+                    raise OSError("ANCHOR_SENTINEL_SHORT_WRITE")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)  # closed before any rollback unlink (Windows cannot delete open files)
+            fsync_directory(self.directory)
+        except BaseException:
+            self._remove_sentinel()  # this call created it; a half-written sentinel must not survive
+            raise
+
+    def _remove_sentinel(self) -> None:
+        self._sentinel.unlink(missing_ok=True)
         fsync_directory(self.directory)
 
     def _write(self, data: dict[str, Any]) -> None:
