@@ -10,8 +10,22 @@ unavailable. A whole-file rewrite with a recomputed chain is therefore refused b
 still holds the trusted checkpoint. Security level: INDEPENDENTLY_ANCHORED_TAMPER_EVIDENT (see
 ``pados.capability_loop.binding_authority``); it is not cryptographic tamper-proof.
 
-``InMemorySessionBindingAuthority`` enforces the same immutable-binding semantics without an external anchor;
-it is for ephemeral / test use where durable external anchoring is not the property under test.
+Every log record is one state transition of one binding identity (``STAGED`` -> ``COMMITTED`` | ``ABORTED``),
+carrying the full governed context, so the log is self-describing; loading re-validates that transition grammar
+(even under a matching anchor) and only ``COMMITTED`` identities resolve. A ``COMMITTED`` record names the
+creation evidence (receipt hash) it was finalized against. ``max_bindings`` bounds log records; a created
+session uses two.
+
+Crash/failure outcomes of the creation protocol (``LearningService.create_session``):
+
+* before ``stage`` is anchored: no record (or a rolled-back one) -- nothing exists, nothing resolves;
+* after ``stage``, before/while the creation receipt is written: the identity is pending -- never resolvable;
+  the service aborts it when it can, otherwise it stays pending (still fail closed);
+* after the receipt, before ``commit`` is anchored: pending -- never resolvable; the receipt chain then shows a
+  RECORDED creation whose binding was never finalized (operational evidence over-reports; authority does not).
+
+``InMemorySessionBindingAuthority`` enforces the same transition semantics without an external anchor; it is
+for ephemeral / test use where durable external anchoring is not the property under test.
 """
 from __future__ import annotations
 
@@ -19,6 +33,7 @@ import hashlib
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pados.capability_loop.binding_authority import (
     BindingAuthorityError,
     BindingProof,
+    BindingState,
     GovernedSessionBinding,
 )
 from pados.enterprise.classification import DataClassification
@@ -38,21 +54,23 @@ from pados.lifecycle.minimization import DataMinimizationViolation, assert_minim
 GENESIS = "0" * 64
 _SHA256 = r"^[0-9a-f]{64}$"
 DEFAULT_MAX_BINDINGS = 100_000
-# A binding record at contract-maximum sizes (four 96-char ids + a 128-char session ref + two 64-char
-# hashes + timestamp + json overhead) is well under ~1 KiB; 2 KiB gives ample headroom so every value
+# A binding record at contract-maximum sizes (four 96-char ids + a 128-char session ref + three 64-char
+# hashes + state + timestamp + json overhead) is about 1 KiB; 2 KiB gives ample headroom so every value
 # GovernedSessionBinding accepts fits, and the minimization bound stays under the per-line cap.
 _LINE_BYTES = 2048
 _RECORD_BYTES = _LINE_BYTES - 256
 
 
 class _BindingRecord(BaseModel):
-    """One sealed, chained binding-log entry. The governed context fields ARE the authoritative binding."""
+    """One sealed, chained binding-log entry: one state transition of one governed binding."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     seq: int = Field(ge=1)
     prev_hash: str = Field(pattern=_SHA256)
     entry_hash: str = Field(pattern=_SHA256)
+    state: BindingState
+    evidence_ref: str | None = Field(default=None, pattern=_SHA256)
     provider_id: str
     external_session_ref: str
     project_id: str
@@ -65,6 +83,8 @@ class _BindingRecord(BaseModel):
     def _sealed(self) -> _BindingRecord:
         if self.entry_hash != _seal(self.model_dump(mode="json")):
             raise ValueError("BINDING_RECORD_HASH_MISMATCH")
+        if self.evidence_ref is not None and self.state is not BindingState.COMMITTED:
+            raise ValueError("BINDING_EVIDENCE_ON_NON_COMMIT")  # only a finalization names creation evidence
         _ = self.binding  # constructing the governed binding validates ids / session ref / aware timestamp
         return self
 
@@ -81,12 +101,14 @@ class _BindingRecord(BaseModel):
         return Checkpoint(self.seq, self.entry_hash)
 
     @classmethod
-    def seal(cls, binding: GovernedSessionBinding, *, seq: int, prev_hash: str) -> _BindingRecord:
+    def seal(cls, binding: GovernedSessionBinding, *, seq: int, prev_hash: str,
+             state: BindingState | str = BindingState.STAGED, evidence_ref: str | None = None) -> _BindingRecord:
         data = {
-            "seq": seq, "prev_hash": prev_hash, "provider_id": binding.provider_id,
-            "external_session_ref": binding.external_session_ref, "project_id": binding.project_id,
-            "work_contract_id": binding.work_contract_id, "classification": binding.classification.value,
-            "capability_gap_ref": binding.capability_gap_ref, "created_at": binding.created_at}
+            "seq": seq, "prev_hash": prev_hash, "state": BindingState(state).value, "evidence_ref": evidence_ref,
+            "provider_id": binding.provider_id, "external_session_ref": binding.external_session_ref,
+            "project_id": binding.project_id, "work_contract_id": binding.work_contract_id,
+            "classification": binding.classification.value, "capability_gap_ref": binding.capability_gap_ref,
+            "created_at": binding.created_at}
         return cls.model_validate({**data, "entry_hash": _seal(data)})
 
 
@@ -95,6 +117,50 @@ def _seal(data: dict[str, Any]) -> str:
 
 
 _RECORD_KEYS = frozenset(_BindingRecord.model_fields)
+
+
+@dataclass(frozen=True)
+class _Head:
+    """The latest transition of one identity (what decides whether and how it may move next)."""
+
+    state: BindingState
+    context_hash: str
+    evidence_ref: str | None
+    binding: GovernedSessionBinding
+
+
+def _advances(head: _Head | None, binding: GovernedSessionBinding, target: BindingState,
+              evidence_ref: str | None) -> bool:
+    """Decide one requested transition: True -> write it, False -> idempotent no-op; otherwise fail closed.
+
+    STAGED -> COMMITTED | ABORTED; COMMITTED and ABORTED are terminal. Shared by both implementations so the
+    anchored and in-memory authorities can never disagree on what a transition means.
+    """
+    if head is None:
+        if target is BindingState.STAGED:
+            return True
+        raise BindingAuthorityError("BINDING_NOT_STAGED")
+    if head.context_hash != binding.context_hash:
+        raise BindingAuthorityError("BINDING_CONFLICT")  # one identity, never two governed contexts
+    if head.state is BindingState.STAGED:
+        return target is not BindingState.STAGED  # re-stage of a pending binding is idempotent
+    if head.state is BindingState.ABORTED:
+        if target is BindingState.ABORTED:
+            return False
+        raise BindingAuthorityError("BINDING_ABORTED")  # a retired identity is never revived
+    if target is BindingState.COMMITTED and head.evidence_ref == evidence_ref:
+        return False  # the same finalization again
+    raise BindingAuthorityError("BINDING_ALREADY_COMMITTED")  # never aborted, re-staged or re-pointed
+
+
+@dataclass(frozen=True)
+class _LogView:
+    records: tuple[_BindingRecord, ...]
+    heads: dict[tuple[str, str], _BindingRecord]
+
+
+def _record_head(record: _BindingRecord) -> _Head:
+    return _Head(record.state, record.binding.context_hash, record.evidence_ref, record.binding)
 
 
 class AnchoredSessionBindingAuthority:
@@ -115,34 +181,53 @@ class AnchoredSessionBindingAuthority:
         # rewrite. Every lookup still reads the whole bounded log; only the parse/validation of identical
         # bytes is reused, so any byte change is re-validated (and checked against the anchor) on every
         # platform.
-        self._cache: tuple[str, tuple[_BindingRecord, ...]] | None = None
+        self._cache: tuple[str, _LogView] | None = None
 
     # -- public contract ----------------------------------------------------
+    def stage(self, binding: GovernedSessionBinding) -> BindingProof:
+        return self._transition(binding, BindingState.STAGED, None)
+
+    def commit(self, binding: GovernedSessionBinding, *, evidence_ref: str | None) -> BindingProof:
+        return self._transition(binding, BindingState.COMMITTED, evidence_ref)
+
+    def abort(self, binding: GovernedSessionBinding) -> None:
+        self._transition(binding, BindingState.ABORTED, None)
+
     def bind(self, binding: GovernedSessionBinding) -> BindingProof:
-        with self._normalized():
-            with self._file.locked():
-                records = self._validated()
-                existing = _find(records, binding.identity)
-                if existing is not None:
-                    if existing.binding.context_hash != binding.context_hash:
-                        raise BindingAuthorityError("BINDING_CONFLICT")  # no rebind to a different context
-                    return self._proof(existing)  # idempotent: identical binding already recorded
-                if len(records) + 1 > self._max:
-                    raise BindingAuthorityError("BINDING_LOG_FULL")
-                previous = records[-1] if records else None
-                record = _BindingRecord.seal(binding, seq=previous.seq + 1 if previous else 1,
-                                             prev_hash=previous.entry_hash if previous else GENESIS)
-                self._commit(records, [*records, record])
-                return self._proof(record)
+        """One-shot ``stage`` + ``commit`` with no separate creation evidence, for fixtures and callers that own
+        no evidence store. Idempotent for an identical binding. ``LearningService`` never uses it: a created
+        session is committed only against its durable creation receipt."""
+        return _bind_once(self, binding)
 
     def resolve(self, provider_id: str, external_session_ref: str) -> GovernedSessionBinding | None:
         with self._normalized():
             with self._file.locked():
-                records = self._validated()
-        found = _find(records, (provider_id, external_session_ref))
-        return None if found is None else found.binding
+                view = self._validated()
+        head = view.heads.get((provider_id, external_session_ref))
+        return head.binding if head is not None and head.state is BindingState.COMMITTED else None
 
     # -- internals ----------------------------------------------------------
+    def _transition(self, binding: GovernedSessionBinding, target: BindingState,
+                    evidence_ref: str | None) -> BindingProof:
+        with self._normalized():
+            with self._file.locked():
+                view = self._validated()
+                current = view.heads.get(binding.identity)
+                if not _advances(None if current is None else _record_head(current), binding, target,
+                                 evidence_ref):
+                    assert current is not None  # an idempotent no-op always has a head
+                    return self._proof(current)
+                if len(view.records) + 1 > self._max:
+                    raise BindingAuthorityError("BINDING_LOG_FULL")
+                previous = view.records[-1] if view.records else None
+                # A transition record repeats the ORIGINAL staged context (incl. created_at) verbatim.
+                source = binding if current is None else current.binding
+                record = _BindingRecord.seal(source, seq=previous.seq + 1 if previous else 1,
+                                             prev_hash=previous.entry_hash if previous else GENESIS,
+                                             state=target, evidence_ref=evidence_ref)
+                self._commit(list(view.records), [*view.records, record])
+                return self._proof(record)
+
     @contextmanager
     def _normalized(self) -> Iterator[None]:
         """Translate filesystem / lock / parse failures into the authority's closed error vocabulary, so a
@@ -168,53 +253,40 @@ class AnchoredSessionBindingAuthority:
         return latest
 
     def _load(self) -> list[_BindingRecord]:
+        return list(self._view().records)
+
+    def _view(self) -> _LogView:
         try:
             payload = self._file.read_payload()  # also enforces regular file / owner-only / no link
         except LearningStoreError as exc:
             raise BindingAuthorityError("BINDING_LOG_CORRUPT") from exc
         digest = hashlib.sha256(payload).hexdigest()
         if self._cache is not None and self._cache[0] == digest:
-            return list(self._cache[1])  # byte-identical to the last validated parse (anchor checked by caller)
-        records: list[_BindingRecord] = []
+            return self._cache[1]  # byte-identical to the last validated parse (anchor checked by caller)
         try:
             lines = self._file.parse_payload(payload)
         except LearningStoreError as exc:
             raise BindingAuthorityError("BINDING_LOG_CORRUPT") from exc
-        contexts: dict[tuple[str, str], str] = {}
-        for index, line in enumerate(lines, start=1):
-            try:
-                assert_minimized(line, allowed_keys=_RECORD_KEYS, max_string=160, max_items=16,
-                                 max_total_bytes=_RECORD_BYTES)
-                record = _BindingRecord.model_validate(line)  # _sealed() re-validates the governed contract
-            except (ValueError, DataMinimizationViolation) as exc:
-                raise BindingAuthorityError("BINDING_LOG_CORRUPT") from exc
-            previous = records[-1] if records else None
-            if (record.seq != index or record.prev_hash != (previous.entry_hash if previous else GENESIS)):
-                raise BindingAuthorityError("BINDING_LOG_CHAIN_BROKEN")
-            prior_context = contexts.get(record.binding.identity)
-            if prior_context is not None and prior_context != record.binding.context_hash:
-                raise BindingAuthorityError("BINDING_LOG_INCONSISTENT")  # one identity, two governed contexts
-            contexts[record.binding.identity] = record.binding.context_hash
-            records.append(record)
-        self._cache = (digest, tuple(records))
-        return records
+        view = _parse_log(lines)
+        self._cache = (digest, view)
+        return view
 
-    def _validated(self) -> list[_BindingRecord]:
+    def _validated(self) -> _LogView:
         """Chain-verified records whose head IS the independently anchored checkpoint. Fails closed otherwise.
 
-        This runs before every bind and before every resolve, so a log advanced past the anchor (or an anchor
-        advanced past the log) is never treated as healthy.
+        This runs before every transition and before every resolve, so a log advanced past the anchor (or an
+        anchor advanced past the log) is never treated as healthy.
         """
-        records = self._load()
+        view = self._view()
         anchored = self._anchor_latest()
-        if records:
+        if view.records:
             if anchored is None:
                 raise BindingAuthorityError("BINDING_NOT_ANCHORED")
-            if records[-1].checkpoint != anchored:
+            if view.records[-1].checkpoint != anchored:
                 raise BindingAuthorityError("BINDING_HEAD_NOT_ANCHORED")
         elif anchored is not None:
             raise BindingAuthorityError("BINDING_ANCHOR_AHEAD_OF_LOG")
-        return records
+        return view
 
     def _commit(self, before: list[_BindingRecord], after: list[_BindingRecord]) -> None:
         """Append the new record, then advance the anchor by compare-and-set from the validated head; on any
@@ -268,15 +340,48 @@ class AnchoredSessionBindingAuthority:
             raise BindingAuthorityError("BINDING_LOG_WRITE_FAILED") from exc
 
 
+def _parse_log(lines: list[dict[str, Any]]) -> _LogView:
+    """Validate every record, the hash chain, and each identity's transition grammar (fail closed)."""
+    records: list[_BindingRecord] = []
+    heads: dict[tuple[str, str], _BindingRecord] = {}
+    for index, line in enumerate(lines, start=1):
+        try:
+            assert_minimized(line, allowed_keys=_RECORD_KEYS, max_string=160, max_items=16,
+                             max_total_bytes=_RECORD_BYTES)
+            record = _BindingRecord.model_validate(line)  # _sealed() re-validates the governed contract
+        except (ValueError, DataMinimizationViolation) as exc:
+            raise BindingAuthorityError("BINDING_LOG_CORRUPT") from exc
+        previous = records[-1] if records else None
+        if record.seq != index or record.prev_hash != (previous.entry_hash if previous else GENESIS):
+            raise BindingAuthorityError("BINDING_LOG_CHAIN_BROKEN")
+        prior = heads.get(record.binding.identity)
+        if prior is None:
+            legal = record.state is BindingState.STAGED
+        else:
+            legal = (prior.state is BindingState.STAGED and record.state is not BindingState.STAGED
+                     and prior.binding == record.binding)  # same context AND the original created_at
+        if not legal:
+            raise BindingAuthorityError("BINDING_LOG_INCONSISTENT")  # illegal transition or second context
+        heads[record.binding.identity] = record
+        records.append(record)
+    return _LogView(tuple(records), heads)
+
+
+def _bind_once(authority: AnchoredSessionBindingAuthority | InMemorySessionBindingAuthority,
+               binding: GovernedSessionBinding) -> BindingProof:
+    try:
+        authority.stage(binding)
+    except BindingAuthorityError as exc:
+        if exc.code != "BINDING_ALREADY_COMMITTED":
+            raise
+    return authority.commit(binding, evidence_ref=None)
+
+
 def _minimized(record: _BindingRecord) -> dict[str, Any]:
     data = record.model_dump(mode="json")
     assert_minimized(data, allowed_keys=_RECORD_KEYS, max_string=160, max_items=16,
                      max_total_bytes=_RECORD_BYTES)
     return data
-
-
-def _find(records: list[_BindingRecord], identity: tuple[str, str]) -> _BindingRecord | None:
-    return next((record for record in records if record.binding.identity == identity), None)
 
 
 def anchored_session_binding_authority(log_path: Path, anchor_directory: Path) -> AnchoredSessionBindingAuthority:
@@ -295,35 +400,55 @@ def anchored_session_binding_authority(log_path: Path, anchor_directory: Path) -
     return AnchoredSessionBindingAuthority(log, FileAnchor(anchor))
 
 
-class InMemorySessionBindingAuthority:
-    """Immutable-binding authority without an external anchor (ephemeral / test use; not tail-anchored).
+@dataclass(frozen=True)
+class _MemoryEntry:
+    head: _Head
+    sequence: int
 
-    Enforces the same no-rebind semantics as the anchored authority, so authorization logic can be exercised
-    without durable anchoring; it does NOT provide the R4-F4 whole-file-rewrite protection.
+
+class InMemorySessionBindingAuthority:
+    """Same transition semantics as the anchored authority, without an external anchor (ephemeral / test use).
+
+    It does NOT provide the R4-F4 whole-file-rewrite protection. Sequences count transitions exactly like the
+    anchored log, and an idempotent transition returns the ORIGINAL sequence of the state it repeats.
     """
 
     def __init__(self) -> None:
-        # Each identity maps to its binding AND the sequence it was assigned at, so an idempotent rebind
-        # returns the ORIGINAL sequence (as the anchored log does), never the latest counter value.
-        self._bindings: dict[tuple[str, str], tuple[GovernedSessionBinding, int]] = {}
+        self._entries: dict[tuple[str, str], _MemoryEntry] = {}
         self._seq = 0
         self._lock = threading.Lock()  # serialize the check/increment/store so no concurrent rebind slips in
 
+    def stage(self, binding: GovernedSessionBinding) -> BindingProof:
+        return self._transition(binding, BindingState.STAGED, None)
+
+    def commit(self, binding: GovernedSessionBinding, *, evidence_ref: str | None) -> BindingProof:
+        return self._transition(binding, BindingState.COMMITTED, evidence_ref)
+
+    def abort(self, binding: GovernedSessionBinding) -> None:
+        self._transition(binding, BindingState.ABORTED, None)
+
     def bind(self, binding: GovernedSessionBinding) -> BindingProof:
-        with self._lock:
-            existing = self._bindings.get(binding.identity)
-            if existing is not None:
-                existing_binding, existing_seq = existing
-                if existing_binding.context_hash != binding.context_hash:
-                    raise BindingAuthorityError("BINDING_CONFLICT")
-                return BindingProof(context_hash=binding.context_hash, sequence=existing_seq,
-                                    anchor_checkpoint_hash=GENESIS)
-            self._seq += 1
-            self._bindings[binding.identity] = (binding, self._seq)
-            return BindingProof(context_hash=binding.context_hash, sequence=self._seq,
-                                anchor_checkpoint_hash=GENESIS)
+        """One-shot ``stage`` + ``commit`` (see ``AnchoredSessionBindingAuthority.bind``)."""
+        return _bind_once(self, binding)
 
     def resolve(self, provider_id: str, external_session_ref: str) -> GovernedSessionBinding | None:
         with self._lock:
-            entry = self._bindings.get((provider_id, external_session_ref))
-            return None if entry is None else entry[0]
+            entry = self._entries.get((provider_id, external_session_ref))
+        if entry is None or entry.head.state is not BindingState.COMMITTED:
+            return None
+        return entry.head.binding
+
+    def _transition(self, binding: GovernedSessionBinding, target: BindingState,
+                    evidence_ref: str | None) -> BindingProof:
+        with self._lock:
+            entry = self._entries.get(binding.identity)
+            if not _advances(None if entry is None else entry.head, binding, target, evidence_ref):
+                assert entry is not None
+                return BindingProof(context_hash=binding.context_hash, sequence=entry.sequence,
+                                    anchor_checkpoint_hash=GENESIS)
+            self._seq += 1
+            original = binding if entry is None else entry.head.binding
+            self._entries[binding.identity] = _MemoryEntry(
+                _Head(target, original.context_hash, evidence_ref, original), self._seq)
+            return BindingProof(context_hash=binding.context_hash, sequence=self._seq,
+                                anchor_checkpoint_hash=GENESIS)

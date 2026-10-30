@@ -12,11 +12,18 @@ Security level of a conforming implementation: ``INDEPENDENTLY_ANCHORED_TAMPER_E
 binding-log writer who cannot also modify the independently stored anchor; NOT protected against an actor who
 can modify both the log and the independent anchor (that would require an asymmetric signing trust root, a
 separate future user decision). It is never described as cryptographically tamper-proof.
+
+Creation is a two-phase commit with the operational evidence: ``stage`` records the binding as PENDING (never
+resolvable), the caller durably records the creation receipt, and only then ``commit`` finalizes the binding
+against that receipt's hash, making it resolvable. A failure or crash anywhere before ``commit`` leaves no
+resolvable binding (fail closed); ``abort`` retires a pending binding. A committed binding can never be aborted,
+re-staged or re-pointed, and an aborted identity can never be revived.
 """
 from __future__ import annotations
 
 import re
 from datetime import datetime
+from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -104,18 +111,37 @@ class BindingProof(BaseModel):
     semantic_authority: Literal["NONE"] = "NONE"
 
 
+class BindingState(StrEnum):
+    """Lifecycle of one binding identity: STAGED -> COMMITTED | ABORTED (terminal). Only COMMITTED resolves."""
+
+    STAGED = "STAGED"
+    COMMITTED = "COMMITTED"
+    ABORTED = "ABORTED"
+
+
 @runtime_checkable
 class SessionBindingAuthority(Protocol):
     """Authoritative, externally anchored binding of an external session to its governed context.
 
     Every method fails closed: an unavailable/missing/mismatched/corrupt anchor or log raises
-    ``BindingAuthorityError``. There is NO fallback to a mutable projection or caller-supplied ownership.
+    ``BindingAuthorityError``. There is NO fallback to a mutable projection or caller-supplied ownership. A
+    differing governed context for an identity already present raises ``BINDING_CONFLICT`` at every step.
     """
 
-    def bind(self, binding: GovernedSessionBinding) -> BindingProof:
-        """Immutably record ``binding``. Idempotent for an identical binding; fails closed (no rebind) when
-        the same identity is already bound to a different governed context."""
+    def stage(self, binding: GovernedSessionBinding) -> BindingProof:
+        """Record ``binding`` as pending (NOT resolvable). Idempotent while pending; ``BINDING_ALREADY_COMMITTED``
+        or ``BINDING_ABORTED`` when the identity already reached a terminal state."""
+
+    def commit(self, binding: GovernedSessionBinding, *, evidence_ref: str | None) -> BindingProof:
+        """Finalize a pending binding against the durable creation evidence ``evidence_ref`` (a SHA-256), making
+        it resolvable. Idempotent for the same evidence; ``BINDING_NOT_STAGED`` / ``BINDING_ABORTED`` /
+        ``BINDING_ALREADY_COMMITTED`` otherwise."""
+
+    def abort(self, binding: GovernedSessionBinding) -> None:
+        """Retire a pending binding so it can never resolve. Idempotent once aborted; a committed binding can
+        never be aborted (``BINDING_ALREADY_COMMITTED``)."""
 
     def resolve(self, provider_id: str, external_session_ref: str) -> GovernedSessionBinding | None:
-        """The authoritative governed context for an external session, integrity- and anchor-verified, or
-        ``None`` when nothing is bound. Any integrity/anchor failure raises rather than returning ``None``."""
+        """The authoritative governed context of a COMMITTED binding, integrity- and anchor-verified, or ``None``
+        when nothing is committed for the session (unknown, pending or aborted). Any integrity/anchor failure
+        raises rather than returning ``None``."""

@@ -71,13 +71,19 @@ def test_reuse_for_a_different_project_is_refused_and_owner_retained(tmp_path: P
     assert hijack.result is OperationResult.REFUSED_BY_POLICY
 
 
-def test_identical_rebind_is_idempotent(tmp_path: Path) -> None:
+def test_second_creation_of_a_committed_session_is_refused_not_reaccepted(tmp_path: Path) -> None:
+    # R17: a committed binding is finalized against exactly one creation receipt. A provider that hands the
+    # same session id to a second creation (even with an identical governed context) is refused rather than
+    # accepted twice; the original committed binding keeps working.
     http = FakeHttp({**HEALTH_OK, **generate_ok(job_id=SESSION)})
     store = LoopStore(tmp_path / "loop.json")
     auth = binding_authority()
     service = _service(store, http, auth)
-    for request_id in ("req-a", "req-a-again"):
-        receipt = service.create_session(
-            learning_request(request_id=request_id), contract=contract(), grant=grant(),
-            classification=DataClassification.INTERNAL)
-        assert receipt.result is OperationResult.RECORDED  # same identity + context rebinds idempotently
+    first = service.create_session(learning_request(request_id="req-a"), contract=contract(), grant=grant(),
+                                   classification=DataClassification.INTERNAL)
+    assert first.result is OperationResult.RECORDED
+    again = service.create_session(learning_request(request_id="req-a-again"), contract=contract(),
+                                   grant=grant(), classification=DataClassification.INTERNAL)
+    assert again.result is OperationResult.REFUSED_BY_POLICY
+    assert again.policy_code == GateCode.SESSION_BIND_REFUSED
+    assert auth.resolve(OpenMaicLearningProvider.provider_id, SESSION) is not None

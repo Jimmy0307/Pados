@@ -162,6 +162,6 @@ def test_idempotent_inmemory_rebind_returns_original_sequence() -> None:
     proof_a = authority.bind(_binding("job-a"))
     proof_b = authority.bind(_binding("job-b"))
     proof_a_again = authority.bind(_binding("job-a"))  # identical rebind of A
-    assert proof_a.sequence == 1
-    assert proof_b.sequence == 2
-    assert proof_a_again.sequence == proof_a.sequence  # the original sequence, not the latest counter (2)
+    # Sequences count transitions like the anchored log (stage + commit per bind).
+    assert proof_b.sequence > proof_a.sequence
+    assert proof_a_again.sequence == proof_a.sequence  # the original sequence, not the latest counter

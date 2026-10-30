@@ -52,6 +52,7 @@ class GateCode:
     GRANT_REFUSED = "GRANT_REFUSED"
     SESSION_NOT_BOUND = "SESSION_NOT_BOUND"  # the binding authority has no binding for this session
     SESSION_BIND_REFUSED = "SESSION_BIND_REFUSED"  # the authority refused to bind the new session (fail closed)
+    SESSION_BIND_FINALIZE_FAILED = "SESSION_BIND_FINALIZE_FAILED"  # creation evidence recorded, binding not committed
     SESSION_BINDING_UNVERIFIABLE = "SESSION_BINDING_UNVERIFIABLE"  # authority integrity/anchor check failed
     SESSION_PROVIDER_MISMATCH = "SESSION_PROVIDER_MISMATCH"  # session was created by a different provider
     SESSION_PROJECT_MISMATCH = "SESSION_PROJECT_MISMATCH"  # follow-up contract is for another project

@@ -48,8 +48,9 @@ def _write(log: Path, rows: list[dict]) -> None:
     log.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
 
 
-def _tampered_row(session: str, project: str, *, seq: int, prev_hash: str) -> dict:
-    return _BindingRecord.seal(_binding(session, project), seq=seq, prev_hash=prev_hash).model_dump(mode="json")
+def _tampered_row(session: str, project: str, *, seq: int, prev_hash: str, state: str = "STAGED") -> dict:
+    return _BindingRecord.seal(_binding(session, project), seq=seq, prev_hash=prev_hash,
+                               state=state).model_dump(mode="json")
 
 
 # -- baseline --------------------------------------------------------------
@@ -76,8 +77,9 @@ def test_tail_rewrite_is_detected(tmp_path: Path) -> None:
     auth, log, anchor = _auth(tmp_path)
     auth.bind(_binding("job-1"))
     auth.bind(_binding("job-2"))
-    rows = _lines(log)
-    rows[-1] = _tampered_row("job-2", "proj-evil", seq=2, prev_hash=rows[0]["entry_hash"])
+    rows = _lines(log)  # job-1 STAGED, COMMITTED; job-2 STAGED, COMMITTED
+    # Reseal the tail as a well-formed but substituted record (a new identity's stage): only the anchor can tell.
+    rows[-1] = _tampered_row("job-9", "proj-evil", seq=len(rows), prev_hash=rows[-2]["entry_hash"])
     _write(log, rows)
     with pytest.raises(BindingAuthorityError) as excinfo:
         auth.bind(_binding("job-3"))
@@ -123,8 +125,8 @@ def test_log_advanced_but_anchor_stale_is_detected(tmp_path: Path) -> None:
     auth, log, anchor = _auth(tmp_path)
     auth.bind(_binding("job-1"))
     rows = _lines(log)
-    rows.append(_tampered_row("job-2", "proj-a", seq=2, prev_hash=rows[0]["entry_hash"]))
-    _write(log, rows)  # anchor still at seq 1
+    rows.append(_tampered_row("job-2", "proj-a", seq=len(rows) + 1, prev_hash=rows[-1]["entry_hash"]))
+    _write(log, rows)  # anchor still at the previous head
     with pytest.raises(BindingAuthorityError) as excinfo:
         auth.resolve(PROVIDER, "job-1")
     assert excinfo.value.code == "BINDING_HEAD_NOT_ANCHORED"
