@@ -184,7 +184,7 @@ def _solve(tmp_path: Path, runtime: Any, *, adapter: Any = None) -> tuple[Any, A
                                                                      implementation}, operator=OPERATOR)
     fab.schemas.register(rp.OUTPUT_CONTRACT, rp.SCHEMA_CHECKER_ID, rp.run_manifest_valid)
     references = ValidatorRegistry()
-    references.register(rp.OUTPUT_CONTRACT, rp.REFERENCE_CHECKER_ID, rp.run_manifest_reference_check)
+    references.register(rp.OUTPUT_CONTRACT, rp.REFERENCE_CHECKER_ID, rp.reference_checker(chosen))
     payload = rp.canonical_request(request())
     fab.templates.register(template("research.campaign", [
         {"stage_id": "run", "capability_id": rp.CAPABILITY_ID, "parameters": rp.task_parameters(chosen, payload),
@@ -223,7 +223,7 @@ def test_execution_completes_but_verification_fails_when_an_artifact_is_swapped(
 
 # -- hand-off: PADOS supplies every authority field; the candidate stays pending ----------------------------------
 def _candidate(outputs: list[tuple[ArtifactRef, bytes]]) -> Any:
-    projection = rp.research_projection(outputs, goal_id="goal-research", request_digest=PINNED)
+    projection = rp.research_projection(outputs, goal_id="goal-research", request_digest=PINNED, profile=profile())
     authorization = AuthorizationMetadata(project_ref="proj-a", classification="INTERNAL", scope_version_ref="scope:1",
                                           grant_ref="grant:synthetic", policy_decision_ref="decision:synthetic",
                                           capability=rp.CAPABILITY_ID)
@@ -310,13 +310,13 @@ def test_the_projection_refuses_outputs_that_do_not_verify() -> None:
     final = rp.artifact_kind("final_evaluation")
     forged = [(ref, SWAPPED if ref.kind == final else data) for ref, data in outputs]
     with pytest.raises(ResearchError, match="RESEARCH_MANIFEST_UNVERIFIED"):
-        rp.research_projection(forged, goal_id="goal-research", request_digest=PINNED)
-    assert rp.research_projection(outputs, goal_id="goal-research", request_digest=PINNED)["completed_goals"] == ("goal-research",)
+        rp.research_projection(forged, goal_id="goal-research", request_digest=PINNED, profile=profile())
+    assert rp.research_projection(outputs, goal_id="goal-research", request_digest=PINNED, profile=profile())["completed_goals"] == ("goal-research",)
 
 
 def test_a_completed_run_with_an_unsupported_claim_never_completes_the_goal() -> None:
     out, store = _direct(ScriptedRuntime(output(claims=({"metric": "packing_density", "value": 0.95},))))
-    projection = rp.research_projection(_outputs(out, store), goal_id="goal-research", request_digest=PINNED)
+    projection = rp.research_projection(_outputs(out, store), goal_id="goal-research", request_digest=PINNED, profile=profile())
     assert out.evidence["run_status"] == "COMPLETED" and out.evidence["review_required"] is True
     assert projection["completed_goals"] == () and projection["unresolved_goals"] == ("goal-research",)
 
@@ -337,7 +337,7 @@ def test_checkers_return_false_never_raise_on_hostile_outputs(mutate: str) -> No
         "huge_number": [manifest, *[(ref, HUGE if ref.kind == final else data) for ref, data in rest]],
     }[mutate]
     assert rp.run_manifest_valid(hostile) in (True, False)
-    assert rp.run_manifest_reference_check(hostile) is False
+    assert rp.reference_checker(profile())(hostile) is False
 
 
 # -- Codex review: manifest bytes bound to their reference; verification bound to the pinned campaign ----------
@@ -350,9 +350,9 @@ def test_manifest_bytes_that_do_not_match_their_reference_never_verify() -> None
     swapped = manifest_bytes.replace(b'"upstream_run_id":"20261031_000000"', b'"upstream_run_id":"20261031_999999"')
     assert swapped != manifest_bytes
     forged = [(ref, swapped if ref == manifest_ref else data) for ref, data in outputs]
-    assert rp.run_manifest_valid(forged) is False and rp.run_manifest_reference_check(forged) is False
+    assert rp.run_manifest_valid(forged) is False and rp.reference_checker(profile())(forged) is False
     with pytest.raises(ResearchError, match="RESEARCH_MANIFEST_UNVERIFIED"):
-        rp.research_projection(forged, goal_id="goal-research", request_digest=PINNED)
+        rp.research_projection(forged, goal_id="goal-research", request_digest=PINNED, profile=profile())
 
 
 def test_dropping_pending_phases_cannot_turn_a_partial_run_into_a_completed_one() -> None:
@@ -369,16 +369,17 @@ def test_dropping_pending_phases_cannot_turn_a_partial_run_into_a_completed_one(
     forged_ref = ArtifactRef(sha256=hashlib.sha256(payload).hexdigest(), media_type=manifest_ref.media_type,
                              size_bytes=len(payload), kind=rp.KIND_MANIFEST)
     forged = [(forged_ref, payload) if ref == manifest_ref else (ref, data) for ref, data in outputs]
-    assert rp.run_manifest_reference_check(forged) is False
+    assert rp.reference_checker(profile())(forged) is False
     with pytest.raises(ResearchError, match="RESEARCH_MANIFEST_UNVERIFIED"):
-        rp.research_projection(forged, goal_id="goal-research", request_digest=PINNED)
+        rp.research_projection(forged, goal_id="goal-research", request_digest=PINNED, profile=profile())
 
 
 def test_the_projection_is_bound_to_the_request_the_task_pinned() -> None:
     out, store = _direct(ScriptedRuntime())
     other = rp.task_parameters(profile(), rp.canonical_request(request(budget_profile="other")))["request_digest"]
     with pytest.raises(ResearchError, match="RESEARCH_MANIFEST_UNVERIFIED"):
-        rp.research_projection(_outputs(out, store), goal_id="goal-research", request_digest=other)
+        rp.research_projection(_outputs(out, store), goal_id="goal-research", request_digest=other,
+                               profile=profile())
 
 
 def test_every_valid_profile_id_yields_a_valid_pack_version() -> None:
@@ -386,3 +387,26 @@ def test_every_valid_profile_id_yields_a_valid_pack_version() -> None:
     assert validate_pack(rp.research_pack_manifest(profile(profile_id=longest)).model_dump(mode="json"))
     with pytest.raises(ValueError):
         profile(profile_id="agsci.docker.cpu.claude.research.default")  # 40 characters: refused up front
+
+
+# -- verification is bound to the registered operator profile -----------------------------------------------------
+def _reissued(outputs: list[tuple[ArtifactRef, bytes]], **changes: Any) -> list[tuple[ArtifactRef, bytes]]:
+    """Rewrite the manifest with ``changes`` and a matching reference (what a forger with write access could do)."""
+    manifest_ref, manifest_bytes = next(item for item in outputs if item[0].kind == rp.KIND_MANIFEST)
+    forged = ResearchRunManifest.model_validate_json(manifest_bytes).model_copy(update=changes)
+    payload = rp.canonical_json(forged.model_dump(mode="json"))
+    ref = ArtifactRef(sha256=hashlib.sha256(payload).hexdigest(), media_type=manifest_ref.media_type,
+                      size_bytes=len(payload), kind=rp.KIND_MANIFEST)
+    return [(ref, payload) if r == manifest_ref else (r, d) for r, d in outputs]
+
+
+@pytest.mark.parametrize("changes", [{"image_digest": "9" * 64}, {"upstream_revision": "9" * 40},
+                                     {"profile_id": "agsci.other.profile"}, {"upstream_repository": "someone/fork"}])
+def test_a_manifest_naming_another_runtime_than_the_profile_never_verifies(changes: dict[str, Any]) -> None:
+    out, store = _direct(ScriptedRuntime())
+    outputs = _outputs(out, store)
+    assert rp.reference_checker(profile())(outputs) is True
+    forged = _reissued(outputs, **changes)
+    assert rp.reference_checker(profile())(forged) is False
+    with pytest.raises(ResearchError, match="RESEARCH_MANIFEST_UNVERIFIED"):
+        rp.research_projection(forged, goal_id="goal-research", request_digest=PINNED, profile=profile())

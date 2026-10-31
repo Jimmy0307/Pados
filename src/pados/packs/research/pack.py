@@ -22,7 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 from pydantic import ValidationError
@@ -310,14 +310,30 @@ def run_manifest_valid(outputs: Sequence[tuple[ArtifactRef, bytes]]) -> bool:
     return _unpack(outputs) is not None
 
 
-def run_manifest_reference_check(outputs: Sequence[tuple[ArtifactRef, bytes]]) -> bool:
-    """REFERENCE_CHECK: the manifest re-derives from its own promoted artifacts (metrics, claims, status)."""
+def _profile_matches(manifest: ResearchRunManifest, profile: ResearchRuntimeProfile) -> bool:
+    return (manifest.profile_id, manifest.upstream_repository, manifest.upstream_revision, manifest.image_digest) == (
+        profile.profile_id, profile.upstream_repository, profile.upstream_revision, profile.image_digest)
+
+
+def _verified(outputs: Sequence[tuple[ArtifactRef, bytes]], profile: ResearchRuntimeProfile) -> ResearchRunManifest | None:
     unpacked = _unpack(outputs)
-    return unpacked is not None and verify_run_manifest(unpacked[0], unpacked[1], campaign=unpacked[2])
+    if unpacked is None or not _profile_matches(unpacked[0], profile):
+        return None
+    return unpacked[0] if verify_run_manifest(unpacked[0], unpacked[1], campaign=unpacked[2]) else None
 
 
-def research_projection(outputs: Sequence[tuple[ArtifactRef, bytes]], *, goal_id: str,
-                        request_digest: str) -> dict[str, Any]:
+def reference_checker(profile: ResearchRuntimeProfile) -> Callable[[Sequence[tuple[ArtifactRef, bytes]]], bool]:
+    """The REFERENCE_CHECK for one registered profile: the manifest names exactly that runtime (profile, upstream
+    revision, image digest), its pinned request and requested phases, and re-derives from its own artifacts."""
+
+    def check(outputs: Sequence[tuple[ArtifactRef, bytes]]) -> bool:
+        return _verified(outputs, profile) is not None
+
+    return check
+
+
+def research_projection(outputs: Sequence[tuple[ArtifactRef, bytes]], *, goal_id: str, request_digest: str,
+                        profile: ResearchRuntimeProfile) -> dict[str, Any]:
     """Project VERIFIED stage outputs onto the bounded provider-response fields ``work_protocol`` normalizes.
 
     The manifest is re-derived from its own promoted artifacts first (the REFERENCE_CHECK); outputs that do not
@@ -329,11 +345,10 @@ def research_projection(outputs: Sequence[tuple[ArtifactRef, bytes]], *, goal_id
     goal; PARTIAL is a partial goal; FAILED or review-required runs leave it unresolved. Task, authorization,
     receipt, provenance and acceptance fields are supplied by PADOS when it normalizes, composes and verifies.
     """
-    unpacked = _unpack(outputs)
-    if (unpacked is None or unpacked[0].request_digest != request_digest
-            or not verify_run_manifest(unpacked[0], unpacked[1], campaign=unpacked[2])):
+    verified = _verified(outputs, profile)
+    if verified is None or verified.request_digest != request_digest:
         raise ResearchError("RESEARCH_MANIFEST_UNVERIFIED")
-    manifest = unpacked[0]
+    manifest = verified
     phases = ", ".join(f"{p.phase.value}={p.state.value}" for p in manifest.phases)
     supported = "; ".join(f"{c.metric} = {c.value}" for c in manifest.claims if c.status is ClaimStatus.EVIDENCED)
     content = f"Research run {manifest.upstream_run_id} ({manifest.status.value}): {phases}."

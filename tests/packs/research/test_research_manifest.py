@@ -250,3 +250,27 @@ def test_verification_rechecks_resume_continuity_against_the_pinned_campaign() -
     pending = tuple(p.model_copy(update={"state": PhaseState.PENDING}) if p.phase.value == "task_draft" else p
                     for p in manifest.phases)
     assert not verify_run_manifest(manifest.model_copy(update={"phases": pending}), promoted, campaign=campaign)
+
+
+# -- Codex review (459469f): ordering and snapshot re-derived at verification; output budget reserved ------------
+def test_verification_rechecks_phase_state_ordering() -> None:
+    manifest, promoted = _build(output())
+    reordered = tuple(p.model_copy(update={"state": PhaseState.PENDING}) if p.phase.value == "investigation" else p
+                      for p in manifest.phases)
+    forged = manifest.model_copy(update={"phases": reordered, "status": RunStatus.PARTIAL})
+    assert not verify_run_manifest(forged, promoted, campaign=request())
+
+
+def test_verification_recomputes_the_task_snapshot_digest() -> None:
+    manifest, promoted = _build(output())
+    forged = manifest.model_copy(update={"task_snapshot_digest": "f" * 64})
+    assert not verify_run_manifest(forged, promoted, campaign=request())
+
+
+def test_promoted_bytes_leave_room_for_the_manifest_and_request_copy() -> None:
+    from pados.packs.research import manifest as m
+    assert m.MAX_PROMOTED_BYTES + m.OUTPUT_RESERVE_BYTES <= 64 * 1024 * 1024  # the executor's stage write budget
+    campaign = request(phases=("task_draft",), require_final_evaluation=False)
+    files = {f"task/part_{i}.bin": b"x" * (8 * 1024 * 1024 - 1) for i in range(8)}  # admissible on its own terms
+    assert _refused(output(files=files, phases={"task_draft": "COMPLETED"}, claims=()),
+                    campaign=campaign) == "RESEARCH_ARTIFACT_LIMIT"

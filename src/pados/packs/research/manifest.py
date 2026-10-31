@@ -46,6 +46,9 @@ from pados.packs.research.contracts import (
 
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_BYTES = 64 * 1024 * 1024  # every file, quarantined ones included
+# The executor bounds ALL stage writes at 64 MiB: promoted bytes leave room for the manifest and the request copy.
+OUTPUT_RESERVE_BYTES = 1024 * 1024
+MAX_PROMOTED_BYTES = 64 * 1024 * 1024 - OUTPUT_RESERVE_BYTES
 MAX_EXACT_INT = 2**53  # larger integers cannot be compared as floats (and overflow on conversion)
 MAX_PROMOTED = 30  # the fabric bounds a stage at 32 outputs: one manifest, one pinned-request copy
 MAX_DEPTH = 8
@@ -123,12 +126,23 @@ def _phases(output: ResearchRunOutput, campaign: CampaignRequest) -> tuple[Phase
     if not set(reported) <= set(campaign.phases):
         raise ResearchError("RESEARCH_PHASE_INVALID")  # a phase nobody requested
     records = tuple(PhaseRecord(phase=p, state=reported.get(p, PhaseState.PENDING)) for p in campaign.phases)
+    _check_order(records)
+    return records
+
+
+def _check_order(records: tuple[PhaseRecord, ...]) -> None:
+    """No phase completes after an unfinished (pending or failed) one."""
     unfinished = False
     for record in records:
         if record.state is PhaseState.COMPLETED and unfinished:
             raise ResearchError("RESEARCH_PHASE_ORDER_INVALID")
         unfinished = unfinished or record.state in (PhaseState.FAILED, PhaseState.PENDING)
-    return records
+
+
+def snapshot_digest(entries: tuple[ArtifactEntry, ...]) -> str:
+    """The task snapshot identity: the sorted (path, digest) pairs of the task-snapshot artifacts."""
+    pairs = sorted((e.relative_path, e.sha256) for e in entries if e.kind is ArtifactKind.TASK_SNAPSHOT)
+    return hashlib.sha256(json.dumps(pairs).encode("ascii")).hexdigest()
 
 
 def _artifacts(files: Mapping[str, bytes]) -> tuple[tuple[ArtifactEntry, ...], dict[str, bytes], int]:
@@ -148,7 +162,7 @@ def _artifacts(files: Mapping[str, bytes]) -> tuple[tuple[ArtifactEntry, ...], d
             quarantined += 1
             continue
         promoted[path] = files[path]
-    if len(promoted) > MAX_PROMOTED:
+    if len(promoted) > MAX_PROMOTED or sum(len(data) for data in promoted.values()) > MAX_PROMOTED_BYTES:
         raise ResearchError("RESEARCH_ARTIFACT_LIMIT")
     entries = tuple(ArtifactEntry(kind=KIND_BY_ROOT[path.split("/", 1)[0]], relative_path=path, size_bytes=len(data),
                                   sha256=hashlib.sha256(data).hexdigest()) for path, data in promoted.items())
@@ -243,8 +257,7 @@ def build_run_manifest(raw: object, *, campaign: CampaignRequest,
     _check_resume(campaign, output.upstream_run_id, records)
     metrics = read_final_evaluation(promoted.get(FINAL_EVALUATION_PATH)) if _evaluated(records) else None
     claims = _claims(output.claims, metrics)
-    snapshot = hashlib.sha256(json.dumps(sorted((e.relative_path, e.sha256) for e in entries
-                                                if e.kind is ArtifactKind.TASK_SNAPSHOT)).encode("ascii")).hexdigest()
+    snapshot = snapshot_digest(entries)
     manifest = ResearchRunManifest(
         profile_id=profile.profile_id, upstream_repository=profile.upstream_repository,
         upstream_revision=profile.upstream_revision, image_digest=profile.image_digest,
@@ -271,7 +284,10 @@ def verify_run_manifest(manifest: ResearchRunManifest, promoted: Mapping[str, by
         if (not path_allowed(entry.relative_path) or KIND_BY_ROOT.get(entry.relative_path.split("/", 1)[0]) is not
                 entry.kind or len(data) != entry.size_bytes or hashlib.sha256(data).hexdigest() != entry.sha256):
             return False
+    if manifest.task_snapshot_digest != snapshot_digest(manifest.artifacts):
+        return False
     try:
+        _check_order(manifest.phases)
         _check_resume(campaign, manifest.upstream_run_id, manifest.phases)
         _check_envelopes(manifest.phases, manifest.artifacts)
         evaluated = _evaluated(manifest.phases)
