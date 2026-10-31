@@ -115,6 +115,16 @@ def get_job(session: Session, job_id: str) -> dict[str, Any]:
     return dict(row)
 
 
+def list_job_artifacts(session: Session, job_id: str) -> list[dict[str, Any]]:
+    """The execution evidence a job recorded (type, workspace-relative path, SHA-256); read-only."""
+    rows = session.execute(
+        text("SELECT artifact_type, path, sha256, created_at FROM worker_job_artifacts "
+             "WHERE job_id = CAST(:id AS uuid) ORDER BY created_at, id"),
+        {"id": job_id},
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
 def cancel_job(session: Session, job_id: str) -> dict[str, Any]:
     current = get_job(session, job_id)
     if current["status"] in {"SUCCEEDED", "FAILED", "BLOCKED", "CANCELLED", "TIMED_OUT"}:

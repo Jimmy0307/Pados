@@ -406,6 +406,14 @@ def create_app() -> FastAPI:
 
         return guarded(lambda: {"status": "ok", "job": _job()})
 
+    @app.get("/control/jobs/{job_id}/artifacts")
+    def control_job_artifacts(job_id: str, _: ControlAuth) -> object:
+        def _artifacts() -> list[dict[str, Any]]:
+            with session_scope(settings) as session:
+                return worker_service.list_job_artifacts(session, job_id)
+
+        return guarded(lambda: {"status": "ok", "job_id": job_id, "artifacts": _artifacts()})
+
     @app.post("/control/jobs/{job_id}/cancel")
     def control_cancel_job(job_id: str, _: ControlAuth) -> object:
         def _cancel() -> dict[str, Any]:

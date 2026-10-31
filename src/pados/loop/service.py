@@ -1284,29 +1284,35 @@ def loop_events(session: Session, loop_id: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def pause_loop(session: Session, loop_id: str) -> dict[str, Any]:
-    row = session.execute(
-        text("UPDATE task_loops SET status = 'PAUSED', paused_at = now() WHERE id = CAST(:id AS uuid) RETURNING *"),
-        {"id": loop_id},
-    ).mappings().one()
-    _event(session, loop_id, str(row["project_id"]), "LOOP_PAUSED", {})
+# A finished loop is never rewritten by an operator control (RC2 SEC-3): the predicate lives in the UPDATE itself.
+_TERMINAL_LOOP_SQL = "('COMPLETED', 'PARTIALLY_COMPLETED', 'FAILED_TERMINAL', 'CANCELLED', 'TIMED_OUT')"
+
+
+def _transitioned(session: Session, statement: str, loop_id: str) -> dict[str, Any]:
+    row = session.execute(text(statement), {"id": loop_id}).mappings().one_or_none()
+    if row is None:
+        raise ValueError("LOOP_TRANSITION_REFUSED: the loop is unknown or its status does not allow this action")
     return dict(row)
+
+
+def pause_loop(session: Session, loop_id: str) -> dict[str, Any]:
+    row = _transitioned(session, "UPDATE task_loops SET status = 'PAUSED', paused_at = now() "
+                        f"WHERE id = CAST(:id AS uuid) AND status NOT IN {_TERMINAL_LOOP_SQL} "
+                        "AND status <> 'PAUSED' RETURNING *", loop_id)
+    _event(session, loop_id, str(row["project_id"]), "LOOP_PAUSED", {})
+    return row
 
 
 def resume_loop(session: Session, loop_id: str) -> dict[str, Any]:
-    row = session.execute(
-        text("UPDATE task_loops SET status = 'RUNNING', paused_at = NULL WHERE id = CAST(:id AS uuid) AND status = 'PAUSED' RETURNING *"),
-        {"id": loop_id},
-    ).mappings().one()
+    row = _transitioned(session, "UPDATE task_loops SET status = 'RUNNING', paused_at = NULL "
+                        "WHERE id = CAST(:id AS uuid) AND status = 'PAUSED' RETURNING *", loop_id)
     _event(session, loop_id, str(row["project_id"]), "LOOP_RESUMED", {})
-    return dict(row)
+    return row
 
 
 def cancel_loop(session: Session, loop_id: str) -> dict[str, Any]:
-    row = session.execute(
-        text("UPDATE task_loops SET status = 'CANCELLED', completed_at = now() WHERE id = CAST(:id AS uuid) RETURNING *"),
-        {"id": loop_id},
-    ).mappings().one()
+    row = _transitioned(session, "UPDATE task_loops SET status = 'CANCELLED', completed_at = now() "
+                        f"WHERE id = CAST(:id AS uuid) AND status NOT IN {_TERMINAL_LOOP_SQL} RETURNING *", loop_id)
     cancelled_jobs = session.execute(
         text(
             """
