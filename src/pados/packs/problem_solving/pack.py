@@ -158,7 +158,7 @@ def load_evidence_pack(payload: bytes) -> EvidencePack:
         if len(payload) > MAX_ARTIFACT_BYTES:
             raise ValueError("too large")
         pack = EvidencePack.model_validate(json.loads(payload.decode("ascii")))
-    except (ValidationError, ValueError, UnicodeDecodeError):
+    except (ValidationError, ValueError, UnicodeDecodeError, RecursionError):
         pack = None
     if pack is None or canonical_json(pack.model_dump(mode="json")) != payload:
         raise ProblemSolvingError("PS_EVIDENCE_PACK_INVALID")
@@ -169,6 +169,7 @@ PARAMETER_KEYS = frozenset({"profile", "evidence_pack_digest", "authorized_sourc
 MAX_AUTHORIZED_SOURCES = 16
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE = re.compile(r"^[a-z][a-z0-9_.:-]{2,63}$")
+_PROVIDER_ID = re.compile(r"^[a-z][a-z0-9_.:-]{2,79}$")
 
 
 def _parameters(parameters: Mapping[str, Any]) -> tuple[ProblemSolvingProfile, str, frozenset[str]]:
@@ -268,7 +269,7 @@ class ProblemSolvingAdapter:
 
     def _provider_id(self) -> str:
         provider_id = getattr(self._provider, "provider_id", "")
-        return provider_id if isinstance(provider_id, str) and 0 < len(provider_id) <= 80 else "unknown"
+        return provider_id if isinstance(provider_id, str) and _PROVIDER_ID.fullmatch(provider_id) else "unknown"
 
 
 def _by_kind(outputs: Sequence[tuple[ArtifactRef, bytes]]) -> dict[str, bytes] | None:
@@ -287,7 +288,7 @@ def report_output_valid(outputs: Sequence[tuple[ArtifactRef, bytes]]) -> bool:
         load_evidence_pack(found[KIND_EVIDENCE])
         claims = ClaimSet.model_validate(json.loads(found[KIND_CLAIMS].decode("ascii")))
         report = ProblemSolvingReport.model_validate(json.loads(found[KIND_REPORT].decode("ascii")))
-    except (ProblemSolvingError, ValidationError, ValueError, UnicodeDecodeError):
+    except (ProblemSolvingError, ValidationError, ValueError, UnicodeDecodeError, RecursionError):
         return False
     return (canonical_json(claims.model_dump(mode="json")) == found[KIND_CLAIMS]
             and canonical_json(report.model_dump(mode="json")) == found[KIND_REPORT])

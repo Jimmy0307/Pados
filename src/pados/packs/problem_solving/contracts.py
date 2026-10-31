@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from enum import StrEnum
 from typing import Literal
 
@@ -43,8 +44,12 @@ class ProblemSolvingError(ValueError):
         self.code = code
 
 
+# Control, format (bidi overrides, zero-width), surrogate, private-use, unassigned and line/paragraph separators.
+_UNPRINTABLE = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
+
+
 def _text(value: str, code: str) -> str:
-    if not value or len(value) > MAX_STATEMENT or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+    if not value or len(value) > MAX_STATEMENT or any(unicodedata.category(ch) in _UNPRINTABLE for ch in value):
         raise ValueError(code)
     return value
 
@@ -194,7 +199,15 @@ class ClaimSet(_Frozen):
 class ProfileSection(_Frozen):
     section_id: str
     title: str
+    subjects: tuple[str, ...] = Field(min_length=1, max_length=16)  # what this section may assert
     required: bool = True
+
+    @field_validator("subjects")
+    @classmethod
+    def _subjects(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not _TOKEN.fullmatch(item) for item in value) or len(set(value)) != len(value):
+            raise ValueError("PS_PROFILE_INVALID")
+        return value
 
 
 class ProblemSolvingProfile(_Frozen):
@@ -207,24 +220,24 @@ class ProblemSolvingProfile(_Frozen):
 
 
 EIGHT_D = ProblemSolvingProfile(profile_id="8d", version="1", sections=(
-    ProfileSection(section_id="D1", title="Team"),
-    ProfileSection(section_id="D2", title="Problem description"),
-    ProfileSection(section_id="D3", title="Containment actions"),
-    ProfileSection(section_id="D4", title="Root cause"),
-    ProfileSection(section_id="D5", title="Permanent corrective actions"),
-    ProfileSection(section_id="D6", title="Implementation and validation"),
-    ProfileSection(section_id="D7", title="Prevention of recurrence"),
-    ProfileSection(section_id="D8", title="Closure and recognition"),
+    ProfileSection(section_id="D1", title="Team", subjects=("team",)),
+    ProfileSection(section_id="D2", title="Problem description", subjects=("defect", "problem", "symptom")),
+    ProfileSection(section_id="D3", title="Containment actions", subjects=("containment",)),
+    ProfileSection(section_id="D4", title="Root cause", subjects=("root_cause", "escape_point")),
+    ProfileSection(section_id="D5", title="Permanent corrective actions", subjects=("corrective_action",)),
+    ProfileSection(section_id="D6", title="Implementation and validation", subjects=("implementation", "validation")),
+    ProfileSection(section_id="D7", title="Prevention of recurrence", subjects=("prevention",)),
+    ProfileSection(section_id="D8", title="Closure and recognition", subjects=("closure", "recognition")),
 ))
 # A second profile proves the pipeline is generic: a profile is data, never a code path.
 A3 = ProblemSolvingProfile(profile_id="a3", version="1", sections=(
-    ProfileSection(section_id="BACKGROUND", title="Background"),
-    ProfileSection(section_id="CURRENT", title="Current condition"),
-    ProfileSection(section_id="GOAL", title="Goal"),
-    ProfileSection(section_id="ROOT_CAUSE", title="Root cause analysis"),
-    ProfileSection(section_id="COUNTERMEASURE", title="Countermeasures"),
-    ProfileSection(section_id="PLAN", title="Implementation plan"),
-    ProfileSection(section_id="FOLLOW_UP", title="Follow-up", required=False),
+    ProfileSection(section_id="BACKGROUND", title="Background", subjects=("background",)),
+    ProfileSection(section_id="CURRENT", title="Current condition", subjects=("current_condition", "symptom")),
+    ProfileSection(section_id="GOAL", title="Goal", subjects=("goal",)),
+    ProfileSection(section_id="ROOT_CAUSE", title="Root cause analysis", subjects=("root_cause",)),
+    ProfileSection(section_id="COUNTERMEASURE", title="Countermeasures", subjects=("countermeasure",)),
+    ProfileSection(section_id="PLAN", title="Implementation plan", subjects=("plan",)),
+    ProfileSection(section_id="FOLLOW_UP", title="Follow-up", subjects=("follow_up",), required=False),
 ))
 PROFILES = {profile.profile_id: profile for profile in (EIGHT_D, A3)}
 
@@ -232,7 +245,8 @@ PROFILES = {profile.profile_id: profile for profile in (EIGHT_D, A3)}
 class GroundingStatus(StrEnum):
     GROUNDED = "GROUNDED"  # cites same-case evidence stating the same assertion; no evidence disagrees
     UNSUPPORTED = "UNSUPPORTED"  # no / unknown citations, or the citations do not state this assertion
-    CASE_MISMATCH = "CASE_MISMATCH"  # cites another case's evidence, or a cross-case claim misses a case
+    SECTION_MISMATCH = "SECTION_MISMATCH"  # filed under a section that cannot carry its subject
+    CASE_MISMATCH = "CASE_MISMATCH"  # cites another case's evidence, or a spanned case lacks on-subject support
     CONTRADICTED = "CONTRADICTED"  # its own citations state a different assertion on the subject
     CONFLICTED = "CONFLICTED"  # its cases hold evidence disagreeing on the subject: needs human resolution
 

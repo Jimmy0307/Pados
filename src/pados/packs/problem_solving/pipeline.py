@@ -73,7 +73,9 @@ def admit_evidence(pack: EvidencePack, *, pinned_digest: str, authorized_sources
         raise ProblemSolvingError("PS_EVIDENCE_SOURCE_UNAUTHORIZED")
 
 
-def _ground(claim: Claim, pack: EvidencePack) -> GroundingStatus:
+def _ground(claim: Claim, pack: EvidencePack, subjects: frozenset[str] | None) -> GroundingStatus:
+    if subjects is not None and claim.subject not in subjects:
+        return GroundingStatus.SECTION_MISMATCH  # e.g. a symptom filed as the root cause
     cited = [pack.item(evidence_id) for evidence_id in claim.citations]
     if not claim.citations or any(item is None for item in cited):
         return GroundingStatus.UNSUPPORTED  # nothing cited, or a citation that does not exist
@@ -86,14 +88,21 @@ def _ground(claim: Claim, pack: EvidencePack) -> GroundingStatus:
         return GroundingStatus.CONTRADICTED  # its own citation says otherwise
     if not on_subject:
         return GroundingStatus.UNSUPPORTED  # the citations do not state this claim
+    if {item.case_id for item in on_subject} != set(claim.case_ids):
+        return GroundingStatus.CASE_MISMATCH  # every spanned case needs its own on-subject support
     disagreeing = [item for item in pack.items if item.case_id in claim.case_ids
                    and item.subject == claim.subject and item.assertion != claim.assertion]
     return GroundingStatus.CONFLICTED if disagreeing else GroundingStatus.GROUNDED
 
 
-def ground_claims(pack: EvidencePack, claims: ClaimSet) -> tuple[ClaimVerdict, ...]:
-    """Deterministic grounding verdict for every claim, in claim order."""
-    return tuple(ClaimVerdict(claim_id=claim.claim_id, status=_ground(claim, pack)) for claim in claims.claims)
+def ground_claims(pack: EvidencePack, claims: ClaimSet,
+                  profile: ProblemSolvingProfile | None = None) -> tuple[ClaimVerdict, ...]:
+    """Deterministic grounding verdict for every claim, in claim order (section subjects checked with a profile)."""
+    allowed = None if profile is None else {s.section_id: frozenset(s.subjects) for s in profile.sections}
+    return tuple(ClaimVerdict(claim_id=claim.claim_id,
+                              status=_ground(claim, pack, None if allowed is None else allowed.get(claim.section,
+                                                                                                   frozenset())))
+                 for claim in claims.claims)
 
 
 def build_report(pack: EvidencePack, claims: ClaimSet, profile: ProblemSolvingProfile, *,
@@ -102,7 +111,7 @@ def build_report(pack: EvidencePack, claims: ClaimSet, profile: ProblemSolvingPr
     known = set(profile.section_ids())
     if any(claim.section not in known for claim in claims.claims):
         raise ProblemSolvingError("PS_CLAIM_SECTION_UNKNOWN")
-    verdicts = ground_claims(pack, claims)
+    verdicts = ground_claims(pack, claims, profile)
     status_of = {verdict.claim_id: verdict.status for verdict in verdicts}
     sections: list[ReportSection] = []
     for section in profile.sections:
@@ -152,12 +161,18 @@ def verify_report(pack: EvidencePack, claims: ClaimSet, report: ProblemSolvingRe
 MAX_CONTRIBUTION_CHARS = 16_000  # the work-protocol contribution bound
 
 
+def _cited_statements(pack: EvidencePack, claim: Claim) -> str:
+    items = [pack.item(evidence_id) for evidence_id in claim.citations]
+    return "; ".join(f"{item.evidence_id}: {item.statement}" for item in items if item is not None)
+
+
 def result_projection(pack: EvidencePack, claims: ClaimSet, report: ProblemSolvingReport, *,
                       goal_id: str) -> dict[str, Any]:
     """Project a report onto the bounded provider-response fields ``work_protocol`` normalization accepts.
 
-    Only SUPPORTED sections become contributions, built from their grounded claims; every cited evidence item is
-    referenced by id, digest and source. Anything short of COMPLETE never yields a completed goal: INCOMPLETE is a
+    Only SUPPORTED sections become contributions. Their content is rendered from the grounded (subject, assertion)
+    tokens and the admitted evidence statements they cite -- never from provider-authored claim text, which stays
+    in the recorded claim set only. Every cited evidence item is referenced by id, digest and source. Anything short of COMPLETE never yields a completed goal: INCOMPLETE is a
     partial goal, ABSTAINED and REVIEW_REQUIRED are unresolved. The projection carries no task, authorization,
     receipt, provenance or acceptance field -- PADOS supplies those when it normalizes, composes and verifies.
     """
@@ -172,7 +187,7 @@ def result_projection(pack: EvidencePack, claims: ClaimSet, report: ProblemSolvi
             continue
         presented = [by_id[claim_id] for claim_id in section.claim_ids]
         content = f"{section.section_id} {titles.get(section.section_id, '')}: " + " ".join(
-            f"{claim.text} [{', '.join(claim.citations)}]" for claim in presented)
+            f"{claim.subject} = {claim.assertion} [{_cited_statements(pack, claim)}]." for claim in presented)
         if len(content) > MAX_CONTRIBUTION_CHARS:
             raise ProblemSolvingError("PS_PROJECTION_TOO_LARGE")
         contributions.append({"contribution_id": f"ps.{report.profile_id}.{section.section_id.lower()}.{tag}",

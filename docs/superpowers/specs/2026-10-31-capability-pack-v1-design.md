@@ -161,6 +161,19 @@ capabilities, ≤ 64 adapters, ≤ 64 failure codes); 12. `capability_ids` equal
    the critic is advisory only. Generic contracts and synthetic fixtures only; no company source, data, documents,
    prompts, endpoints or credentials.
 
+## Known limits of V1 (stated, not hidden)
+
+* `timeout_seconds`, `egress`/`egress_hosts`, `allowed_roots` and `secret_refs` are **declarations** checked for
+  consistency; V1 has no isolation runner that enforces them at execution time. An `IN_PROCESS` adapter can do
+  whatever its Python code does, so `IN_PROCESS` is allowed only for `IN_TREE` (repository-reviewed) packs; code not
+  reviewed in-tree must declare an isolated runtime (`PACK_RUNTIME_ISOLATION_REQUIRED`). Allowlisted egress hosts
+  must be public names (no IP literals, loopback or link-local names).
+* The registry has no capacity query, so a full registry is detected only when it refuses; `register_pack` then
+  revokes what it registered (`PACK_REGISTRATION_INCOMPLETE`) and nothing of the pack stays plannable.
+* Structured Problem Solving: claim text and critic reason codes are untrusted and recorded only in the claim set
+  and report artifacts; contributions are rendered from grounded tokens and admitted evidence statements. A profile
+  binds each section to the subjects it may assert; the subject vocabulary is the profile's data.
+
 ## Non-goals
 
 No second scheduler/router/CAS/task model; no auto-install, auto-promotion or self-authorization; no network
