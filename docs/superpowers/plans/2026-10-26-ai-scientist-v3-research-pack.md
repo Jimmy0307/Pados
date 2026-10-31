@@ -31,192 +31,56 @@
 
 ---
 
-### Task 1: Research pack contracts and runtime-profile schema
-
-**Files:**
-- Create: `src/pados/packs/research/__init__.py`
-- Create: `src/pados/packs/research/contracts.py`
-- Create: `tests/packs/research/test_contracts.py`
-
-**Interfaces:**
-- Produces: `ResearchRuntimeProfile`, `ResearchCampaignRequest`, `ResearchArtifactEntry`, `ResearchRunManifest`, validation helpers.
-
-- [ ] **Step 1: Write failing contract tests**
-
-Cover a valid CPU Docker profile; rejection of raw executable/command/env values from request data; normalized allowlisted agent/model/preset identifiers; rejection of absolute or parent-traversing artifact paths; manifest schema/version and SHA-256 validation.
-
-- [ ] **Step 2: Run the focused tests and verify RED**
-
-Run: `python -m pytest tests/packs/research/test_contracts.py -q`
-
-Expected: failures because `pados.packs.research` contracts do not exist.
-
-- [ ] **Step 3: Implement minimal immutable contracts**
-
-Keep runtime execution details in operator-owned `ResearchRuntimeProfile`; keep caller-selectable data in `ResearchCampaignRequest`. Use closed schemas consistent with the existing Capability Fabric contract style.
-
-- [ ] **Step 4: Run focused tests and verify GREEN**
-
-- [ ] **Step 5: Commit**
-
-`feat(research): add governed research runtime contracts`
-
----
-
-### Task 2: Manifest builder and verifier
-
-**Files:**
-- Create: `src/pados/packs/research/manifest.py`
-- Create: `tests/packs/research/test_manifest.py`
-- Add fixture tree: `tests/fixtures/research/agsci_circpack_minimal/`
-
-**Interfaces:**
-- Consumes: `ResearchRunManifest`, owned run root, expected selected phases.
-- Produces: deterministic manifest and verification result/evidence suitable for the existing adapter verification hook.
-
-- [ ] **Step 1: Write failing tests**
-
-Cover valid bounded artifacts, SHA mismatch, missing required artifact, path escape, unexpected promoted file, optional degraded phase, required final-evaluation absence, and secret-pattern exclusion from promoted metadata.
-
-- [ ] **Step 2: Verify RED**
-
-Run: `python -m pytest tests/packs/research/test_manifest.py -q`
-
-- [ ] **Step 3: Implement deterministic manifest collection/verification**
-
-Promote only an explicit allowlist of logical artifact kinds. Hash files with SHA-256, record relative paths only, and keep large/raw logs outside receipt payloads.
-
-- [ ] **Step 4: Verify GREEN**
-
-- [ ] **Step 5: Commit**
-
-`feat(research): verify agentic scientist evidence manifests`
-
----
-
-### Task 3: Registered runtime profile store
-
-**Files:**
-- Create: `src/pados/packs/research/profiles.py`
-- Create: `tests/packs/research/test_profiles.py`
-
-**Interfaces:**
-- Produces: `ResearchRuntimeProfileRegistry` with operator-only registration and immutable profile digest lookup.
-- Consumes later: adapter receives a resolved registered profile, never caller-supplied execution configuration.
-
-- [ ] **Step 1: Write failing tests**
-
-Cover duplicate registration refusal, profile digest stability, changed revision/image digest producing a new identity, unknown profile refusal, and caller inability to override executable/image/env.
-
-- [ ] **Step 2: Verify RED**
-
-- [ ] **Step 3: Implement minimal registry**
-
-Follow existing PADOS registry/event/digest conventions where practical without creating a second global authority. This registry is pack configuration, not capability authorization.
-
-- [ ] **Step 4: Verify GREEN**
-
-- [ ] **Step 5: Commit**
-
-`feat(research): add pinned research runtime profiles`
-
----
-
-### Task 4: Isolated AI-Scientist-v3 runner
-
-**Files:**
-- Create: `src/pados/packs/research/runner.py`
-- Create: `tests/packs/research/test_runner.py`
-
-**Interfaces:**
-- Consumes: resolved `ResearchRuntimeProfile`, `ResearchCampaignRequest`, owned staging/output directories, narrow SecretRef resolver callback.
-- Produces: `ResearchProcessResult` containing exit status, bounded diagnostics, upstream run root, and no secret values.
-
-- [ ] **Step 1: Write failing tests using a fake executable fixture**
-
-Test exact argv construction, no `shell=True`, no arbitrary caller command fragments, owned cwd/output roots, timeout behavior, non-zero exit, output-size cap, and environment allowlist behavior.
-
-- [ ] **Step 2: Verify RED**
-
-- [ ] **Step 3: Implement minimal runner**
-
-Construct argv only from profile constants plus validated allowlisted identifiers. Never interpolate a shell command. Resolve only the profile's named SecretRefs immediately before execution and do not retain their values in result objects.
-
-- [ ] **Step 4: Verify GREEN**
-
-- [ ] **Step 5: Commit**
-
-`feat(research): add isolated agentic scientist runner`
-
----
-
-### Task 5: Capability adapter and registration
-
-**Files:**
-- Create: `src/pados/packs/research/adapters.py`
-- Create: `src/pados/packs/research/registry.py`
-- Create: `tests/packs/research/test_adapter.py`
-- Modify: `src/pados/packs/research/__init__.py`
-
-**Interfaces:**
-- Produces: `ResearchCampaignAdapter` and `register_research_pack(...)`.
-- Uses: existing `CapabilityAdapter`, descriptor, verification, ArtifactRef, policy, and receipt conventions.
-
-- [ ] **Step 1: Write failing tests**
-
-Test capability id `RESEARCH_CAMPAIGN`, EXPERIMENTAL lifecycle, policy-blocked execution never invoking the runner, success returning only manifest/artifact refs, upstream failure withholding promoted outputs, malformed manifest failing verification, and no automatic semantic acceptance.
-
-- [ ] **Step 2: Verify RED**
-
-- [ ] **Step 3: Implement adapter and registration**
-
-The adapter stages input, invokes the runner, builds/verifies the manifest, and returns bounded artifact refs. It never receives CAS/database/registry mutation authority.
-
-- [ ] **Step 4: Verify focused GREEN**
-
-- [ ] **Step 5: Run existing Capability Fabric regression tests**
-
-Run at minimum: `python -m pytest tests/capability tests/packs/research -q`
-
-- [ ] **Step 6: Commit**
-
-`feat(research): register AI Scientist v3 campaign capability`
-
----
-
-### Task 6: Deterministic decomposition template and end-to-end V0 test
-
-**Files:**
-- Create: `tests/packs/research/test_research_campaign_e2e.py`
-- Create or modify the pack registration/template file selected by the existing template pattern.
-- Create: `docs/packs/research/AI_SCIENTIST_V3_RESEARCH_PACK_V0.md`
-
-**Interfaces:**
-- Input task type: proposed `RESEARCH_COMPUTATIONAL_CAMPAIGN`.
-- Graph: one `RESEARCH_CAMPAIGN` stage in V0.
-- Output: verified `ResearchRunManifest` artifact ref and normal PlanReceipt/ResultCandidate path.
-
-- [ ] **Step 1: Write failing end-to-end Fabric test with fake runtime**
-
-Assert TaskContract -> deterministic graph -> plan -> policy -> adapter -> manifest verification -> StageReceipt/PlanReceipt. Assert result is still a candidate and no semantic commit occurs in the pack.
-
-- [ ] **Step 2: Verify RED**
-
-- [ ] **Step 3: Register the deterministic template and capability**
-
-- [ ] **Step 4: Verify GREEN and full relevant regressions**
-
-Run: `python -m pytest tests/capability tests/packs/research tests/pipeline -q`
-
-- [ ] **Step 5: Document operator setup and exact trust boundary**
-
-- [ ] **Step 6: Commit**
-
-`feat(research): complete governed research campaign v0`
-
----
-
-### Task 7: Standalone upstream fixture capture
+### Pack V1 alignment (2026-10-31)
+
+Tasks 1-6 of the original plan were written before Capability Pack V1 (PR #18) existed. They are **superseded** by
+the V0 implementation below. The separate profile registry, bespoke registration and lifecycle are not built; Pack V1
+provides them.
+
+### V0 (implemented, test-first)
+
+Files:
+- `src/pados/packs/research/contracts.py`:
+  - phases, phase states, artifact kinds, run status and claim status;
+  - `CampaignRequest` and `ResumeSpec`;
+  - `ResearchRunOutput`, the untrusted runtime return;
+  - `ResearchRunManifest` and its entries.
+- `src/pados/packs/research/manifest.py`:
+  - `build_run_manifest` admits a run fail-closed: exit code, phase names, states and order, egress hosts, path admission (one unauthorized path refuses the whole run), quarantine of unknown roots, phase output envelopes, resume continuity, final-evaluation metrics read from the artifact, claims marked `EVIDENCED` or `NOT_EVIDENCED`;
+  - `verify_run_manifest` re-derives everything.
+- `src/pados/packs/research/pack.py`:
+  - `ResearchRuntimeProfile` and `research_pack_manifest` (profile -> Pack V1 version);
+  - the `ResearchRuntime` protocol (operator-supplied, untrusted);
+  - `ResearchCampaignAdapter` (task-pinned request digest, agent allowlist, closed failures);
+  - the SCHEMA and REFERENCE_CHECK checkers;
+  - `research_projection`.
+
+Tests (synthetic fixtures `tests/packs/research/_research_fixtures.py`, upstream-shaped run layout):
+- `test_research_manifest.py` covers a complete run and these failure cases:
+  - malformed output; non-zero exit; missing artifact; digest mismatch;
+  - unauthorized paths; quarantine;
+  - invalid phase or state; phase order; a partial or failed run; paper output without the paper phase;
+  - resume mismatch; egress violation;
+  - unevidenced claims and a forged claim upgrade.
+- `test_research_pack.py` covers:
+  - the profile -> Pack V1 manifest and invalid profiles;
+  - a cloud profile (allowlist and secret refs);
+  - runtime unavailable (unplannable, retryable); timeout (non-retryable); a crashing runtime leaks nothing;
+  - runtime output violations; an agent outside the allowlist; a stale request digest;
+  - classification above the ceiling;
+  - E2E through the executor;
+  - execution succeeds but verification fails;
+  - a ResultCandidate via the existing work-protocol functions;
+  - unevidenced claims never presented, and partial runs only as partial goals.
+- `tests/capability/test_pack_boundaries.py` now also scans `pados.packs.research`.
+
+Not built in V0, and kept as separate work:
+- the container runner (`agsci` argv construction and isolation, original Task 4);
+- the deterministic decomposition template (original Task 6).
+
+Both plug in behind `ResearchRuntime` and the existing template registry without changing the contracts.
+
+### Task 7: Standalone upstream fixture capture (blocked: provider credentials required)
 
 **Files:**
 - Add sanitized fixture under `tests/fixtures/research/agsci_circpack_real/` or a fixture-generation manifest if artifacts are too large.
@@ -244,7 +108,7 @@ Exclude credentials, host-specific paths, raw private logs, caches, and large un
 
 ---
 
-### Task 8: Live Docker UAT gate
+### Task 8: Live Docker UAT gate (`REAL_RUNTIME_NOT_VALIDATED`)
 
 **Files:**
 - Create: `scripts/validation/validate_research_pack_live.py`

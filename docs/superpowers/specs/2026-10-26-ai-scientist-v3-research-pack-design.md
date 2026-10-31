@@ -1,7 +1,7 @@
 # AI-Scientist-v3 Research Capability Pack Design
 
 Date: 2026-10-26
-Status: proposed integration design
+Status: V0 implemented as a Capability Pack V1 consumer (2026-10-31, on `main@6f5eecb`); live runtime `REAL_RUNTIME_NOT_VALIDATED`
 Upstream: `SakanaAI/AI-Scientist-v3` (`The Agentic Scientist`)
 
 ## Intent
@@ -13,6 +13,28 @@ PADOS remains the authority for task intent, capability selection, policy, resou
 The integration exists to make automated computational research a first-class PADOS capability while preserving the existing principle:
 
 `MODEL OUTPUT != TRUTH` and `EXECUTION COMPLETE != SEMANTIC ACCEPTANCE`.
+
+## Alignment with Capability Pack V1 (2026-10-31)
+
+Capability Pack V1 (`pados.capability.pack.v1`, PR #18,
+`docs/superpowers/specs/2026-10-31-capability-pack-v1-design.md`) is now the only packaging, registration and extension
+convention. The research pack is a **consumer** of it and keeps no parallel abstraction. This section supersedes any
+conflicting statement below:
+
+| Earlier proposal | Now |
+|---|---|
+| `ResearchRuntimeProfileRegistry` with its own digest identity | Removed. An operator `ResearchRuntimeProfile` becomes **one content-addressed Pack V1 version** via `research_pack_manifest(profile)` and registers through the existing `CapabilityRegistry` (`register_pack`). |
+| `register_research_pack()` / bespoke adapter registration | `ResearchCampaignAdapter` wrapped by `GovernedPackAdapter`, executed only by the existing `CapabilityExecutor`. |
+| Registry lifecycle `EXPERIMENTAL -> ACTIVE` gated by live UAT | Capability-loop lifecycle: the pack starts `EXPERIMENTAL`; a recorded live-UAT outcome is the `validation_outcome_ref` an operator needs to propose `VALIDATED` (`propose_pack_transition`). |
+| Adapter-specific verification hook | Pack V1 verification hooks in the existing `ValidatorRegistry`: SCHEMA `run_manifest_valid`, REFERENCE_CHECK `run_manifest_reference_check` (re-derives the manifest from its own outputs). |
+| Profile network class, temp root, secrets | Pack V1 security: `egress` `NONE` (offline) or `ALLOWLIST` (public hosts only), `allowed_roots` logical names, `secret_refs` as `secretref://` only, classification ceiling `INTERNAL`. Runtime `CONTAINER`: code not reviewed in-tree never runs `IN_PROCESS`. Provenance `OPERATOR_SUPPLIED`, `source_digest` = the pinned image digest. |
+| Failure semantics prose | Pack V1 closed failure vocabulary (`RESEARCH_*`); only `RESEARCH_RUNTIME_UNAVAILABLE` is retryable; a timeout never retries with a weaker network or model class. |
+
+Research-specific contracts stay in `src/pados/packs/research/`:
+- `CampaignRequest`, pinned by digest as a task parameter;
+- `ResearchRunOutput`, the untrusted runtime return;
+- `ResearchRunManifest`, which PADOS derives;
+- `research_projection`, which hands off to the existing `normalize_capability_result` -> `compose_results` path. The resulting candidate stays `PENDING_GOVERNED_ACCEPTANCE`.
 
 ## Goals
 
@@ -168,6 +190,8 @@ A profile binds:
 
 Task callers select only a registered profile id. They cannot substitute an image, executable, command, mount, or secret.
 
+Since Pack V1 there is no profile registry: each profile is one Pack V1 version (`research_pack_manifest`). The example profile names above are illustrative; no profile with real digests is committed. Tests use synthetic profiles.
+
 ## Policy and secrets
 
 - Provider keys stay server-side as `SecretRef`-backed configuration.
@@ -257,5 +281,21 @@ Before PADOS integration is marked live, run AI-Scientist-v3 standalone on its C
 `RESEARCH_PACK_V0_STANDALONE_CIRCPACK_FIXTURE = PASS`
 
 `RESEARCH_PACK_V0_LIVE_DOCKER_UAT = PASS`
+
+Status on 2026-10-31:
+
+| Gate | Status |
+|---|---|
+| `RESEARCH_PACK_V0_CONTRACTS` | PASS (synthetic) |
+| `RESEARCH_PACK_V0_MANIFEST_VERIFICATION` | PASS (synthetic, incl. mutation checks) |
+| `RESEARCH_PACK_V0_POLICY_BOUNDARY` | PASS (agent allowlist, egress, classification, path admission, boundary tests) |
+| `RESEARCH_PACK_V0_STANDALONE_CIRCPACK_FIXTURE` | **NOT RUN**: blocked externally (see below) |
+| `RESEARCH_PACK_V0_LIVE_DOCKER_UAT` | **`REAL_RUNTIME_NOT_VALIDATED`** |
+
+External blocker: upstream `agsci run examples/circpack` needs coding-agent provider credentials. The README asks
+for `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` in a `.env`, and warns that agents inherit them with full tool
+permissions. No such credential is available to the implementing session, and none may be committed. Docker itself
+is available on the VMware Linux VM. The circpack fixture and live UAT therefore wait for an operator-provided
+credential.
 
 Only after those gates should the capability move from EXPERIMENTAL toward ACTIVE. V1 phase-level orchestration is a separate acceptance milestone.
