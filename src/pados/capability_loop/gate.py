@@ -40,14 +40,32 @@ _CREDENTIAL_NAME = re.compile(
 class GateCode:
     ALLOWED = "ALLOWED"
     TARGET_NOT_REGISTERED = "TARGET_NOT_REGISTERED"
+    TARGET_REFERENCE_MISMATCH = "TARGET_REFERENCE_MISMATCH"
     TARGET_PROJECT_MISMATCH = "TARGET_PROJECT_MISMATCH"
     TARGET_NOT_AUTHORIZED = "TARGET_NOT_AUTHORIZED"
     TARGET_UNAVAILABLE = "TARGET_UNAVAILABLE"
     TARGET_OUTSIDE_ALLOWED_ROOT = "TARGET_OUTSIDE_ALLOWED_ROOT"
     CLASSIFICATION_EXCEEDS_TARGET = "CLASSIFICATION_EXCEEDS_TARGET"
+    CAPABILITY_IDENTITY_MISMATCH = "CAPABILITY_IDENTITY_MISMATCH"
     CREDENTIAL_EXPOSURE = "CREDENTIAL_EXPOSURE"
     WORK_CONTRACT_MISMATCH = "WORK_CONTRACT_MISMATCH"
     GRANT_REFUSED = "GRANT_REFUSED"
+    SESSION_NOT_BOUND = "SESSION_NOT_BOUND"  # the binding authority has no binding for this session
+    SESSION_BIND_REFUSED = "SESSION_BIND_REFUSED"  # the authority refused to bind the new session (fail closed)
+    SESSION_BIND_FINALIZE_FAILED = "SESSION_BIND_FINALIZE_FAILED"  # creation evidence recorded, binding not committed
+    SESSION_BINDING_UNVERIFIABLE = "SESSION_BINDING_UNVERIFIABLE"  # authority integrity/anchor check failed
+    SESSION_PROVIDER_MISMATCH = "SESSION_PROVIDER_MISMATCH"  # session was created by a different provider
+    SESSION_PROJECT_MISMATCH = "SESSION_PROJECT_MISMATCH"  # follow-up contract is for another project
+
+
+def normalized_capability_id(required: str) -> str:
+    """The bare capability id of a required capability (``CAPABILITY:OCR_TEXT`` -> ``OCR_TEXT``).
+
+    The gate authorizes a capability by its bare id; the grant scope is ``CAPABILITY:<ID>``. A request's
+    ``required_capability`` is already bare, but an optional grant-scope prefix is stripped defensively so
+    the identity comparison is on a single canonical form.
+    """
+    return required.split(":", 1)[1] if required.startswith("CAPABILITY:") else required
 
 
 @dataclass(frozen=True)
@@ -91,6 +109,11 @@ def _target_checks(request: DiscoveryRequest, target: TargetRegistration | None,
     checks.append((GateCode.TARGET_NOT_REGISTERED, target is not None))
     if target is None:
         return GateCode.TARGET_NOT_REGISTERED, None
+    # The registration handed to the gate must be the one the request names: bind target_ref before any
+    # path resolution or provider call, so a receipt/candidate can never describe a different target.
+    checks.append((GateCode.TARGET_REFERENCE_MISMATCH, target.target_ref == request.target_ref))
+    if target.target_ref != request.target_ref:
+        return GateCode.TARGET_REFERENCE_MISMATCH, None
     checks.append((GateCode.TARGET_PROJECT_MISMATCH, target.project_id == request.project_id))
     if target.project_id != request.project_id:
         return GateCode.TARGET_PROJECT_MISMATCH, None
@@ -126,6 +149,12 @@ def evaluate_discovery(request: DiscoveryRequest, *, target: TargetRegistration 
     refusal, resolved = _target_checks(request, target, checks)
     if refusal is not None or resolved is None:
         return _refused(refusal or GateCode.TARGET_UNAVAILABLE, checks)
+    # The capability the request claims must be the capability the gate authorizes. The request never gets
+    # to name an arbitrary capability id that the receipt/candidate would then inherit from the grant.
+    identity_ok = normalized_capability_id(request.required_capability) == capability.capability_id
+    checks.append((GateCode.CAPABILITY_IDENTITY_MISMATCH, identity_ok))
+    if not identity_ok:
+        return _refused(GateCode.CAPABILITY_IDENTITY_MISMATCH, checks)
     no_secrets = not contract.get("secret_refs")
     checks.append((GateCode.CREDENTIAL_EXPOSURE, no_secrets))
     if not no_secrets:

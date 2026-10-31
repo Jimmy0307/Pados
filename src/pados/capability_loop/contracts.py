@@ -16,7 +16,7 @@ import re
 from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pados.capability.model import checked_display_text
 from pados.enterprise.classification import DataClassification
@@ -224,6 +224,22 @@ class DiscoveryOutcome(_Frozen):
     @classmethod
     def _limitations(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return _codes(value)
+
+    @model_validator(mode="after")
+    def _status_failure_consistent(self) -> DiscoveryOutcome:
+        # An AVAILABLE answer carries no failure; any non-AVAILABLE answer must name why it failed. This
+        # makes "status != AVAILABLE with failure=None" impossible to construct, so ``failure is None`` can
+        # never be mistaken for success on its own.
+        if self.status is ProviderStatus.AVAILABLE and self.failure is not None:
+            raise ValueError("OUTCOME_AVAILABLE_WITH_FAILURE")
+        if self.status is not ProviderStatus.AVAILABLE and self.failure is None:
+            raise ValueError("OUTCOME_NON_AVAILABLE_REQUIRES_FAILURE")
+        return self
+
+    @property
+    def is_successful(self) -> bool:
+        """The whole success invariant: available, no failure, and complete (never partial)."""
+        return self.status is ProviderStatus.AVAILABLE and self.failure is None and not self.partial
 
 
 @runtime_checkable

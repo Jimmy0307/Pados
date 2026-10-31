@@ -19,6 +19,7 @@ from pados.capability_loop.contracts import (
     CapabilityState,
     DiscoveryOutcome,
     DiscoveryRequest,
+    FailureCode,
 )
 from pados.capability_loop.gate import GateCode, GateDecision, TargetRegistration, evaluate_discovery
 from pados.capability_loop.receipts import OperationKind, OperationReceipt, OperationResult
@@ -83,20 +84,30 @@ class DiscoveryService:
 
     def _record_outcome(self, request: DiscoveryRequest, decision: GateDecision, request_digest: str,
                         outcome: DiscoveryOutcome) -> OperationReceipt:
-        state, reason = _candidate_state(outcome)
+        # Accept into the loop only under the whole-success invariant. A positive support claim additionally
+        # requires at least one evidence item; otherwise there is no digest supporting the discovered
+        # capability and the model-valid response is normalized as malformed rather than accepted.
+        missing_supported_evidence = outcome.capability_supported and not outcome.evidence
+        accepted = outcome.is_successful and not missing_supported_evidence
         evidence_digests = tuple(item.evidence_digest for item in outcome.evidence)
-        candidate = CapabilityCandidate(
-            candidate_id=self._candidate_id(request), required_capability=request.required_capability,
-            provider_id=self._provider.provider_id, state=state, reason_code=reason,
-            evidence=outcome.evidence, limitations=outcome.limitations)
-        provider_failed = outcome.failure is not None
+        candidate = None
+        state: CapabilityState | None = None
+        failure = outcome.failure
+        if accepted:
+            state, reason = _candidate_state(outcome)
+            candidate = CapabilityCandidate(
+                candidate_id=self._candidate_id(request), required_capability=request.required_capability,
+                provider_id=self._provider.provider_id, state=state, reason_code=reason,
+                evidence=outcome.evidence, limitations=outcome.limitations)
+        elif failure is None:
+            failure = FailureCode.MALFORMED_RESPONSE if missing_supported_evidence else FailureCode.PARTIAL_RESULT
         return self._store.append({
             "operation": OperationKind.DISCOVER, "project_id": request.project_id,
             "request_digest": request_digest, "provider_id": self._provider.provider_id,
             "capability_id": request.required_capability, "runtime_version": outcome.runtime_version,
             "policy_code": GateCode.ALLOWED, "policy_decision_hash": decision.policy_decision_hash,
-            "result": OperationResult.PROVIDER_FAILED if provider_failed else OperationResult.RECORDED,
-            "failure": outcome.failure, "evidence_digests": evidence_digests,
-            "limitations": outcome.limitations, "accepted_into_loop": not provider_failed,
-            "state_before": None, "state_after": None if provider_failed else state},
-            candidate=None if provider_failed else candidate)
+            "result": OperationResult.RECORDED if accepted else OperationResult.PROVIDER_FAILED,
+            "failure": None if accepted else failure, "evidence_digests": evidence_digests,
+            "limitations": outcome.limitations, "accepted_into_loop": accepted,
+            "state_before": None, "state_after": state},
+            candidate=candidate)

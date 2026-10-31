@@ -42,8 +42,8 @@ _WINDOWS_REPLACE_RETRIES = 8
 _WINDOWS_REPLACE_RETRYABLE_ERRORS = frozenset({5, 32, 33})
 
 
-def _replace_state(source: Path, destination: Path) -> None:
-    """Replace anchor state, briefly retrying transient Windows sharing/access failures.
+def replace_with_retry(source: Path, destination: Path) -> None:
+    """``os.replace``, briefly retrying transient Windows sharing/access failures.
 
     Windows readers and on-access scanners can temporarily deny replacement of an open target.
     The retry is bounded and only covers the native sharing/access error codes; every persistent
@@ -58,6 +58,9 @@ def _replace_state(source: Path, destination: Path) -> None:
                     or attempt + 1 == _WINDOWS_REPLACE_RETRIES):
                 raise
             time.sleep(min(0.01 * (2 ** attempt), 0.25))
+
+
+_replace_state = replace_with_retry  # the anchor's own state replace (tests substitute it)
 
 
 class AnchorError(RuntimeError):
@@ -138,15 +141,33 @@ class FileAnchor:
         self._secure(info)
         return True
 
-    def _state(self) -> tuple[Checkpoint | None, tuple[Checkpoint, ...]] | None:
-        """(latest, markers), or None before initialization (caller holds the lock)."""
+    def _state(self, *, advancing: bool = False) -> tuple[Checkpoint | None, tuple[Checkpoint, ...]] | None:
+        """(latest, markers), or None before initialization (caller holds the lock).
+
+        ``advancing`` (the ``record`` path) additionally requires a COMPLETED initialization: advancing a
+        first-checkpoint head whose sentinel could not be written yet would leave a later-sequence head without
+        its sentinel, which is indistinguishable from a removed sentinel (``ANCHOR_STATE_INVALID`` forever).
+        Reads keep returning the landed first checkpoint meanwhile.
+        """
         initialized, present = self._exists(self._sentinel), self._exists(self._head)
         if not present:
             if initialized:
                 raise AnchorError("ANCHOR_HEAD_LOST")
             return None
+        state = self._read_head()
         if not initialized:
-            raise AnchorError("ANCHOR_STATE_INVALID")
+            # The head is written before the sentinel, so a head without a sentinel is an interrupted FIRST
+            # initialization -- but only while it still holds just the first checkpoint. Complete it; a later
+            # head without its sentinel means the sentinel was removed after initialization: refuse.
+            latest = state[0]
+            if latest is None or latest.seq != 1:
+                raise AnchorError("ANCHOR_STATE_INVALID")
+            self._complete_initialization()
+            if advancing and not self._exists(self._sentinel):
+                raise AnchorError("ANCHOR_INITIALIZATION_INCOMPLETE")  # retryable once the sentinel can be written
+        return state
+
+    def _read_head(self) -> tuple[Checkpoint | None, tuple[Checkpoint, ...]]:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
         with os.fdopen(os.open(self._head, flags), "rb") as handle:
             self._secure(os.fstat(handle.fileno()))
@@ -181,27 +202,55 @@ class FileAnchor:
         if not isinstance(new, Checkpoint) or not (previous is None or isinstance(previous, Checkpoint)):
             raise AnchorError("ANCHOR_CHECKPOINT_INVALID")
         with self._locked():
-            state = self._state()
+            state = self._state(advancing=True)
             current, markers = (None, ()) if state is None else state
             if previous != current:
                 raise AnchorError("ANCHOR_CONFLICT")  # compare-and-set: the caller did not see the latest head
             if not continues(current, new):
                 raise AnchorError("ANCHOR_NOT_CONTINUING")
             kept = (*markers, new)[-self.max_markers:] if marker else markers
+            state_data = {"schema_version": ANCHOR_SCHEMA, "latest": _plain(new),
+                          "markers": [_plain(item) for item in kept]}
             if state is None:
-                self._create_sentinel()
-            self._write({"schema_version": ANCHOR_SCHEMA, "latest": _plain(new),
-                         "markers": [_plain(item) for item in kept]})
+                self._initialize(state_data)
+            else:
+                self._write(state_data)
+
+    def _initialize(self, data: dict[str, Any]) -> None:
+        """First record: head first (atomic replace), sentinel second.
+
+        A sentinel without a head is indistinguishable from a head lost after initialization
+        (``ANCHOR_HEAD_LOST``), so the sentinel is never written before the head exists: any failure or crash
+        before the head replace lands leaves the anchor uninitialized (retryable), and a crash after it leaves a
+        first-checkpoint head without a sentinel, which the next access completes (see ``_state``). No rollback
+        step is needed, so none can fail and strand the anchor.
+        """
+        self._write(data)  # the commit point: once this replace landed the first checkpoint is real
+        self._complete_initialization()
+
+    def _complete_initialization(self) -> None:
+        """Write the sentinel after the head landed. An I/O failure here is DEFERRED, not reported: the head is
+        already committed, and reporting the call as failed would make a caller roll its log back while the
+        anchor keeps the new head (anchor ahead of log, forever). The seq-1 head without a sentinel is completed
+        by the next access (``_state``). A non-I/O refusal (an insecure existing sentinel) still propagates."""
+        try:
+            self._create_sentinel()
+        except OSError:
+            return  # deferred to the next access; never a reason to treat the landed head as uncommitted
 
     def _create_sentinel(self) -> None:
+        """Mark the anchor initialized; idempotent (an interrupted initialization may already have created it)."""
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
         try:
             descriptor = os.open(self._sentinel, flags, 0o600)
-        except FileExistsError as exc:
-            raise AnchorError("ANCHOR_STATE_INVALID") from exc
+        except FileExistsError:
+            self._exists(self._sentinel)  # still a secure regular file (links/foreign owners refused)
+            return
         try:
             self._secure(os.fstat(descriptor))
-            os.write(descriptor, ANCHOR_SCHEMA.encode("ascii"))
+            payload = ANCHOR_SCHEMA.encode("ascii")
+            if os.write(descriptor, payload) != len(payload):
+                raise OSError("ANCHOR_SENTINEL_SHORT_WRITE")
             os.fsync(descriptor)
         finally:
             os.close(descriptor)

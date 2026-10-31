@@ -25,7 +25,11 @@ PADOS has been informed by and validated against real-world enterprise local-AI 
 - **REMOTE CLIENT SENDS INTENT, NOT CONTEXT**
 - **PROVIDER IS NOT AUTHORITY**
 - **CI SUCCESS != DEPLOYMENT AUTHORIZATION**
-- System orchestration governs execution; provider APIs do not define PADOS protocols or authority.
+- **DISCOVERED != VALIDATED**
+- **PACK INSTALLED != AUTHORIZED**
+- **PACK EXECUTION SUCCESS != SEMANTIC ACCEPTANCE**
+- System orchestration governs execution; provider APIs do not define PADOS protocols or authority. A capability pack is not an authority.
+- An optional provider being unavailable is not the platform being blocked: only the capability that depends on it degrades, and it fails closed.
 
 ## Architecture
 
@@ -75,6 +79,8 @@ PADOS can coordinate capability types such as local and cloud language models, O
 
 Recommendations do not install or authorize integrations. **Recommended, installed, registered, authorized, and selected are separate states.**
 
+Capability Pack V1 (schema `pados.capability.pack.v1`) is the versioned packaging and registration convention for these capabilities. It declares existing capability and adapter descriptors and registers them through the existing registry; execution still runs only through the existing executor, verification, receipts and acceptance path. Optional external runtimes such as REA (capability discovery) and OpenMAIC (adaptive learning) supply evidence only; when one is absent or unhealthy, that capability reports unavailable or degraded and the rest of PADOS keeps operating.
+
 ## Local-First / Hardware-Aware
 
 PADOS can use small models, specialized workers, quantized models, bounded context, and available local compute. Cloud escalation can be considered only where policy and task needs permit it. No benchmark claims are made here; local model performance remains pending measurement.
@@ -94,10 +100,17 @@ Report security issues using the process in [SECURITY.md](SECURITY.md).
 
 ## Current Status
 
-**Controlled dogfood: NOT YET DECLARED — Stage A product authority closure passes on VMware Linux (including live PostgreSQL and a live browser approval); Windows-native validation of the same commit is pending. Public release: PENDING owner and legal authorization. These are separate gates.**
+**P7 Authority Baseline: CLOSED at `main@e550141` (PR #16; PR #8 delivered the P7 capability discovery and learning loop). Current phase: Capability Expansion.**
+
+**Local dogfood: CONDITIONAL GO at the immutable tag `PADOS_RC2_LOCAL_DOGFOOD_V1`, for local, supervised, non-sensitive use only ([dogfood boundary](docs/releases/PADOS_RC2_LOCAL_DOGFOOD_V1/DOGFOOD_BOUNDARY.md)). Controlled product dogfood: NOT YET DECLARED — Stage A product authority closure passes on VMware Linux (including live PostgreSQL and a live browser approval); Windows-native validation of the same commit is pending. Public release: PENDING owner and legal authorization. These are separate gates.**
+
+The authority layer is frozen: `TaskEnvelope`, the scheduler, `CapabilityRegistry`, `CapabilityExecutor`, the router, policy, authorization and approval, execution receipts, verification, `ResultCandidate`, CAS semantic acceptance, audit, state and memory, and the P7 session-binding authority. Core is not expanded further. Capability Expansion makes capabilities governed, replaceable and measurable extensions around that layer. The first deliverables are Capability Pack V1 (`pados.capability.pack.v1`, a packaging and registration convention over the existing Capability Fabric, not a new authority) and the Structured Problem Solving reference pack, with 8D as its first profile. AI Scientist (draft PR #17) follows as a Pack V1 consumer for `RESEARCH_CAMPAIGN`; its real runtime is not yet validated.
 
 | Area | Status |
 | --- | --- |
+| Authority layer (P7 Authority Baseline) | Closed and frozen at `main@e550141`; all required checks were green on the PR #16 head before merge |
+| Capability discovery and learning loop (P7) | Merged in PR #8 and hardened in PR #16. REA and OpenMAIC are optional runtimes; their adapters are contract- and failure-tested against fakes. Real-runtime validation: NOT_VALIDATED |
+| Capability Pack V1 and Structured Problem Solving pack | In progress (current phase) |
 | Accepted foundation | Windows-native and VMware Linux baseline accepted at the frozen common-code checkpoint |
 | Capability Fabric V1 | Cross-platform accepted |
 | Task and protocol contracts | Contract-level acceptance from Product Completion V1; live multi-capability execution is not accepted |
@@ -116,7 +129,7 @@ Report security issues using the process in [SECURITY.md](SECURITY.md).
 | Public redistribution | Pending. Repository license metadata does not satisfy the outstanding rights and owner-authorization gate |
 | Public hygiene | Current export scan classified the tracked export, but the required private organization-marker rules were unavailable; the public boundary is not yet accepted |
 
-Stage A product authority closure is implemented and validated on VMware Linux. Controlled dogfood is declared only after the same commit passes Windows-native validation. Public release remains a separate gate and is not implied by local dogfood readiness.
+Stage A product authority closure is implemented and validated on VMware Linux. Controlled product dogfood is declared only after the same commit passes Windows-native validation. Public release remains a separate gate and is not implied by local dogfood readiness.
 
 ## Quick Start
 
@@ -161,11 +174,12 @@ For a cross-origin static deployment, Home Base must explicitly allow the exact 
 
 ## Roadmap
 
+- Capability Expansion (current phase): Capability Pack V1, the Structured Problem Solving reference pack, then AI Scientist as a Pack V1 consumer
 - Controlled Dogfood after product and cross-platform gates close
 - Local intelligence stack and measured model benchmarking
 - Live OCR and Vision engines
 - Embedding and reranker capabilities
-- Capability Packs, Skills, and governed MCP integrations
+- Skills and governed MCP integrations
 - Work Map refinement driven by real use
 - Mac and additional Home Base expansion
 

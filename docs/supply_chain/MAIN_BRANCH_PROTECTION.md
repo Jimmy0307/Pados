@@ -1,7 +1,10 @@
 # `main` branch protection plan
 
-**Status: PREPARED, NOT APPLIED.** Branch protection is a repository setting. The repository owner applies it; no
-workflow can, and none does.
+**Status: APPLIED, WITH DOCUMENTED DIFFERENCES.** Branch protection is a repository setting. The repository owner
+applies it; no workflow can, and none does. The applied protection (recorded in
+`docs/releases/PADOS_RC2_LOCAL_DOGFOOD_V1/DOGFOOD_BOUNDARY.md`, "Repository controls at the freeze") differs from the
+plan below: 0 required approvals (solo maintainer), `dependency review` is a seventh required check, linear history
+is not required, and conversation resolution is not required. The plan below is kept as written.
 
 ## Requirements
 

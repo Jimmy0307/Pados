@@ -1,8 +1,10 @@
 # Secure CI/CD Supply Chain V1
 
-Status: implemented in the repository. The workflows have **not** been executed on GitHub yet. Everything below that
-depends on GitHub (hosted runners, OIDC, Sigstore attestation, CodeQL upload, dependency review, repository
-settings) is unverified until the first real run.
+Status: implemented in the repository and running on GitHub. `pr-ci`, `security` (CodeQL, secret scan and CI policy,
+dependency review) and `rc-ci` have passed on GitHub-hosted runners (run IDs in
+`docs/releases/PADOS_RC2_LOCAL_DOGFOOD_V1/FREEZE_MANIFEST.md`), and the required checks are enforced on `main`
+(`docs/supply_chain/MAIN_BRANCH_PROTECTION.md`). Parts that only `release-candidate.yml` exercises (OIDC, Sigstore
+attestation) are not recorded as run and stay unverified until their first real run.
 
 ## 1. Authority boundary
 
