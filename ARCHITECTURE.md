@@ -16,8 +16,10 @@ PADOS is an Intelligent Mindmap-driven Portable Cognitive & Execution Operating 
 | Work Map | Rebuildable projection only |
 | Static Web/PWA | Intent sender and projection reader only |
 | CI and Pages | Build/distribution machinery only; never PADOS authority |
+| Capability packs | Versioned extensions registered through the existing registry; never an authority |
+| Optional external runtimes (REA, OpenMAIC) | Evidence providers only; never an authority |
 
-No provider response, graph database, browser, GitHub runner, or model is a new authority.
+No provider response, graph database, browser, GitHub runner, model, or capability pack is a new authority.
 
 ## Task Completion Flow
 
@@ -85,6 +87,25 @@ PADOS has been informed by and validated against real-world enterprise local-AI 
 - **Enterprise Local Runtime Adapter** (`docs/architecture/ENTERPRISE_LOCAL_RUNTIME_INTEROP.md`). An external runtime plane submits evidence: availability, health, leases, device state, artifact digests and benchmark references. The evidence becomes the existing live observations and `RuntimeBinding`, and selection stays with the Worker Router. Leases are evidence, not authorization, and model authorization stays explicit.
 - **Governed Outcome Learning Adapter** (`docs/architecture/GOVERNED_OUTCOME_LEARNING_INTEROP.md`). External problem-solving evidence becomes authenticated outcome observations, then advisory confidence, then inert candidates, which need evaluation and governed promotion. Training is offline and gated, and its result re-enters only as a new measured artifact.
 
+## Capability Packs and Optional Providers
+
+Capability Pack V1 (schema `pados.capability.pack.v1`) is a versioned packaging and registration convention over the existing Capability Fabric (`docs/capability/CAPABILITY_FABRIC_V1.md`). A pack manifest declares existing `CapabilityDescriptor`s and `AdapterDescriptor`s with identity, provenance, runtime and evidence requirements. An operator registers them through the existing `CapabilityRegistry`; execution runs only through the existing `CapabilityExecutor`, verification and receipts; acceptance stays with `ResultCandidate`, governed acceptance and the existing CAS. A pack adds no registry, scheduler, router, executor, receipt type, store, or CAS. Design: `docs/superpowers/specs/2026-10-31-capability-pack-v1-design.md`.
+
+Invariants:
+
+- **MODEL OUTPUT != TRUTH**
+- **EXECUTION COMPLETE != SEMANTIC ACCEPTANCE**
+- **PROVIDER IS NOT AUTHORITY**
+- **DISCOVERED != VALIDATED**
+- **PACK INSTALLED != AUTHORIZED**
+- **PACK EXECUTION SUCCESS != SEMANTIC ACCEPTANCE**
+
+An optional provider being unavailable does not block the platform. REA (capability discovery) and OpenMAIC (adaptive learning) are optional external runtimes behind `pados.capability_loop`. When one is absent, unhealthy, incompatible, or returns malformed data, the dependent capability reports unavailable or degraded, fails closed, and leaves PADOS state unchanged.
+
 ## Implementation State
 
-The frozen common-code foundation and Capability Fabric V1 have accepted cross-platform evidence. Product-completion protocol contracts and deterministic tests are being integrated with Remote Operations and the PWA. Real multi-resource assignment, residual dispatch, complete receipt lineage, and final Windows/VMware evidence must be confirmed before declaring controlled dogfood ready.
+The P7 Authority Baseline is closed. The canonical baseline is `main@e550141` (PR #16, post-merge authorization and runtime hardening; PR #8 delivered the P7 capability discovery and learning loop). The authority layer is frozen: `TaskEnvelope`, the scheduler, `CapabilityRegistry`, `CapabilityExecutor`, the router, policy, authorization and approval, execution receipts, verification, `ResultCandidate`, CAS semantic acceptance, audit, state and memory, and the P7 session-binding authority. Core is not expanded further.
+
+The current phase is Capability Expansion: capabilities become governed, replaceable, measurable extensions around the frozen authority layer. The first deliverables are Capability Pack V1 and the Structured Problem Solving reference pack (8D as the first profile). AI Scientist (draft PR #17) follows as a Pack V1 consumer for `RESEARCH_CAMPAIGN`; its real runtime is not yet validated. The REA and OpenMAIC adapters are contract- and failure-tested against fakes in CI; neither has been validated against a live runtime (real-runtime gates: `NOT_VALIDATED`).
+
+The frozen common-code foundation and Capability Fabric V1 have accepted cross-platform evidence. Product-completion protocol contracts and deterministic tests are being integrated with Remote Operations and the PWA. Real multi-resource assignment, residual dispatch, complete receipt lineage, and final Windows/VMware evidence must be confirmed before declaring controlled product dogfood ready.

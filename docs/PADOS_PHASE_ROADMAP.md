@@ -2,6 +2,10 @@
 
 Last verified: 2026-07-10
 
+> Snapshot as of the date above; it is not the current state. Current state (2026-10-31): the P7 Authority Baseline
+> is CLOSED at `main@e550141` and the current phase is Capability Expansion. See `README.md` (Current Status),
+> `ROADMAP.md` and `PLANS.md`.
+
 ## P6
 
 Status: `FUNCTIONALLY_GREEN_WITH_GOVERNANCE_DEFECTS`
