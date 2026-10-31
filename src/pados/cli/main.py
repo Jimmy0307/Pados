@@ -740,10 +740,11 @@ def serve() -> None:
     """Run the PADOS API on the configured loopback address."""
     import uvicorn
 
-    from pados.control.security import assert_localhost_binding
+    from pados.control.security import assert_localhost_binding, assert_unique_control_token
 
     settings = get_settings()
     assert_localhost_binding(settings)
+    assert_unique_control_token(settings)
     uvicorn.run("pados.api.app:app", host=settings.api_host, port=settings.api_port, log_level="info")
 
 

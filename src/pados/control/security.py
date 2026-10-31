@@ -9,6 +9,7 @@ from typing import Any
 
 from pados.config import Settings
 from pados.memory.security import assert_no_secret
+from pados.security_posture import DEFAULT_CONTROL_TOKEN_HASH
 
 
 def token_hash(control_value: str) -> str:
@@ -19,10 +20,20 @@ CONTROL_TOKEN_HEADER = "X-PADOS-Control-Token"
 
 
 def authorize_token(settings: Settings, control_value: str | None) -> None:
+    # The shipped default hash is public once the source is: while it is configured, nothing authenticates,
+    # whatever token is presented. ``pados init`` writes a unique token and its hash.
+    if settings.control_api_token_hash.upper() == DEFAULT_CONTROL_TOKEN_HASH:
+        raise PermissionError("DEFAULT_CONTROL_TOKEN_REFUSED: run `pados init` to generate a unique control token")
     if not control_value:
         raise PermissionError("missing control token")
     if not hmac.compare_digest(token_hash(control_value), settings.control_api_token_hash.upper()):
         raise PermissionError("invalid control token")
+
+
+def assert_unique_control_token(settings: Settings) -> None:
+    """Refuse to serve while the shipped default control-token hash is configured (nothing could authenticate)."""
+    if settings.control_api_token_hash.upper() == DEFAULT_CONTROL_TOKEN_HASH:
+        raise PermissionError("DEFAULT_CONTROL_TOKEN_REFUSED: run `pados init` to generate a unique control token")
 
 
 def assert_localhost_binding(settings: Settings) -> None:
