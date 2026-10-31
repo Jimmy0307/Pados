@@ -718,8 +718,10 @@ def init(
         "PADOS_ENV=local", "PADOS_RUNTIME_MODE=native", "PADOS_API_HOST=127.0.0.1", "PADOS_API_PORT=8088",
         "PADOS_DB_HOST=127.0.0.1", "PADOS_DB_PORT=5432", "PADOS_DB_USER=pados",
         "PADOS_DB_PASSWORD=" + os.environ.get("PADOS_DB_PASSWORD", "CHANGE_ME"),
-        "PADOS_DB_NAME=pados_local_runtime", "PADOS_OPERATIONAL_DATABASE_NAME=pados_local_runtime",
-        "PADOS_PRODUCT_DATABASE_NAME=pados_proof_runtime", "PADOS_CORPUS_DATABASE_NAME=pados_corpus_runtime",
+        # Dedicated dogfood lanes: the ``pados_*_runtime`` names are reserved for the protected canonical runtime
+        # and `pados doctor` refuses them (PROTECTED_DATABASE_TARGET).
+        "PADOS_DB_NAME=pados_dogfood_operational", "PADOS_OPERATIONAL_DATABASE_NAME=pados_dogfood_operational",
+        "PADOS_PRODUCT_DATABASE_NAME=pados_dogfood_proof", "PADOS_CORPUS_DATABASE_NAME=pados_dogfood_corpus",
         f"PADOS_PRODUCT_WORKSPACE_ROOT={local / 'workspace'}", f"PADOS_PRODUCT_OBJECT_ROOT={local / 'objects'}",
         "PADOS_PRODUCT_LOOP_PROVIDER=AUTO",
         "PADOS_CONTROL_API_TOKEN_HASH=" + hashlib.sha256(control_value.encode("utf-8")).hexdigest().upper(),
