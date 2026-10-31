@@ -41,6 +41,8 @@ from pados.capability.artifacts import ArtifactAccessDenied, ArtifactRef
 from pados.capability.model import (
     AdapterDescriptor,
     CapabilityDescriptor,
+    CapabilityFamily,
+    Determinism,
     LicenseInfo,
     LifecycleState,
     ResourceRequirement,
@@ -73,6 +75,9 @@ _KEY = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CONTRACT = re.compile(r"^[a-z][a-z0-9_.-]{2,79}/v[0-9]{1,3}$")
 _CHECKER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
+_LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
+# Mirrors the registry's own rule (``registry.register_adapter``) so the manifest is refused before any mutation.
+_DETERMINISM_RANK = {Determinism.DETERMINISTIC: 0, Determinism.SEEDED: 1, Determinism.PROBABILISTIC: 2}
 _HOST = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
 
 
@@ -172,10 +177,11 @@ class PackRuntime(_Frozen):
     def _config(cls, value: str) -> str:
         return _match(_SHA256, value, "PACK_RUNTIME_INVALID")
 
-    @field_validator("timeout_seconds")
+    @field_validator("timeout_seconds", mode="before")
     @classmethod
-    def _timeout(cls, value: int) -> int:
-        if isinstance(value, bool) or not 1 <= value <= MAX_TIMEOUT_SECONDS:
+    def _timeout(cls, value: object) -> int:
+        # ``before``: lax int coercion would otherwise turn ``True`` into 1 ahead of this check.
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_TIMEOUT_SECONDS:
             raise ValueError("PACK_RUNTIME_INVALID")
         return value
 
@@ -203,7 +209,13 @@ class PackSecurity(_Frozen):
     @field_validator("egress_hosts")
     @classmethod
     def _hosts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(_match(_HOST, host, "PACK_EGRESS_INCONSISTENT") for host in value)
+        hosts = tuple(_match(_HOST, host, "PACK_EGRESS_INCONSISTENT") for host in value)
+        # An allowlist names public hosts: no IP literals (metadata endpoints, private ranges) and no loopback or
+        # link-local names, which would turn "egress" into access to the local machine or network.
+        for host in hosts:
+            if host.rsplit(".", 1)[-1].isdigit() or host == "localhost" or host.endswith(_LOCAL_SUFFIXES):
+                raise ValueError("PACK_EGRESS_HOST_INVALID")
+        return hosts
 
 
 class FailureCodeSpec(_Frozen):
@@ -314,6 +326,13 @@ def _check_identity(manifest: CapabilityPackManifest) -> None:
         raise ValueError("PACK_ADAPTER_CAPABILITY_UNDECLARED")
     if any(capability not in {item.capability_id for item in manifest.adapters} for capability in declared):
         raise ValueError("PACK_CAPABILITY_WITHOUT_ADAPTER")
+    by_id = {item.capability_id: item for item in manifest.capabilities}
+    for adapter in manifest.adapters:
+        capability = by_id[adapter.capability_id]
+        if _DETERMINISM_RANK[adapter.determinism] > _DETERMINISM_RANK[capability.determinism]:
+            raise ValueError("PACK_ADAPTER_WEAKENS_DETERMINISM")
+        if adapter.delegates_to_worker_router and capability.family is not CapabilityFamily.MODEL_RUNTIME:
+            raise ValueError("PACK_ADAPTER_DELEGATION_INVALID")
     if manifest.provenance.source is not PackSource.IN_TREE and manifest.provenance.source_digest is None:
         raise ValueError("PACK_PROVENANCE_DIGEST_REQUIRED")
 
@@ -334,6 +353,8 @@ def _check_lifecycle(manifest: CapabilityPackManifest) -> None:
 
 def _check_security(manifest: CapabilityPackManifest) -> None:
     security, network = manifest.security, manifest.runtime.network
+    if manifest.provenance.source is not PackSource.IN_TREE and manifest.runtime.runtime_type is RuntimeType.IN_PROCESS:
+        raise ValueError("PACK_RUNTIME_ISOLATION_REQUIRED")  # code not reviewed in-tree never runs in the PADOS process
     ceiling = min(item.max_classification.rank for item in _descriptors(manifest))
     if security.classification_ceiling.rank > ceiling:
         raise ValueError("PACK_CLASSIFICATION_CEILING_EXCEEDS_DESCRIPTOR")
@@ -370,6 +391,8 @@ def _check_verification_and_removal(manifest: CapabilityPackManifest) -> None:
 
 def validate_pack(data: Mapping[str, Any]) -> CapabilityPackManifest:
     """Parse and validate a manifest document; any failure is a closed ``PackManifestError`` code."""
+    if not isinstance(data, Mapping):
+        raise PackManifestError("PACK_MANIFEST_INVALID")
     try:
         return CapabilityPackManifest.model_validate(dict(data))
     except ValidationError as exc:
@@ -446,6 +469,8 @@ class GovernedPackAdapter:
 
 def _check_evidence(manifest: CapabilityPackManifest, output: StageOutput) -> None:
     evidence = output.evidence
+    if not set(evidence) <= set(manifest.evidence_requirements):
+        raise CapabilityAdapterError("PACK_EVIDENCE_UNDECLARED")  # evidence is a declared schema, not a side channel
     if any(evidence.get(key) is None for key in manifest.evidence_requirements):
         raise CapabilityAdapterError("PACK_EVIDENCE_MISSING")
     expected = {"runtime_version": manifest.provider.runtime_version, "provider_id": manifest.provider.provider_id,
@@ -455,12 +480,21 @@ def _check_evidence(manifest: CapabilityPackManifest, output: StageOutput) -> No
         raise CapabilityAdapterError("PACK_EVIDENCE_MISMATCH")
 
 
+class RegisteredView(Protocol):
+    @property
+    def descriptor(self) -> AdapterDescriptor: ...
+
+
 class PackRegistry(Protocol):
     """The operator surface of the existing ``CapabilityRegistry`` a pack registration uses (nothing more)."""
 
     def capability(self, capability_id: str) -> CapabilityDescriptor: ...
 
     def is_installed(self, adapter_id: str) -> bool: ...
+
+    def is_registered(self, adapter_id: str) -> bool: ...
+
+    def adapter(self, adapter_id: str) -> RegisteredView: ...
 
     def register_capability(self, descriptor: CapabilityDescriptor, *, operator: str,
                             reason_code: str = ...) -> CapabilityDescriptor: ...
@@ -491,9 +525,13 @@ def register_pack(registry: PackRegistry, manifest: CapabilityPackManifest,
     Every check runs before the registry is touched: a DISCOVERED pack is a known candidate, not an executable
     one; every declared adapter needs exactly its declared implementation; an adapter id that already exists in
     this registry (registered, superseded or disabled) makes the registration stale; a capability that is already
-    registered is reused only when its descriptor is identical, never silently redefined. The registry then
-    applies its own rules (determinism, lifecycle, revocation) as for any adapter.
+    registered is reused only when its descriptor is identical, never silently redefined; the manifest is
+    re-validated, so an instance built around validation (``model_copy``) is refused. The registry's own adapter
+    rules (determinism, delegation) are already manifest rules. Should the registry still refuse mid-way (for
+    example because it is full), every adapter this call registered is revoked again and the registration is
+    ``PACK_REGISTRATION_INCOMPLETE``: nothing of the pack is left plannable.
     """
+    manifest = validate_pack(manifest.model_dump(mode="json"))
     if manifest.initial_state is CapabilityState.DISCOVERED:
         raise PackManifestError("PACK_DISCOVERED_NOT_REGISTRABLE")
     declared = {item.adapter_id for item in manifest.adapters}
@@ -508,13 +546,17 @@ def register_pack(registry: PackRegistry, manifest: CapabilityPackManifest,
     if any(found is not None and found != descriptor_digest(item)
            for item, found in zip(manifest.capabilities, existing.values(), strict=True)):
         raise PackManifestError("PACK_CAPABILITY_CONFLICT")
-    for capability in manifest.capabilities:
-        if existing[capability.capability_id] is None:
-            registry.register_capability(capability, operator=operator, reason_code=reason_code)
-    for adapter in governed:
-        registry.install(adapter, operator=operator)
-        registry.register_adapter(adapter.descriptor.adapter_id, capability_id=adapter.descriptor.capability_id,
-                                  operator=operator, reason_code=reason_code)
+    try:
+        for capability in manifest.capabilities:
+            if existing[capability.capability_id] is None:
+                registry.register_capability(capability, operator=operator, reason_code=reason_code)
+        for adapter in governed:
+            registry.install(adapter, operator=operator)
+            registry.register_adapter(adapter.descriptor.adapter_id, capability_id=adapter.descriptor.capability_id,
+                                      operator=operator, reason_code=reason_code)
+    except (RegistryError, PermissionError):
+        _revoke_registered(registry, declared, operator=operator)
+        raise PackManifestError("PACK_REGISTRATION_INCOMPLETE") from None
     return PackRegistration(manifest.pack_id, manifest.version, manifest.manifest_digest,
                             tuple(item.adapter_id for item in manifest.adapters))
 
@@ -531,12 +573,35 @@ def _registered(registry: PackRegistry, capability: CapabilityDescriptor) -> str
     return descriptor_digest(found.model_copy(update={"lifecycle": capability.lifecycle}))
 
 
+def _revoke_registered(registry: PackRegistry, adapter_ids: set[str], *, operator: str) -> None:
+    """Compensation after a refused registration: revoke what this call registered (installed-only adapters are
+    never plannable). Best effort by construction -- a failure here still leaves the registration refused."""
+    for adapter_id in sorted(adapter_ids):
+        try:
+            if registry.is_registered(adapter_id):
+                registry.set_adapter_lifecycle(adapter_id, LifecycleState.REVOKED, operator=operator,
+                                               reason_code="PACK_REGISTRATION_INCOMPLETE")
+        except (RegistryError, PermissionError):
+            continue
+
+
 def disable_pack(registry: PackRegistry, manifest: CapabilityPackManifest, *, operator: str,
                  reason_code: str = "PACK_DISABLED") -> None:
-    """Operator action: revoke every adapter of the pack (unplannable; receipts and history are kept)."""
-    for adapter in manifest.adapters:
-        registry.set_adapter_lifecycle(adapter.adapter_id, LifecycleState.REVOKED, operator=operator,
-                                       reason_code=reason_code)
+    """Operator action: revoke every adapter of the pack (unplannable; receipts and history are kept).
+
+    All or nothing: every adapter must be registered as this pack declared it before any is revoked. Already
+    revoked adapters are left as they are, so disabling twice changes nothing.
+    """
+    for declared in manifest.adapters:
+        if not registry.is_registered(declared.adapter_id):
+            raise PackManifestError("PACK_NOT_REGISTERED")
+        live = registry.adapter(declared.adapter_id).descriptor
+        if descriptor_digest(live.model_copy(update={"lifecycle": declared.lifecycle})) != descriptor_digest(declared):
+            raise PackManifestError("PACK_IMPLEMENTATION_MISMATCH")  # a different pack owns this adapter id
+    for declared in manifest.adapters:
+        if registry.adapter(declared.adapter_id).descriptor.lifecycle is not LifecycleState.REVOKED:
+            registry.set_adapter_lifecycle(declared.adapter_id, LifecycleState.REVOKED, operator=operator,
+                                           reason_code=reason_code)
 
 
 def propose_pack_transition(manifest: CapabilityPackManifest, *, current: CapabilityState, target: CapabilityState,

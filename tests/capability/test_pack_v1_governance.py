@@ -238,3 +238,103 @@ def test_malformed_output_with_complete_evidence_still_fails_verification(tmp_pa
     assert stage.verification is VerificationStatus.FAILED
     assert stage.outputs == ()
     assert result.semantic_authority == "NONE"
+
+
+# -- review hardening: every refusal happens before the registry is touched --------------------------------
+@pytest.mark.parametrize(("changes", "code"), [
+    ({"adapters__0__determinism": "PROBABILISTIC"}, "PACK_ADAPTER_WEAKENS_DETERMINISM"),
+    ({"adapters__0__delegates_to_worker_router": True}, "PACK_ADAPTER_DELEGATION_INVALID"),
+    ({"runtime__timeout_seconds": True}, "PACK_RUNTIME_INVALID"),
+])
+def test_manifests_the_registry_would_refuse_mid_registration_are_refused_at_validation(
+        changes: dict[str, Any], code: str) -> None:
+    with pytest.raises(PackManifestError) as excinfo:
+        _variant(**changes)
+    assert excinfo.value.code == code
+
+
+@pytest.mark.parametrize("document", [None, ["not", "a", "mapping"], "text", 3])
+def test_a_non_mapping_manifest_document_is_a_closed_refusal(document: Any) -> None:
+    with pytest.raises(PackManifestError) as excinfo:
+        validate_pack(document)
+    assert excinfo.value.code == "PACK_MANIFEST_INVALID"
+
+
+def _networked(**changes: Any) -> dict[str, Any]:
+    return {"runtime__network": "WAN_REQUIRED", "capabilities__0__network_requirement": "WAN_REQUIRED",
+            "adapters__0__network_requirement": "WAN_REQUIRED", "security__egress": "ALLOWLIST", **changes}
+
+
+def test_an_allowlisted_public_host_is_accepted() -> None:
+    assert _variant(**_networked(security__egress_hosts=["api.example.org"])).security.egress_hosts
+
+
+@pytest.mark.parametrize("host", ["169.254.169.254", "10.0.0.8", "localhost", "metadata.localhost", "printer.local"])
+def test_ip_literal_loopback_and_link_local_egress_hosts_are_refused(host: str) -> None:
+    with pytest.raises(PackManifestError) as excinfo:
+        _variant(**_networked(security__egress_hosts=[host]))
+    assert excinfo.value.code == "PACK_EGRESS_HOST_INVALID"
+
+
+@pytest.mark.parametrize("source", ["THIRD_PARTY", "OPERATOR_SUPPLIED"])
+def test_external_code_may_not_declare_in_process_execution(source: str) -> None:
+    with pytest.raises(PackManifestError) as excinfo:
+        _variant(provenance__source=source, provenance__source_digest="e" * 64)
+    assert excinfo.value.code == "PACK_RUNTIME_ISOLATION_REQUIRED"
+    assert _variant(provenance__source=source, provenance__source_digest="e" * 64,
+                    runtime__runtime_type="CONTAINER").provenance.source.value == source
+
+
+def test_undeclared_evidence_keys_are_refused() -> None:
+    def extra(produced: StageOutput, _: StageContext) -> StageOutput:
+        return StageOutput(outputs=produced.outputs, evidence=dict(produced.evidence, side_channel="x"))
+
+    with pytest.raises(CapabilityAdapterError) as excinfo:
+        _direct(GovernedPackAdapter(reference.MANIFEST, _Impl(output=extra)))
+    assert excinfo.value.code == "PACK_EVIDENCE_UNDECLARED"
+
+
+class _RefusingRegistry:
+    """The real registry, except that it refuses to register adapters (e.g. it is full)."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def register_adapter(self, *args: Any, **kwargs: Any) -> Any:
+        from pados.capability.registry import RegistryError
+        raise RegistryError("ADAPTER_REGISTRY_FULL")
+
+
+def test_a_registry_refusal_mid_registration_leaves_nothing_plannable(tmp_path: Path) -> None:
+    fab = fabric(tmp_path)
+    with pytest.raises(PackManifestError) as excinfo:
+        register_pack(_RefusingRegistry(fab.registry), reference.MANIFEST, {reference.ADAPTER_ID: reference.adapter()},
+                      operator=OPERATOR)
+    assert excinfo.value.code == "PACK_REGISTRATION_INCOMPLETE"
+    assert not [a for a in fab.registry.adapters_for(reference.CAPABILITY_ID) if a.descriptor.lifecycle.plannable]
+    assert fab.planner().plan(_task(fab)).status is PlanStatus.INFEASIBLE
+
+
+def test_registration_revalidates_a_manifest_that_bypassed_validation(tmp_path: Path) -> None:
+    from pados.capability_loop.contracts import CapabilityState
+    forged = reference.MANIFEST.model_copy(update={"initial_state": CapabilityState.VALIDATED})
+    fab = fabric(tmp_path)
+    with pytest.raises(PackManifestError) as excinfo:
+        register_pack(fab.registry, forged, {reference.ADAPTER_ID: reference.adapter()}, operator=OPERATOR)
+    assert excinfo.value.code == "PACK_INITIAL_STATE_INVALID"
+    assert not fab.registry.is_installed(reference.ADAPTER_ID)
+
+
+def test_disable_is_all_or_nothing_and_idempotent(tmp_path: Path) -> None:
+    fab = fabric(tmp_path)
+    with pytest.raises(PackManifestError) as excinfo:
+        disable_pack(fab.registry, reference.MANIFEST, operator=OPERATOR)
+    assert excinfo.value.code == "PACK_NOT_REGISTERED"
+    register_pack(fab.registry, reference.MANIFEST, {reference.ADAPTER_ID: reference.adapter()}, operator=OPERATOR)
+    disable_pack(fab.registry, reference.MANIFEST, operator=OPERATOR)
+    events = len(fab.registry.events)
+    disable_pack(fab.registry, reference.MANIFEST, operator=OPERATOR)  # already disabled: no change, no error
+    assert len(fab.registry.events) == events
