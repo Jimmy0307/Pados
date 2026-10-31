@@ -238,3 +238,15 @@ def test_verification_is_total_when_a_forged_entry_matches_hostile_bytes() -> No
                     if e.relative_path == path else e for e in manifest.artifacts)
     forged = manifest.model_copy(update={"artifacts": entries})
     assert verify_run_manifest(forged, dict(promoted, **{path: HUGE}), campaign=request()) is False
+
+
+# -- Codex review (6c4b71b): resume continuity re-checked; profile ids fit the pack version bound -----------------
+def test_verification_rechecks_resume_continuity_against_the_pinned_campaign() -> None:
+    campaign = request(resume={"upstream_run_id": RUN_ID, "completed_phases": ["task_draft"]})
+    manifest, promoted = _build(output(), campaign=campaign)
+    assert verify_run_manifest(manifest, promoted, campaign=campaign)
+    other_run = manifest.model_copy(update={"upstream_run_id": "20261031_999999"})
+    assert not verify_run_manifest(other_run, promoted, campaign=campaign)
+    pending = tuple(p.model_copy(update={"state": PhaseState.PENDING}) if p.phase.value == "task_draft" else p
+                    for p in manifest.phases)
+    assert not verify_run_manifest(manifest.model_copy(update={"phases": pending}), promoted, campaign=campaign)

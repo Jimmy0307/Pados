@@ -26,7 +26,8 @@ MAX_CLAIMS = 64
 _TOKEN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_PROFILE_ID = re.compile(r"^[a-z][a-z0-9_.-]{2,63}$")
+# 3-38 characters: the pack version is ``0.<profile_id>`` and Pack V1 bounds versions at 40 characters.
+_PROFILE_ID = re.compile(r"^[a-z][a-z0-9_.-]{2,37}$")
 _REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,38}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
 

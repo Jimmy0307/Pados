@@ -219,12 +219,13 @@ def _status(records: tuple[PhaseRecord, ...]) -> RunStatus:
     return RunStatus.COMPLETED if all(s is PhaseState.COMPLETED for s in states) else RunStatus.PARTIAL
 
 
-def _check_resume(campaign: CampaignRequest, output: ResearchRunOutput, records: tuple[PhaseRecord, ...]) -> None:
+def _check_resume(campaign: CampaignRequest, upstream_run_id: str, records: tuple[PhaseRecord, ...]) -> None:
+    """A resume continues exactly the named run, and every phase it already completed stays completed."""
     resume = campaign.resume
     if resume is None:
         return
     completed = {record.phase for record in records if record.state is PhaseState.COMPLETED}
-    if resume.upstream_run_id != output.upstream_run_id or not set(resume.completed_phases) <= completed:
+    if resume.upstream_run_id != upstream_run_id or not set(resume.completed_phases) <= completed:
         raise ResearchError("RESEARCH_RESUME_MISMATCH")
 
 
@@ -239,7 +240,7 @@ def build_run_manifest(raw: object, *, campaign: CampaignRequest,
     records = _phases(output, campaign)
     entries, promoted, quarantined = _artifacts(output.files)
     _check_envelopes(records, entries)
-    _check_resume(campaign, output, records)
+    _check_resume(campaign, output.upstream_run_id, records)
     metrics = read_final_evaluation(promoted.get(FINAL_EVALUATION_PATH)) if _evaluated(records) else None
     claims = _claims(output.claims, metrics)
     snapshot = hashlib.sha256(json.dumps(sorted((e.relative_path, e.sha256) for e in entries
@@ -271,6 +272,7 @@ def verify_run_manifest(manifest: ResearchRunManifest, promoted: Mapping[str, by
                 entry.kind or len(data) != entry.size_bytes or hashlib.sha256(data).hexdigest() != entry.sha256):
             return False
     try:
+        _check_resume(campaign, manifest.upstream_run_id, manifest.phases)
         _check_envelopes(manifest.phases, manifest.artifacts)
         evaluated = _evaluated(manifest.phases)
         metrics = read_final_evaluation(promoted.get(FINAL_EVALUATION_PATH)) if evaluated else None

@@ -379,3 +379,10 @@ def test_the_projection_is_bound_to_the_request_the_task_pinned() -> None:
     other = rp.task_parameters(profile(), rp.canonical_request(request(budget_profile="other")))["request_digest"]
     with pytest.raises(ResearchError, match="RESEARCH_MANIFEST_UNVERIFIED"):
         rp.research_projection(_outputs(out, store), goal_id="goal-research", request_digest=other)
+
+
+def test_every_valid_profile_id_yields_a_valid_pack_version() -> None:
+    longest = "agsci." + "c" * 32  # 38 characters: the longest accepted profile id
+    assert validate_pack(rp.research_pack_manifest(profile(profile_id=longest)).model_dump(mode="json"))
+    with pytest.raises(ValueError):
+        profile(profile_id="agsci.docker.cpu.claude.research.default")  # 40 characters: refused up front
