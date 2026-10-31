@@ -1,7 +1,38 @@
 # PLANS
 
-Date: 2026-07-10
-Project branch: `codex/p6-9-worker-router`
+Date: 2026-10-31
+Project branch: `feat/capability-expansion-v1` (base `main@e550141`)
+
+## Current Phase: Capability Expansion
+
+P7 Authority Baseline: `CLOSED`. Canonical baseline: `main@e550141` (PR #16 merged; PR #8 delivered the P7
+capability discovery and learning loop).
+
+The authority layer is frozen and Core is not expanded further: `TaskEnvelope`, scheduler, `CapabilityRegistry`,
+`CapabilityExecutor`, router, policy, authorization and approval, execution receipts, verification, `ResultCandidate`,
+CAS semantic acceptance, audit, state and memory, and the P7 session-binding authority.
+
+Scope:
+
+- Capability Pack V1 (schema `pados.capability.pack.v1`): a versioned packaging and registration convention over the
+  existing Capability Fabric, not a new authority.
+- Structured Problem Solving reference pack, first profile 8D.
+- Next: AI Scientist (draft PR #17) as a Pack V1 consumer for `RESEARCH_CAMPAIGN`. Real runtime not yet validated.
+
+Invariants:
+
+- MODEL OUTPUT != TRUTH
+- EXECUTION COMPLETE != SEMANTIC ACCEPTANCE
+- PROVIDER IS NOT AUTHORITY
+- DISCOVERED != VALIDATED
+- PACK INSTALLED != AUTHORIZED
+- PACK EXECUTION SUCCESS != SEMANTIC ACCEPTANCE
+- A capability pack is not an authority.
+- An optional provider being unavailable is not the platform being blocked. REA or OpenMAIC being unavailable
+  degrades only that capability, fail-closed.
+
+Real REA and OpenMAIC runtime validation: `NOT_VALIDATED`. The adapters are contract- and failure-tested against fakes
+in CI; no live runtime was contacted.
 
 ## Active Project Type
 
@@ -9,9 +40,9 @@ Personal Codex autonomous development operating layer.
 
 ## Risk Level
 
-Current risk: MEDIUM after P6.10 completed with full validation.
+Current risk: MEDIUM.
 
-Reason: P6.10 adds one approved Task executed through bounded deterministic iterations. P6.10 validation passes; P6.11 is unblocked but remains future work. Docker Desktop remains optional.
+Reason: the authority layer is frozen at the P7 Authority Baseline. Capability Expansion adds governed packs around it without changing Core semantics. Real external runtimes (REA, OpenMAIC, AI Scientist) are not validated. Docker Desktop remains optional.
 
 ## Required Checks
 
@@ -64,7 +95,8 @@ Blocked validation:
 
 ## P7 Status
 
-P7 completed its P6.7 Context Memory Foundation slice.
+P7 completed its P6.7 Context Memory Foundation slice. (Earlier numbering; this is not the P7 Authority Baseline
+described under Current Phase.)
 
 ## P6.7 Status
 

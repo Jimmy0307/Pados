@@ -3,6 +3,10 @@
 Last verified: 2026-07-10
 Canonical source: this repository plus PostgreSQL runtime state when database is available. Runtime validation is capability-based; Docker is an optional adapter, not a core requirement. P6.6 native acceptance is complete.
 
+> Snapshot as of the date above; it is not the current state. Current state (2026-10-31): the P7 Authority Baseline
+> is CLOSED at `main@e550141` and the current phase is Capability Expansion. See `README.md` (Current Status),
+> `ROADMAP.md` and `PLANS.md`.
+
 ## Current Release Line
 
 - P6 development: `ACCEPTED_NATIVE_CORE`

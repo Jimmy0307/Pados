@@ -1,5 +1,28 @@
 # PADOS Roadmap
 
+## P7 Authority Baseline: CLOSED
+
+Canonical baseline: `main@e550141` (PR #16, post-merge authorization and runtime hardening; PR #8 delivered the P7
+capability discovery and learning loop). The authority layer is frozen: `TaskEnvelope`, scheduler,
+`CapabilityRegistry`, `CapabilityExecutor`, router, policy, authorization and approval, execution receipts,
+verification, `ResultCandidate`, CAS semantic acceptance, audit, state and memory, and the P7 session-binding
+authority. Core is not expanded further.
+
+## Capability Expansion: CURRENT PHASE
+
+Capabilities become governed, replaceable, measurable extensions around the frozen authority layer.
+
+- Capability Pack V1 (schema `pados.capability.pack.v1`): a versioned packaging and registration convention over the
+  existing Capability Fabric, not a new authority
+  (`docs/superpowers/specs/2026-10-31-capability-pack-v1-design.md`)
+- Structured Problem Solving reference pack, with 8D as the first profile
+- Next: AI Scientist (draft PR #17) as a Pack V1 consumer for `RESEARCH_CAMPAIGN`; real runtime not yet validated
+
+Invariants: MODEL OUTPUT != TRUTH; EXECUTION COMPLETE != SEMANTIC ACCEPTANCE; PROVIDER IS NOT AUTHORITY;
+DISCOVERED != VALIDATED; PACK INSTALLED != AUTHORIZED; PACK EXECUTION SUCCESS != SEMANTIC ACCEPTANCE. A capability
+pack is not an authority. An optional provider being unavailable (for example the REA or OpenMAIC external runtime)
+degrades only the capability that depends on it, fail-closed; it does not block the platform.
+
 ## Product Completion V1
 
 Close cross-platform validation for task protocols, residual completion, Work Graph projection, existing-scheduler integration, authenticated mobile intents, recommendation governance, and the deterministic end-to-end loop. Keep the accepted Core, policy, CAS, audit, memory, and Capability Fabric foundations frozen.
@@ -7,6 +30,9 @@ Close cross-platform validation for task protocols, residual completion, Work Gr
 ## Controlled Dogfood
 
 Begin only after critical and high findings are closed, the task-to-acceptance path is validated on Windows and VMware Linux, mobile remote intent behavior is verified, and repository/publication boundaries are reviewed.
+
+Separately, local dogfood is a CONDITIONAL GO at the immutable tag `PADOS_RC2_LOCAL_DOGFOOD_V1`, for local,
+supervised, non-sensitive use only (`docs/releases/PADOS_RC2_LOCAL_DOGFOOD_V1/DOGFOOD_BOUNDARY.md`).
 
 ## Capability and Runtime Expansion
 
@@ -21,7 +47,7 @@ Begin only after critical and high findings are closed, the task-to-acceptance p
   stay with their owners.
 - Live OCR and Vision engines
 - Embedding and reranker capabilities
-- Capability Packs and deterministic algorithm integrations
+- Capability Packs (Pack V1 is the current phase; see above) and deterministic algorithm integrations
 - Governed Skills and MCP registration and authorization
 - Office and engineering adapters, including CAD capability evaluation
 
@@ -39,4 +65,7 @@ Large models and optional OCR/Vision engines are runtime expansion work; they ar
 - Herdr live UAT
 - Physical hotspot/cellular UAT
 - Local model benchmark: done on the Windows reference node (Stage B); other devices pending
+- Real REA and OpenMAIC runtime validation: `NOT_VALIDATED`; the adapters are contract- and failure-tested against
+  fakes only
+- AI Scientist real runtime validation
 - Public redistribution rights and license decision
