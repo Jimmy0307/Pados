@@ -120,7 +120,8 @@ The authority layer is frozen: `TaskEnvelope`, the scheduler, `CapabilityRegistr
 | Work Map and assignment | Rebuildable lineage projection from task through residual, receipts, verification, approval and ResultReceipt to the accepted state (projection only); Work Map UI rendering of the full lineage is limited |
 | Mobile Remote Operations | Live local E2E passed on VMware Linux: mobile PWA in Chromium -> guarded Home Base -> PostgreSQL -> CAS with a virtual WebAuthn authenticator |
 | Product closure validation | VMware Linux validation recorded; Windows-native validation and exact product-code parity are pending |
-| Product database migration | Operational head `20261007_0017` validated on disposable PostgreSQL (fresh and previous head) on Linux; Windows pending |
+| Product database migration | Operational head `20261010_0019` (`pados.config`); the Quickstart lane migrations run in the local dogfood E2E on Windows and VMware Linux |
+| Local supervised dogfood E2E | `scripts/dogfood/local_dogfood_e2e.py`: init → migrations → doctor → serve → approved deterministic task → evidence → governance negatives → restart → ResultCandidate/step-up/single CAS, passing on Windows 11 and VMware Linux at the same commit (branch `feat/local-dogfood-usability-20261031`, not yet merged) |
 | Static Pages build | Prepared in the prior product phase; not deployed |
 | Live OCR backend | Pending installation and validation |
 | Herdr live UAT | Pending |

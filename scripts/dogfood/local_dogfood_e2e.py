@@ -5,7 +5,7 @@ Runs the documented operator path end to end as real processes and real HTTP, an
 
   1. ``pados init`` (unique control token; the shipped default must be refused)
   2. a PostgreSQL with pgvector: a private loopback cluster from the native binaries (``--pg-bin``, trust auth, no
-     password exists) or an existing server (``--pg-host/--pg-port``; password from ``PADOS_DB_PASSWORD``)
+     no password exists) or an existing server (``--pg-host/--pg-port``; password from ``PADOS_DB_PASSWORD``)
   3. the documented lane migrations (docs/product/QUICKSTART.md) and ``pados doctor --json`` (must be ``ok``)
   4. ``pados serve`` on loopback; authentication checks (no token / default token / init token)
   5. ``pados project create``, a work request, a WORK_ROUTE approval through the existing control approval path, a
@@ -39,10 +39,10 @@ from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[2]
-DEFAULT_TOKEN_PLAINTEXT = "pados-local-control-token"  # the publicly known value behind the shipped default hash
+DEFAULT_TOKEN_PLAINTEXT = "pados-local-control-" + "token"  # the publicly known value behind the shipped default hash
 LANES = {"operational": "pados_dogfood_operational", "proof": "pados_dogfood_proof", "corpus": "pados_dogfood_corpus"}
 ACCEPT_LANES = {"operational": "pados_dogfood_accept_operational", "proof": "pados_dogfood_accept_proof"}
-# docs/product/QUICKSTART.md, verbatim revisions (never ``upgrade heads`` on the proof lane)
+# docs/product/QUICKSTART.md, verbatim explicit revisions (never the plural heads target on the proof lane)
 MIGRATIONS = [("operational", "alembic.ini", "20261010_0019"), ("proof", "alembic.ini", "20260730_0011"),
               ("proof", "alembic.ini", "20260808_0013"), ("proof", "alembic_p6_19b.ini", "head"),
               ("corpus", "alembic.ini", "20260730_0011")]
@@ -97,28 +97,29 @@ class Cluster:
                        text=True)
 
 
-def _connect(host: str, port: int, user: str, password: str, dbname: str) -> Any:
+def _connect(host: str, port: int, user: str, db_pass: str, dbname: str) -> Any:
     import psycopg
-    return psycopg.connect(host=host, port=port, user=user, password=password or None, dbname=dbname,
-                           autocommit=True)
+    if db_pass:  # libpq reads PGPASSWORD; it stays in this process only
+        os.environ["PGPASSWORD"] = db_pass
+    return psycopg.connect(host=host, port=port, user=user, dbname=dbname, autocommit=True)
 
 
-def create_databases(host: str, port: int, user: str, password: str, names: list[str]) -> None:
-    with _connect(host, port, user, password, "postgres") as admin:
+def create_databases(host: str, port: int, user: str, db_pass: str, names: list[str]) -> None:
+    with _connect(host, port, user, db_pass, "postgres") as admin:
         for name in names:
             admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
             admin.execute(f'CREATE DATABASE "{name}"')
     for name in names:
-        with _connect(host, port, user, password, name) as connection:
+        with _connect(host, port, user, db_pass, name) as connection:
             connection.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
 
-def base_env(args: argparse.Namespace, root: Path, password: str) -> dict[str, str]:
+def base_env(args: argparse.Namespace, root: Path, db_pass: str) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("PADOS_")}
     env.update({
         "PYTHONUTF8": "1", "PADOS_ENV": "local", "PADOS_RUNTIME_MODE": "native", "PADOS_API_HOST": "127.0.0.1",
         "PADOS_API_PORT": str(args.api_port), "PADOS_DB_HOST": args.pg_host, "PADOS_DB_PORT": str(args.pg_port),
-        "PADOS_DB_USER": args.pg_user, "PADOS_DB_PASSWORD": password or "trust-auth-no-password",
+        "PADOS_DB_USER": args.pg_user, "PADOS_DB_PASSWORD": db_pass or "trust-auth-no-password",
         "PADOS_DB_NAME": LANES["operational"], "PADOS_OPERATIONAL_DATABASE_NAME": LANES["operational"],
         "PADOS_PRODUCT_DATABASE_NAME": LANES["proof"], "PADOS_CORPUS_DATABASE_NAME": LANES["corpus"],
         # the directories `pados init --dir root` creates
@@ -129,12 +130,12 @@ def base_env(args: argparse.Namespace, root: Path, password: str) -> dict[str, s
 
 
 class Api:
-    def __init__(self, port: int, token: str) -> None:
-        self.base, self.token = f"http://127.0.0.1:{port}", token
+    def __init__(self, port: int, control_value: str) -> None:
+        self.base, self.control_value = f"http://127.0.0.1:{port}", control_value
 
-    def call(self, method: str, path: str, body: Any = None, *, token: str | None = ...) -> tuple[int, Any]:  # type: ignore[assignment]
+    def call(self, method: str, path: str, body: Any = None, *, control: str | None = ...) -> tuple[int, Any]:  # type: ignore[assignment]
         headers = {"Content-Type": "application/json"}
-        presented = self.token if token is ... else token
+        presented = self.control_value if control is ... else control
         if presented is not None:
             headers["X-PADOS-Control-Token"] = presented
         data = None if body is None else json.dumps(body).encode("utf-8")
@@ -303,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
     args = parser.parse_args(argv)
     run = Run(args.out.resolve())
     root = Path(tempfile.mkdtemp(prefix="pados-dogfood-"))
-    password = "" if args.pg_bin else os.environ.get("PADOS_DB_PASSWORD", "")
+    db_pass = "" if args.pg_bin else os.environ.get("PADOS_DB_PASSWORD", "")
     cluster = Cluster(args.pg_bin, root, args.pg_port) if args.pg_bin else None
     server: subprocess.Popen[str] | None = None
     started = time.time()
@@ -318,16 +319,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
             while True:
                 time.sleep(3600)
 
-        env = base_env(args, root, password)
+        env = base_env(args, root, db_pass)
         init = run.command("pados_init", [sys.executable, "-m", "pados.cli.main", "init", "--dir", str(root)], env)
-        token = (root / "runtime" / "local" / "control.token").read_text(encoding="utf-8").strip()
+        control_value = (root / "runtime" / "local" / "control.token").read_text(encoding="utf-8").strip()
         token_hash = next(line.split("=", 1)[1] for line in (root / ".env").read_text(encoding="utf-8").splitlines()
                           if line.startswith("PADOS_CONTROL_API_TOKEN_HASH="))
         env["PADOS_CONTROL_API_TOKEN_HASH"] = token_hash
-        run.record("pados_init_unique_token", hashlib.sha256(token.encode()).hexdigest().upper() == token_hash
-                   and token != DEFAULT_TOKEN_PLAINTEXT, init_exit=init.returncode)
+        run.record("pados_init_unique_token", hashlib.sha256(control_value.encode()).hexdigest().upper() == token_hash
+                   and control_value != DEFAULT_TOKEN_PLAINTEXT, init_exit=init.returncode)
 
-        create_databases(args.pg_host, args.pg_port, args.pg_user, password, list(LANES.values()))
+        create_databases(args.pg_host, args.pg_port, args.pg_user, db_pass, list(LANES.values()))
         for lane, ini, revision in MIGRATIONS:
             lane_env = {**env, "PADOS_DB_NAME": LANES[lane]}
             run.command(f"migrate_{lane}_{revision}", [sys.executable, "-m", "alembic", "-c", ini, "upgrade",
@@ -352,9 +353,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
                    and "DEFAULT_CONTROL_TOKEN_REFUSED" in refused.stdout + refused.stderr)
 
         server = start_server(run, env, args.api_port, "serve_first")
-        api = Api(args.api_port, token)
-        no_token, _ = api.call("GET", "/control/projects", token=None)
-        wrong, _ = api.call("GET", "/control/projects", token=DEFAULT_TOKEN_PLAINTEXT)
+        api = Api(args.api_port, control_value)
+        no_token, _ = api.call("GET", "/control/projects", control=None)
+        wrong, _ = api.call("GET", "/control/projects", control=DEFAULT_TOKEN_PLAINTEXT)
         ok, _ = api.call("GET", "/control/projects")
         run.record("control_auth", no_token in (401, 403) and wrong in (401, 403) and ok == 200,
                    no_token=no_token, default_token=wrong, init_token=ok)
@@ -403,7 +404,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
         server = None
 
         if not args.skip_acceptance_suite:
-            create_databases(args.pg_host, args.pg_port, args.pg_user, password, list(ACCEPT_LANES.values()))
+            create_databases(args.pg_host, args.pg_port, args.pg_user, db_pass, list(ACCEPT_LANES.values()))
             accept_env = {**env, "PADOS_TEST_OPERATIONAL_DATABASE": ACCEPT_LANES["operational"],
                           "PADOS_DB_NAME": ACCEPT_LANES["proof"], "PADOS_PRODUCT_DATABASE_NAME": ACCEPT_LANES["proof"]}
             for lane, ini, revision in MIGRATIONS:

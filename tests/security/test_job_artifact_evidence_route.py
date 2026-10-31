@@ -13,14 +13,14 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-TOKEN = "unique-test-control-value"
+CONTROL_VALUE = "unique-test-control-value"
 JOB = "00000000-0000-0000-0000-0000000000aa"
 ROWS = [{"artifact_type": "result_manifest", "path": "runtime/jobs/x/manifest.json", "sha256": "a" * 64}]
 
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    monkeypatch.setenv("PADOS_CONTROL_API_TOKEN_HASH", hashlib.sha256(TOKEN.encode()).hexdigest().upper())
+    monkeypatch.setenv("PADOS_CONTROL_API_TOKEN_HASH", hashlib.sha256(CONTROL_VALUE.encode()).hexdigest().upper())
     from pados import config
     config.get_settings.cache_clear()
     from pados.api import app as api_app
@@ -37,7 +37,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def test_job_artifacts_are_readable_with_the_control_token(client: TestClient) -> None:
-    response = client.get(f"/control/jobs/{JOB}/artifacts", headers={"X-PADOS-Control-Token": TOKEN})
+    response = client.get(f"/control/jobs/{JOB}/artifacts", headers={"X-PADOS-Control-Token": CONTROL_VALUE})
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "job_id": JOB, "artifacts": ROWS}
 

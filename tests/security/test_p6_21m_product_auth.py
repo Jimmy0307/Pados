@@ -11,6 +11,9 @@ Verdict discipline enforced by these tests:
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterator
+
 import asyncio
 import json
 from pathlib import Path
@@ -38,7 +41,17 @@ from pados.product_loop.service import ProductLoopService
 from pados.product_loop.state import InMemoryP6_19BStateGateway
 from pados.product_loop.validation import FileValidator
 
-CONTROL_TOKEN = "pados-local-control-" + "token"
+CONTROL_TOKEN = "pados-test-control-" + "value"  # never the public shipped default
+
+@pytest.fixture(autouse=True)
+def _unique_control_hash(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The shipped default hash authenticates nothing: configure the hash of this module's test value."""
+    from pados.config import get_settings
+    monkeypatch.setenv("PADOS_CONTROL_API_TOKEN_HASH", hashlib.sha256(CONTROL_TOKEN.encode()).hexdigest().upper())
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
 BAD_TOKEN = "not-the-control-token"
 SCOPE = "p6-21m-scope"
 OTHER_SCOPE = "p6-21m-other-scope"

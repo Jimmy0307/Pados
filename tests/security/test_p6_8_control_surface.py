@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
 import json
 from pathlib import Path
 
@@ -17,7 +18,17 @@ from pados.control.projections import (
 )
 from pados.control.security import authorize_token, resolve_vault_path, token_hash
 
-CONTROL_VALUE = "pados-local-control-" + "token"
+CONTROL_VALUE = "pados-test-control-" + "value"  # never the public shipped default
+
+@pytest.fixture(autouse=True)
+def _unique_control_hash(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The shipped default hash authenticates nothing: configure the hash of this module's test value."""
+    from pados.config import get_settings
+    monkeypatch.setenv("PADOS_CONTROL_API_TOKEN_HASH", hashlib.sha256(CONTROL_VALUE.encode()).hexdigest().upper())
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
 
 
 def test_control_health_reports_localhost_only() -> None:
