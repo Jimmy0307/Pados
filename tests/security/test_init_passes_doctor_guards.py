@@ -27,6 +27,7 @@ def test_init_writes_database_lanes_that_pass_the_doctor_target_guard(tmp_path: 
     values, _ = _init(tmp_path)
     settings = Settings(**{key: value for key, value in values.items() if value is not None})
     assert cli._doctor_database_target_error(settings) is None
+    assert settings.product_loop_enabled is False
 
 
 def test_init_writes_a_unique_token_whose_hash_is_configured(tmp_path: Path) -> None:

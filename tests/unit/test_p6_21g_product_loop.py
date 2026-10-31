@@ -347,7 +347,7 @@ def test_t22_no_external_orchestration_is_selected(tmp_path: Path) -> None:
 def test_t23_api_surface_submits_and_reads_one_report(tmp_path: Path) -> None:
     service, _ = _service(tmp_path)
     app = FastAPI()
-    register_product_loop_routes(app, Settings(), service=service)
+    register_product_loop_routes(app, Settings(PADOS_PRODUCT_LOOP_ENABLED=True), service=service)
     request = _request(
         tmp_path,
         changes=[{"path": "app.py", "content": "def result():\n    return 'good'\n"}],
@@ -371,7 +371,7 @@ def test_t23_api_surface_submits_and_reads_one_report(tmp_path: Path) -> None:
 def test_t24_api_rejects_unknown_contract_fields(tmp_path: Path) -> None:
     service, _ = _service(tmp_path)
     app = FastAPI()
-    register_product_loop_routes(app, Settings(), service=service)
+    register_product_loop_routes(app, Settings(PADOS_PRODUCT_LOOP_ENABLED=True), service=service)
     request = _request(
         tmp_path,
         changes=[{"path": "app.py", "content": "def result():\n    return 'good'\n"}],

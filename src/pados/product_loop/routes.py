@@ -39,6 +39,9 @@ def register_product_loop_routes(
     *,
     service: ProductLoopService | None = None,
 ) -> None:
+    # Proof-database configuration alone must not activate this separate runtime.
+    if not settings.product_loop_enabled:
+        return
     if service is None:
         try:
             active_service = build_product_loop_service(settings)

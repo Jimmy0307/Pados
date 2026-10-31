@@ -103,7 +103,7 @@ def _build(tmp_path: Path) -> tuple[FastAPI, ProductLoopService, InMemoryP6_19BS
         approved_workspace_root=workspace,
     )
     app = FastAPI()
-    register_product_loop_routes(app, Settings(), service=service)
+    register_product_loop_routes(app, Settings(PADOS_PRODUCT_LOOP_ENABLED=True), service=service)
     return app, service, gateway, maker
 
 

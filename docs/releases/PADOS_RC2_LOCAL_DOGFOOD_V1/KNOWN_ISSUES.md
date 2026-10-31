@@ -7,8 +7,8 @@ freeze pass. Each P1 is contained only by the operating rules in `DOGFOOD_BOUNDA
 
 | ID | Area | Defect | Containment at this freeze |
 |---|---|---|---|
-| ARCH-1 / SEC-1 | Product loop | Cloud (Codex) dispatch and a CAS commit run on a self-asserted `authorized` flag. Any APPROVED approval is accepted, whatever its subject. | The product-loop service refuses to start without a proof/product database. Never configure one during dogfood. |
-| SEC-2 | Product loop | Project context is sent to a cloud worker with no data-classification gate. It becomes P0 if any project is classified RESTRICTED. | Same as ARCH-1: the product loop is unreachable. |
+| ARCH-1 / SEC-1 | Product loop | Cloud (Codex) dispatch and a CAS commit run on a self-asserted `authorized` flag. Any APPROVED approval is accepted, whatever its subject. | The separate Product Loop routes remain disabled by the local dogfood profile (`PADOS_PRODUCT_LOOP_ENABLED=false`). A proof DB used for P6.10 acceptance does not enable those routes. |
+| SEC-2 | Product loop | Project context is sent to a cloud worker with no data-classification gate. It becomes P0 if any project is classified RESTRICTED. | Same as ARCH-1: the separate Product Loop routes are disabled in the local dogfood profile. |
 | SEC-3 | TaskLoop | pause, resume and cancel have no status predicates, so terminal or WAITING_HUMAN loops can be revived. | Manual supervision. Never pause or resume a finished loop. |
 | SEC-4 | Approvals | Approvals are never revoked, expired or consumed. Request and project status are not checked at route time. | A single local token holder. D1 binds each approval to its subject. Keep approval subjects narrow. |
 | SEC-7 | Control token | The public default control-token hash is accepted on the developer (Python) start path. | The npm install generates a random token. Do not start PADOS through the developer `pados` command. |

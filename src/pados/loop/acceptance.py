@@ -180,6 +180,22 @@ def presentation_payload(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def submission_projection(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Minimized operator receipt for candidate submission; never exposes candidate content or commits it."""
+    verification_status = str(row["verification_status"])
+    approval_id = row.get("approval_id")
+    if (verification_status == VerificationStatus.PASSED.value) != (approval_id is not None):
+        raise ValueError("RESULT_CANDIDATE_APPROVAL_INCOHERENT")
+    return {
+        **presentation_payload(row),
+        "verification_status": verification_status,
+        "approval_ref": str(approval_id) if approval_id is not None else None,
+        "decision_status": "WAITING_APPROVAL"
+        if verification_status == VerificationStatus.PASSED.value
+        else "VERIFICATION_FAILED",
+    }
+
+
 def submit_result_candidate(
     session: Session,
     loop_id: str,

@@ -26,6 +26,8 @@ from pados.db import check_database, get_engine, session_scope
 from pados.graph import register_graph_routes
 from pados.logging_config import configure_logging, get_logger
 from pados.loop import service as loop_service
+from pados.loop import acceptance as loop_acceptance
+from pados.loop import scope_authority
 from pados.loop.schemas import LoopCreate, TaskGoalCreate, TaskPlanCreate
 from pados.memory import packet as context_packet
 from pados.memory import service as memory_service
@@ -495,6 +497,24 @@ def create_app() -> FastAPI:
                 return loop_service.get_loop(session, loop_id)
 
         return guarded(lambda: {"status": "ok", "loop": _get()})
+
+    @app.post("/control/loops/{loop_id}/result-candidate")
+    def control_submit_result_candidate(loop_id: str, _: ControlAuth) -> object:
+        """Submit a completed loop for governed verification; this endpoint never accepts or commits it."""
+        def _submit() -> dict[str, Any]:
+            with session_scope(settings) as session:
+                loop = loop_service.get_loop(session, loop_id)
+                current_scope_version = scope_authority.read_current_scope_version(
+                    settings, str(loop["project_id"])
+                )
+                row = loop_acceptance.submit_result_candidate(
+                    session,
+                    loop_id,
+                    current_scope_version=current_scope_version,
+                )
+                return loop_acceptance.submission_projection(row)
+
+        return guarded(lambda: {"status": "ok", "candidate": _submit()})
 
     @app.post("/control/loops/{loop_id}/start")
     def control_start_loop(loop_id: str, _: ControlAuth) -> object:

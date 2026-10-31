@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from pados.config import PROOF_REVISION_HEAD, Settings, get_settings, lane_revisions_accepted
+from pados.config import PROOF_REVISION_HEAD, Settings, get_settings, lane_revisions_accepted, lane_settings
 from pados.db import check_database, get_engine, session_scope
 from pados.logging_config import configure_logging, get_logger
 from pados.loop import service as loop_service
@@ -399,6 +399,7 @@ def project_create(
             classification=classification,
             default_branch=default_branch,
         )
+    _ensure_local_proof_scope(project_id)
     payload = {
         "status": "ok",
         "project_id": project_id,
@@ -407,6 +408,56 @@ def project_create(
         "default_branch": default_branch,
     }
     typer.echo(json.dumps(payload, indent=2, sort_keys=True) if json_output else project_id)
+
+
+def _ensure_local_proof_scope(project_id: str) -> int | None:
+    """Create the initial ScopeVersion through StateProof for a local dogfood project.
+
+    This is idempotent project setup, not semantic acceptance. The ResultCandidate path only reads this head;
+    approval and CAS remain in their existing governed interfaces.
+    """
+    settings = get_settings()
+    proof_database = settings.product_database_name
+    if not proof_database:
+        return None
+    if settings.db_host not in {"127.0.0.1", "localhost"}:
+        raise PermissionError("PROJECT_PROOF_DATABASE_MUST_BE_LOCAL")
+    if proof_database == settings.operational_database_name:
+        raise PermissionError("PROJECT_PROOF_DATABASE_MUST_BE_SEPARATE")
+    object_root = Path(settings.product_object_root).expanduser()
+    if not object_root.is_absolute():
+        raise PermissionError("PRODUCT_OBJECT_ROOT_MUST_BE_ABSOLUTE")
+
+    from pados.state_proof.object_store import ObjectStore
+    from pados.state_proof.service import StateProofService, build_proof_engine
+
+    engine = build_proof_engine(lane_settings(settings, proof_database).database_url)
+    try:
+        proof = StateProofService(engine, ObjectStore(object_root.resolve()))
+        head = proof.ensure_scope(project_id)
+        return int(head["current_version"])
+    finally:
+        engine.dispose()
+
+
+@project_app.command("initialize-proof-scope")
+def project_initialize_proof_scope(
+    project_id: Annotated[UUID, typer.Option("--project-id", help="Existing PADOS project UUID.")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Idempotently initialize the local proof scope after an interrupted project setup."""
+    with session_scope() as session:
+        exists = session.execute(
+            text("SELECT 1 FROM projects WHERE id = CAST(:project_id AS uuid)"),
+            {"project_id": str(project_id)},
+        ).scalar_one_or_none()
+    if exists is None:
+        raise ValueError("PROJECT_NOT_FOUND")
+    version = _ensure_local_proof_scope(str(project_id))
+    if version is None:
+        raise ValueError("LOCAL_PROOF_DATABASE_NOT_CONFIGURED")
+    payload = {"status": "ok", "project_id": str(project_id), "scope_version": version}
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True) if json_output else f"scope:{version}")
 
 
 @memory_app.command("project-register")
@@ -722,6 +773,7 @@ def init(
         # and `pados doctor` refuses them (PROTECTED_DATABASE_TARGET).
         "PADOS_DB_NAME=pados_dogfood_operational", "PADOS_OPERATIONAL_DATABASE_NAME=pados_dogfood_operational",
         "PADOS_PRODUCT_DATABASE_NAME=pados_dogfood_proof", "PADOS_CORPUS_DATABASE_NAME=pados_dogfood_corpus",
+        "PADOS_PRODUCT_LOOP_ENABLED=false",
         f"PADOS_PRODUCT_WORKSPACE_ROOT={local / 'workspace'}", f"PADOS_PRODUCT_OBJECT_ROOT={local / 'objects'}",
         "PADOS_PRODUCT_LOOP_PROVIDER=AUTO",
         "PADOS_CONTROL_API_TOKEN_HASH=" + hashlib.sha256(control_value.encode("utf-8")).hexdigest().upper(),
@@ -918,6 +970,26 @@ def loop_inspect(
             "events": loop_service.loop_events(session, str(loop_id)),
         }
     _echo_json({"status": "ok", **payload}, json_output)
+
+
+@loop_app.command("submit-result-candidate")
+def loop_submit_result_candidate(
+    loop_id: Annotated[UUID, typer.Option("--loop-id", help="Completed TaskLoop UUID.")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Verify a completed loop and submit its ResultCandidate for governed human review."""
+    from pados.loop import acceptance as loop_acceptance
+    from pados.loop import scope_authority
+
+    settings = get_settings()
+    with session_scope(settings) as session:
+        loop = loop_service.get_loop(session, str(loop_id))
+        current_scope_version = scope_authority.read_current_scope_version(settings, str(loop["project_id"]))
+        row = loop_acceptance.submit_result_candidate(
+            session, str(loop_id), current_scope_version=current_scope_version
+        )
+        candidate = loop_acceptance.submission_projection(row)
+    _echo_json({"status": "ok", "candidate": candidate}, json_output)
 
 
 @loop_app.command("pause")

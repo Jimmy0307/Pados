@@ -230,7 +230,7 @@ def test_t02_api_get_reads_from_fresh_service_without_process_registry(
     )
     try:
         app = FastAPI()
-        register_product_loop_routes(app, h_settings, service=service_b)
+        register_product_loop_routes(app, h_settings.model_copy(update={"product_loop_enabled": True}), service=service_b)
         with TestClient(app) as client:
             response = client.get(
                 f"/product-loop/runs/{report.run_id}",
@@ -598,7 +598,7 @@ def test_t16_unknown_run_is_not_reconstructed_from_global_or_process_state(
         missing = str(uuid4())
         assert service.read_run(missing) is None
         app = FastAPI()
-        register_product_loop_routes(app, h_settings, service=service)
+        register_product_loop_routes(app, h_settings.model_copy(update={"product_loop_enabled": True}), service=service)
         with TestClient(app) as client:
             response = client.get(
                 f"/product-loop/runs/{missing}",

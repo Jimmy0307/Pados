@@ -21,7 +21,7 @@ Before 1.0 nothing is frozen by semver, but PUBLIC_STABLE items change only with
 |---|---|
 | `pados version`, `pados init`, `pados doctor`, `pados serve` | PUBLIC_STABLE (first-run path) |
 | `pados node serve`, `pados node probe` | PUBLIC_EXPERIMENTAL |
-| `pados project create` | PUBLIC_STABLE |
+| `pados project create`, `pados project initialize-proof-scope` | PUBLIC_STABLE (local setup; proof scope requires a separate loopback database) |
 | `pados memory …` (`project-register`, `fact-add`, `promote`, `decision-add`, `artifact-register`, `event-add`, `search`, `stale`) | PUBLIC_EXPERIMENTAL |
 | `pados context assemble / inspect` | PUBLIC_EXPERIMENTAL |
 | `pados worker list / health / capabilities / diagnose` | PUBLIC_EXPERIMENTAL (diagnostics) |
@@ -66,6 +66,13 @@ never route work.
 `CONTROL_API` is a structural binding to the requesting surface, not a user identity: the control API
 has no authenticated user. `POST /control/work-requests/{id}/route` always routes as
 `CONTROL_API` with no step, whatever the client sends.
+
+`POST /control/loops/{loop_id}/result-candidate` is a local control-token operation that composes and verifies the
+completed TaskLoop's ResultCandidate. The server reads the project's current ScopeVersion; the caller cannot supply
+or override it. The response contains only the candidate identity and digests, verification status, and pending
+approval reference; it never returns the candidate body. A passed candidate is submitted for human review, while a
+failed verification creates no approval. This operation does not accept a candidate or write a semantic commit.
+Acceptance remains exclusively on the existing WebAuthn step-up and CAS path.
 
 The route endpoint refuses with 403 and one of these codes, checked in this order before any worker is
 selected or any job is created:

@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     product_workspace_root: str = Field(default="", alias="PADOS_PRODUCT_WORKSPACE_ROOT")
     product_object_root: str = Field(default="", alias="PADOS_PRODUCT_OBJECT_ROOT")
     product_database_name: str = Field(default="", alias="PADOS_PRODUCT_DATABASE_NAME")
+    # A proof DB for P6.10 acceptance must not implicitly enable the separate Product Loop runtime.
+    product_loop_enabled: bool = Field(default=False, alias="PADOS_PRODUCT_LOOP_ENABLED")
     product_loop_provider: str = Field(default="AUTO", alias="PADOS_PRODUCT_LOOP_PROVIDER")
     # Optional Enterprise Capability Pack manifest file; unset never affects Core readiness.
     enterprise_config: str = Field(default="", alias="PADOS_ENTERPRISE_CONFIG")
