@@ -30,7 +30,7 @@ from pados.capability.task import TaskInput  # noqa: E402
 from pados.capability.verification import ValidatorRegistry, VerificationEngine  # noqa: E402
 from pados.enterprise.classification import DataClassification  # noqa: E402
 from pados.packs.research import pack as rp  # noqa: E402
-from pados.packs.research.contracts import ResearchRunManifest  # noqa: E402
+from pados.packs.research.contracts import ResearchError, ResearchRunManifest  # noqa: E402
 from pados.work_protocol.compatibility import normalize_capability_result  # noqa: E402
 from pados.work_protocol.composition import compose_results  # noqa: E402
 from pados.work_protocol.coverage import build_coverage  # noqa: E402
@@ -92,7 +92,7 @@ def test_each_operator_profile_is_one_content_addressed_pack_v1_version() -> Non
     assert other.manifest_digest != manifest.manifest_digest
 
 
-@pytest.mark.parametrize("changes", [{"secret_refs": ("sk-not-a-reference",)}, {"agents": ()},
+@pytest.mark.parametrize("changes", [{"secret_refs": ("plain-value-not-a-secretref",)}, {"agents": ()},
                                      {"egress_hosts": ("169.254.169.254",)}, {"upstream_revision": "main"},
                                      {"image_digest": "latest"}, {"agents": ("Fixture Agent!",)}])
 def test_invalid_operator_profiles_are_refused(changes: dict[str, Any]) -> None:
@@ -219,8 +219,8 @@ def test_execution_completes_but_verification_fails_when_an_artifact_is_swapped(
 
 
 # -- hand-off: PADOS supplies every authority field; the candidate stays pending ----------------------------------
-def _candidate(manifest: ResearchRunManifest) -> Any:
-    projection = rp.research_projection(manifest, goal_id="goal-research")
+def _candidate(outputs: list[tuple[ArtifactRef, bytes]]) -> Any:
+    projection = rp.research_projection(outputs, goal_id="goal-research")
     authorization = AuthorizationMetadata(project_ref="proj-a", classification="INTERNAL", scope_version_ref="scope:1",
                                           grant_ref="grant:synthetic", policy_decision_ref="decision:synthetic",
                                           capability=rp.CAPABILITY_ID)
@@ -248,10 +248,9 @@ def _candidate(manifest: ResearchRunManifest) -> Any:
     return result, compose_results(envelope, (result,), build_coverage(envelope, (result,)))
 
 
-def _manifest(runtime_output: Any) -> ResearchRunManifest:
+def _manifest(runtime_output: Any) -> list[tuple[ArtifactRef, bytes]]:
     out, store = _direct(ScriptedRuntime(runtime_output))
-    return ResearchRunManifest.model_validate_json(
-        store.get(next(r for r in out.outputs if r.kind == rp.KIND_MANIFEST)))
+    return [(ref, store.get(ref)) for ref in out.outputs]
 
 
 def test_a_complete_run_becomes_a_pending_result_candidate_through_existing_functions() -> None:
@@ -274,3 +273,65 @@ def test_a_partial_run_is_at_most_a_partial_goal() -> None:
     files = {"task/task.md": b"Synthetic task.\n", "investigation/summary.json": b'{"best_score": 0.5}'}
     result, _ = _candidate(_manifest(output(phases=phases, files=files, claims=())))
     assert result.completed_goals == () and result.partial_goals == ("goal-research",)
+
+
+# -- independent review: parameters, model allowlist, projection only from verified outputs, hostile checkers ----
+@pytest.mark.parametrize("change", [{"extra": "x"}, {"profile_id": "agsci.other.profile"}, {"request_digest": "z"}])
+def test_extra_or_foreign_task_parameters_fail_closed(change: dict[str, Any]) -> None:
+    params = dict(rp.task_parameters(profile(), rp.canonical_request(request())), **change)
+    assert _code(ScriptedRuntime(), params=params).code == "RESEARCH_PARAMETERS_INVALID"
+
+
+def test_missing_task_parameters_fail_closed() -> None:
+    assert _code(ScriptedRuntime(), params={"profile_id": profile().profile_id}).code == "RESEARCH_PARAMETERS_INVALID"
+
+
+def test_a_model_or_preset_outside_the_profile_is_never_launched() -> None:
+    runtime = ScriptedRuntime()
+    assert _code(runtime, campaign=request(model="frontier-x")).code == "RESEARCH_AGENT_NOT_ALLOWED"
+    assert _code(runtime, campaign=request(preset="gpu-large")).code == "RESEARCH_AGENT_NOT_ALLOWED"
+    assert runtime.calls == 0
+
+
+def _outputs(out: StageOutput, store: _Store) -> list[tuple[ArtifactRef, bytes]]:
+    return [(ref, store.get(ref)) for ref in out.outputs]
+
+
+SWAPPED = b'{"metrics": {"packing_density": 0.99}}'
+HUGE = b'{"metrics": {"m": 1' + b"0" * 400 + b"}}"
+
+
+def test_the_projection_refuses_outputs_that_do_not_verify() -> None:
+    out, store = _direct(ScriptedRuntime())
+    outputs = _outputs(out, store)
+    final = rp.artifact_kind("final_evaluation")
+    forged = [(ref, SWAPPED if ref.kind == final else data) for ref, data in outputs]
+    with pytest.raises(ResearchError, match="RESEARCH_MANIFEST_UNVERIFIED"):
+        rp.research_projection(forged, goal_id="goal-research")
+    assert rp.research_projection(outputs, goal_id="goal-research")["completed_goals"] == ("goal-research",)
+
+
+def test_a_completed_run_with_an_unsupported_claim_never_completes_the_goal() -> None:
+    out, store = _direct(ScriptedRuntime(output(claims=({"metric": "packing_density", "value": 0.95},))))
+    projection = rp.research_projection(_outputs(out, store), goal_id="goal-research")
+    assert out.evidence["run_status"] == "COMPLETED" and out.evidence["review_required"] is True
+    assert projection["completed_goals"] == () and projection["unresolved_goals"] == ("goal-research",)
+
+
+@pytest.mark.parametrize("mutate", ["drop_manifest", "duplicate_manifest", "garbage_manifest", "extra_artifact",
+                                    "huge_number"])
+def test_checkers_return_false_never_raise_on_hostile_outputs(mutate: str) -> None:
+    out, store = _direct(ScriptedRuntime())
+    outputs = _outputs(out, store)
+    manifest = next(item for item in outputs if item[0].kind == rp.KIND_MANIFEST)
+    rest = [item for item in outputs if item[0].kind != rp.KIND_MANIFEST]
+    final = rp.artifact_kind("final_evaluation")
+    hostile = {
+        "drop_manifest": rest,
+        "duplicate_manifest": [manifest, manifest, *rest],
+        "garbage_manifest": [(manifest[0], b"[" * 5000 + b"]" * 5000), *rest],
+        "extra_artifact": [*outputs, rest[0]],
+        "huge_number": [manifest, *[(ref, HUGE if ref.kind == final else data) for ref, data in rest]],
+    }[mutate]
+    assert rp.run_manifest_valid(hostile) in (True, False)
+    assert rp.run_manifest_reference_check(hostile) is False

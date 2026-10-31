@@ -219,6 +219,8 @@ class ResearchRuntimeProfile(BaseModel):
     upstream_revision: str
     image_digest: str
     agents: tuple[str, ...] = Field(min_length=1, max_length=16)
+    models: tuple[str, ...] = Field(default=(), max_length=16)  # allowlisted models; empty = none may be named
+    presets: tuple[str, ...] = Field(default=(), max_length=16)  # allowlisted upstream presets; empty = none
     egress_hosts: tuple[str, ...] = Field(default=(), max_length=16)
     timeout_seconds: int = Field(ge=1, le=86_400)
     secret_refs: tuple[str, ...] = Field(default=(), max_length=16)
@@ -251,7 +253,7 @@ class ResearchRuntimeProfile(BaseModel):
             raise ValueError("RESEARCH_PROFILE_INVALID")  # a content digest, never ``latest``
         return value
 
-    @field_validator("agents")
+    @field_validator("agents", "models", "presets")
     @classmethod
     def _agents(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if any(not _TOKEN.fullmatch(agent) for agent in value) or len(set(value)) != len(value):

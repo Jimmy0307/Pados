@@ -224,8 +224,10 @@ class ResearchCampaignAdapter:
             campaign = None
         if campaign is None or canonical_request(campaign) != payload:
             raise ResearchError("RESEARCH_REQUEST_INVALID")
-        if campaign.agent not in self._profile.agents:
-            raise ResearchError("RESEARCH_AGENT_NOT_ALLOWED")
+        if (campaign.agent not in self._profile.agents
+                or (campaign.model is not None and campaign.model not in self._profile.models)
+                or (campaign.preset is not None and campaign.preset not in self._profile.presets)):
+            raise ResearchError("RESEARCH_AGENT_NOT_ALLOWED")  # agent, model and preset are all profile-allowlisted
         return campaign, parameters["request_digest"]
 
     def _run(self, campaign: CampaignRequest) -> object:
@@ -298,14 +300,21 @@ def run_manifest_reference_check(outputs: Sequence[tuple[ArtifactRef, bytes]]) -
     return unpacked is not None and verify_run_manifest(*unpacked)
 
 
-def research_projection(manifest: ResearchRunManifest, *, goal_id: str) -> dict[str, Any]:
-    """Project a verified manifest onto the bounded provider-response fields ``work_protocol`` normalizes.
+def research_projection(outputs: Sequence[tuple[ArtifactRef, bytes]], *, goal_id: str) -> dict[str, Any]:
+    """Project VERIFIED stage outputs onto the bounded provider-response fields ``work_protocol`` normalizes.
+
+    The manifest is re-derived from its own promoted artifacts first (the REFERENCE_CHECK); outputs that do not
+    verify are ``RESEARCH_MANIFEST_UNVERIFIED`` -- a caller cannot project a manifest it merely holds.
 
     Content is rendered from PADOS-derived tokens only (phase states, final-evaluation metrics, EVIDENCED claims);
     nothing the runtime wrote as prose is presented. Only a COMPLETED run with no unsupported claim completes the
     goal; PARTIAL is a partial goal; FAILED or review-required runs leave it unresolved. Task, authorization,
     receipt, provenance and acceptance fields are supplied by PADOS when it normalizes, composes and verifies.
     """
+    unpacked = _unpack(outputs)
+    if unpacked is None or not verify_run_manifest(*unpacked):
+        raise ResearchError("RESEARCH_MANIFEST_UNVERIFIED")
+    manifest = unpacked[0]
     phases = ", ".join(f"{p.phase.value}={p.state.value}" for p in manifest.phases)
     supported = "; ".join(f"{c.metric} = {c.value}" for c in manifest.claims if c.status is ClaimStatus.EVIDENCED)
     content = f"Research run {manifest.upstream_run_id} ({manifest.status.value}): {phases}."

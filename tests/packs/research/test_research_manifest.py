@@ -147,3 +147,94 @@ def test_a_manifest_whose_claim_status_was_upgraded_fails_verification() -> None
     forged_claims = tuple(c.model_copy(update={"status": ClaimStatus.EVIDENCED}) for c in manifest.claims)
     forged = manifest.model_copy(update={"claims": forged_claims, "review_required": False})
     assert not verify_run_manifest(forged, promoted)
+
+
+# -- independent review: hostile numbers, unfinished evaluations, bounds, unrequested phases ---------------------
+HUGE = b'{"metrics": {"m": 1' + b"0" * 400 + b"}}"
+
+
+@pytest.mark.parametrize("result", [HUGE, b'{"metrics": {"m": NaN}}', b'{"metrics": {"m": true}}',
+                                    b'{"metrics": {"Bad Name": 1}}', b"\xff\xfe", b"[" * 5000 + b"]" * 5000,
+                                    b'{"metrics": []}'])
+def test_a_malformed_or_hostile_final_evaluation_is_a_closed_refusal(result: bytes) -> None:
+    files = dict(complete_files(), **{"final_evaluation/result.json": result})
+    assert _refused(output(files=files, claims=())) == "RESEARCH_FINAL_EVALUATION_MALFORMED"
+
+
+def test_a_hostile_claim_value_is_a_closed_refusal() -> None:
+    claims = ({"metric": "packing_density", "value": 10**400},)
+    assert _refused(output(claims=claims)) == "RESEARCH_MANIFEST_MALFORMED"
+
+
+@pytest.mark.parametrize("state", ["PENDING", "FAILED", "SKIPPED"])
+def test_final_evaluation_files_without_a_completed_evaluation_are_refused(state: str) -> None:
+    later = {} if state == "SKIPPED" else {"posthoc": "PENDING", "paper": "PENDING"}
+    phases = dict(output().phases, final_evaluation=state, **later)
+    files = {k: v for k, v in complete_files().items() if not k.startswith(("posthoc/", "paper/"))}
+    if state == "SKIPPED":
+        files = dict(files, **{"posthoc/manifest.json": b"{}"})
+        phases = dict(phases, paper="SKIPPED")
+    assert _refused(output(phases=phases, files=files)) == "RESEARCH_PHASE_OUTPUT_UNEXPECTED"
+
+
+def test_claims_are_never_evidenced_without_a_completed_final_evaluation() -> None:
+    phases = dict(output().phases, final_evaluation="PENDING", posthoc="PENDING", paper="PENDING")
+    files = {k: v for k, v in complete_files().items() if k.startswith(("task/", "investigation/", "ablation/"))}
+    manifest, _ = _build(output(phases=phases, files=files))
+    assert manifest.final_evaluation is None
+    assert [c.status for c in manifest.claims] == [ClaimStatus.NOT_EVIDENCED] and manifest.review_required
+
+
+def test_artifacts_of_a_phase_nobody_requested_are_refused() -> None:
+    campaign = request(phases=("task_draft", "investigation", "final_evaluation", "posthoc", "paper"))
+    phases = {k: v for k, v in output().phases.items() if k != "ablation"}
+    assert _refused(output(phases=phases), campaign=campaign) == "RESEARCH_PHASE_OUTPUT_UNEXPECTED"
+
+
+def test_a_phase_reported_but_never_requested_is_refused() -> None:
+    campaign = request(phases=("task_draft", "investigation", "final_evaluation"))
+    assert _refused(output(), campaign=campaign) == "RESEARCH_PHASE_INVALID"
+
+
+def test_a_missing_task_snapshot_is_refused() -> None:
+    campaign = request(phases=("investigation", "ablation", "final_evaluation", "posthoc", "paper"))
+    phases = {k: v for k, v in output().phases.items() if k != "task_draft"}
+    files = {k: v for k, v in complete_files().items() if not k.startswith("task/")}
+    assert _refused(output(phases=phases, files=files), campaign=campaign) == "RESEARCH_TASK_SNAPSHOT_MISSING"
+
+
+@pytest.mark.parametrize("extra", [
+    {f"investigation/run_{i}.json": b"{}" for i in range(40)},
+    {"investigation/huge.bin": b"x" * (8 * 1024 * 1024 + 1)},
+    {"zzz_quarantined.bin": b"x" * (8 * 1024 * 1024 + 1)},
+    {f"scratch/{i}.bin": b"x" * (1024 * 1024) for i in range(70)},
+])
+def test_artifact_count_and_size_bounds_include_quarantined_files(extra: dict[str, bytes]) -> None:
+    assert _refused(output(files=dict(complete_files(), **extra))) == "RESEARCH_ARTIFACT_LIMIT"
+
+
+@pytest.mark.parametrize("path", ["paper/CON", "paper/nul.pdf", "paper/paper.pdf.", "investigation/com1.json"])
+def test_windows_reserved_and_trailing_dot_names_are_unauthorized(path: str) -> None:
+    files = dict(complete_files(), **{path: b"x"})
+    assert _refused(output(files=files)) == "RESEARCH_ARTIFACT_PATH_UNAUTHORIZED"
+
+
+def test_case_colliding_paths_are_unauthorized() -> None:
+    files = dict(complete_files(), **{"paper/Paper.pdf": b"x", "paper/paper.PDF": b"y"})
+    assert _refused(output(files=files)) == "RESEARCH_ARTIFACT_PATH_UNAUTHORIZED"
+
+
+def test_verification_is_total_on_hostile_bytes() -> None:
+    manifest, promoted = _build(output())
+    hostile = dict(promoted, **{"final_evaluation/result.json": HUGE})
+    assert verify_run_manifest(manifest, hostile) is False
+
+
+def test_verification_is_total_when_a_forged_entry_matches_hostile_bytes() -> None:
+    import hashlib
+    manifest, promoted = _build(output())
+    path = "final_evaluation/result.json"
+    entries = tuple(e.model_copy(update={"sha256": hashlib.sha256(HUGE).hexdigest(), "size_bytes": len(HUGE)})
+                    if e.relative_path == path else e for e in manifest.artifacts)
+    forged = manifest.model_copy(update={"artifacts": entries})
+    assert verify_run_manifest(forged, dict(promoted, **{path: HUGE})) is False
