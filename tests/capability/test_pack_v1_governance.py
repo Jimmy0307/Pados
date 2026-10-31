@@ -269,7 +269,7 @@ def test_an_allowlisted_public_host_is_accepted() -> None:
     assert _variant(**_networked(security__egress_hosts=["api.example.org"])).security.egress_hosts
 
 
-@pytest.mark.parametrize("host", ["169.254.169.254", "10.0.0.8", "localhost", "metadata.localhost", "printer.local"])
+@pytest.mark.parametrize("host", ["169.254.169.254", "203.0.113.7", "localhost", "metadata.localhost", "printer.local"])
 def test_ip_literal_loopback_and_link_local_egress_hosts_are_refused(host: str) -> None:
     with pytest.raises(PackManifestError) as excinfo:
         _variant(**_networked(security__egress_hosts=[host]))
