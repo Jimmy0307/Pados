@@ -438,6 +438,13 @@ class GovernedPackAdapter:
 
     @property
     def descriptor(self) -> AdapterDescriptor:
+        # The LIVE implementation descriptor, never a cached copy: the registry compares its digest with the one
+        # recorded at install (equal to the declared descriptor, checked above) before and after every execution,
+        # so an implementation that drifts after registration or during execute() is refused there.
+        return self._inner.descriptor
+
+    @property
+    def declared_descriptor(self) -> AdapterDescriptor:
         return self._descriptor
 
     @property
@@ -563,7 +570,8 @@ def register_pack(registry: PackRegistry, manifest: CapabilityPackManifest,
                 registry.register_capability(capability, operator=operator, reason_code=reason_code)
         for adapter in governed:
             registry.install(adapter, operator=operator)
-            registry.register_adapter(adapter.descriptor.adapter_id, capability_id=adapter.descriptor.capability_id,
+            declared_adapter = adapter.declared_descriptor
+            registry.register_adapter(declared_adapter.adapter_id, capability_id=declared_adapter.capability_id,
                                       operator=operator, reason_code=reason_code)
     except Exception:  # noqa: BLE001 - whatever stopped the registration, compensate before reporting it
         compensated = _revoke_registered(registry, declared, operator=operator)
@@ -638,6 +646,10 @@ def propose_pack_transition(manifest: CapabilityPackManifest, *, current: Capabi
                  for capability_id in manifest.capability_ids)
 
 
+def _lifecycle_digests(descriptor: CapabilityDescriptor | AdapterDescriptor) -> frozenset[str]:
+    return frozenset(descriptor_digest(descriptor.model_copy(update={"lifecycle": state})) for state in LifecycleState)
+
+
 @dataclass(frozen=True)
 class PackAttribution:
     pack_id: str
@@ -664,13 +676,18 @@ class PackIndex:
         return tuple(version for (identifier, version) in self._manifests if identifier == pack_id)
 
     def attributions(self, capability_digest: str, adapter_digest: str) -> tuple[PackAttribution, ...]:
-        """Every pack@version declaring this (capability, adapter) descriptor pair; never a guess between them."""
+        """Every pack@version declaring this (capability, adapter) descriptor pair; never a guess between them.
+
+        Receipts carry the EFFECTIVE descriptors, whose lifecycle the operator may have moved (for example promoted
+        to ACTIVE after validation); a manifest declares EXPERIMENTAL. Each declared descriptor is therefore matched
+        in every lifecycle state -- only the lifecycle may differ, never any other field.
+        """
         found: list[PackAttribution] = []
         for manifest in self._manifests.values():
             for adapter in manifest.adapters:
                 capability = next(item for item in manifest.capabilities
                                   if item.capability_id == adapter.capability_id)
-                if (descriptor_digest(capability), descriptor_digest(adapter)) == (capability_digest, adapter_digest):
+                if capability_digest in _lifecycle_digests(capability) and adapter_digest in _lifecycle_digests(adapter):
                     found.append(PackAttribution(manifest.pack_id, manifest.version, manifest.manifest_digest,
                                                  capability.capability_id, adapter.adapter_id))
         return tuple(found)

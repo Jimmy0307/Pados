@@ -441,30 +441,11 @@ def test_disable_without_event_headroom_revokes_nothing(tmp_path: Path) -> None:
     assert sorted(_plannable(fab)) == [reference.ADAPTER_ID, "reference.digest.alt"]
 
 
-class _Drifting:
-    """An installed implementation whose live descriptor drifts after registration."""
-
-    def __init__(self) -> None:
-        self._inner = reference.adapter()
-        self.calls = 0
-
-    @property
-    def descriptor(self) -> Any:
-        self.calls += 1
-        return self._inner.descriptor
-
-    def available(self) -> bool:
-        return True
-
-    def execute(self, request: StageRequest, *, context: StageContext) -> StageOutput:
-        return self._inner.execute(request, context=context)
-
-
 def test_disable_reads_recorded_descriptors_and_never_runs_adapter_code(tmp_path: Path) -> None:
     fab = fabric(tmp_path)
-    register_pack(fab.registry, reference.MANIFEST, {reference.ADAPTER_ID: reference.adapter()}, operator=OPERATOR)
-    governed = fab.registry._installed[reference.ADAPTER_ID][0]
-    governed._descriptor = governed._descriptor.model_copy(update={"version": "drifted"})  # integrity now fails
+    implementation = reference.adapter()
+    register_pack(fab.registry, reference.MANIFEST, {reference.ADAPTER_ID: implementation}, operator=OPERATOR)
+    implementation._descriptor = implementation.descriptor.model_copy(update={"version": "drifted"})  # integrity fails
     disable_pack(fab.registry, reference.MANIFEST, operator=OPERATOR)
     assert fab.registry.adapter(reference.ADAPTER_ID).recorded_descriptor().lifecycle is LifecycleState.REVOKED
 
@@ -475,3 +456,71 @@ def test_numeric_single_label_and_intranet_egress_hosts_are_refused(host: str) -
     with pytest.raises(PackManifestError) as excinfo:
         _variant(**_networked(security__egress_hosts=[host]))
     assert excinfo.value.code == "PACK_EGRESS_HOST_INVALID"
+
+
+# -- Codex review: live descriptor integrity and attribution across operator lifecycle changes -------------
+class _Mutable:
+    """A reference implementation whose descriptor can drift after registration or during execution."""
+
+    def __init__(self, *, drift_during_execute: bool = False) -> None:
+        self._inner = reference.adapter()
+        self.descriptor = self._inner.descriptor
+        self._drift_during_execute = drift_during_execute
+
+    def available(self) -> bool:
+        return True
+
+    def execute(self, request: StageRequest, *, context: StageContext) -> StageOutput:
+        output = self._inner.execute(request, context=context)
+        if self._drift_during_execute:
+            self.descriptor = self.descriptor.model_copy(update={"backend": "swapped-backend"})
+        return output
+
+
+def test_the_wrapper_exposes_the_live_implementation_descriptor_for_integrity_checks() -> None:
+    implementation = _Mutable()
+    governed = GovernedPackAdapter(reference.MANIFEST, implementation)
+    implementation.descriptor = implementation.descriptor.model_copy(update={"backend": "swapped-backend"})
+    assert governed.descriptor.backend == "swapped-backend"  # the registry's digest check now sees the drift
+
+
+def test_an_implementation_that_drifts_after_registration_is_never_executed(tmp_path: Path) -> None:
+    fab = fabric(tmp_path)
+    implementation = _Mutable()
+    register_pack(fab.registry, reference.MANIFEST, {reference.ADAPTER_ID: implementation}, operator=OPERATOR)
+    task = _task(fab)
+    plan = fab.planner().plan(task)
+    implementation.descriptor = implementation.descriptor.model_copy(update={"backend": "swapped-backend"})
+    try:
+        result = fab.executor().execute(plan, task)
+    except Exception as exc:  # noqa: BLE001 - a refusal before execution is equally acceptable
+        assert "CHANGED" in str(exc) or "INTEGRITY" in str(exc).upper() or "REPRODUC" in str(exc), exc
+        return
+    assert result.status is ExecutionStatus.FAILED and result.plan_receipt.stages[0].outputs == ()
+
+
+def test_an_implementation_that_drifts_during_execution_produces_no_completed_stage(tmp_path: Path) -> None:
+    fab = fabric(tmp_path)
+    register_pack(fab.registry, reference.MANIFEST,
+                  {reference.ADAPTER_ID: _Mutable(drift_during_execute=True)}, operator=OPERATOR)
+    task = _task(fab)
+    result = fab.executor().execute(fab.planner().plan(task), task)
+    assert result.status is ExecutionStatus.FAILED
+    assert result.plan_receipt.stages[0].outputs == ()
+
+
+def test_receipts_stay_attributable_after_an_operator_promotes_the_pack(tmp_path: Path) -> None:
+    fab = fabric(tmp_path)
+    register_pack(fab.registry, reference.MANIFEST, {reference.ADAPTER_ID: reference.adapter()}, operator=OPERATOR)
+    fab.registry.set_capability_lifecycle(reference.CAPABILITY_ID, LifecycleState.ACTIVE, operator=OPERATOR,
+                                          reason_code="OPERATOR_PROMOTED")
+    fab.registry.set_adapter_lifecycle(reference.ADAPTER_ID, LifecycleState.ACTIVE, operator=OPERATOR,
+                                       reason_code="OPERATOR_PROMOTED")
+    task = _task(fab)
+    result = fab.executor().execute(fab.planner().plan(task), task)
+    assert result.status is ExecutionStatus.COMPLETED, result.failure_code
+    (stage,) = result.plan_receipt.stages
+    index = PackIndex()
+    index.add(reference.MANIFEST)
+    (attribution,) = index.attributions(stage.capability_digest, stage.adapter_digest)
+    assert (attribution.pack_id, attribution.version) == (reference.PACK_ID, reference.MANIFEST.version)
