@@ -338,3 +338,140 @@ def test_disable_is_all_or_nothing_and_idempotent(tmp_path: Path) -> None:
     events = len(fab.registry.events)
     disable_pack(fab.registry, reference.MANIFEST, operator=OPERATOR)  # already disabled: no change, no error
     assert len(fab.registry.events) == events
+
+
+# -- second review: compensation is verified, capacity is pre-checked, disable never runs adapter code ---------
+def _two_adapter_pack() -> tuple[Any, dict[str, Any]]:
+    data = reference.MANIFEST.model_dump(mode="json")
+    second = dict(data["adapters"][0], adapter_id="reference.digest.alt")
+    data["adapters"] = [data["adapters"][0], second]
+    manifest = validate_pack(data)
+    alt = reference.adapter()
+    alt._descriptor = manifest.adapters[1]
+    return manifest, {reference.ADAPTER_ID: reference.adapter(), "reference.digest.alt": alt}
+
+
+class _Faulty:
+    """The real registry with scripted faults (the n-th adapter registration, lifecycle changes, event count)."""
+
+    def __init__(self, inner: Any, *, fail_register_at: int | None = None, fail_lifecycle: bool = False,
+                 events_used: int | None = None, fail_install: BaseException | None = None) -> None:
+        self._inner, self._registered = inner, 0
+        self._fail_register_at, self._fail_lifecycle = fail_register_at, fail_lifecycle
+        self._events_used, self._fail_install = events_used, fail_install
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    @property
+    def events(self) -> tuple[Any, ...]:
+        if self._events_used is None:
+            return tuple(self._inner.events)
+        return (None,) * self._events_used
+
+    def install(self, *args: Any, **kwargs: Any) -> Any:
+        if self._fail_install is not None:
+            raise self._fail_install
+        return self._inner.install(*args, **kwargs)
+
+    def register_adapter(self, *args: Any, **kwargs: Any) -> Any:
+        from pados.capability.registry import RegistryError
+        self._registered += 1
+        if self._registered == self._fail_register_at:
+            raise RegistryError("REGISTRY_EVENT_LOG_FULL")
+        return self._inner.register_adapter(*args, **kwargs)
+
+    def set_adapter_lifecycle(self, *args: Any, **kwargs: Any) -> Any:
+        from pados.capability.registry import RegistryError
+        if self._fail_lifecycle:
+            raise RegistryError("REGISTRY_EVENT_LOG_FULL")
+        return self._inner.set_adapter_lifecycle(*args, **kwargs)
+
+
+def _plannable(fab: Any) -> list[str]:
+    return [a.adapter_id for a in fab.registry.adapters_for(reference.CAPABILITY_ID) if a.descriptor.lifecycle.plannable]
+
+
+def test_a_refusal_after_one_adapter_registered_revokes_it(tmp_path: Path) -> None:
+    fab = fabric(tmp_path)
+    manifest, implementations = _two_adapter_pack()
+    with pytest.raises(PackManifestError) as excinfo:
+        register_pack(_Faulty(fab.registry, fail_register_at=2), manifest, implementations, operator=OPERATOR)
+    assert excinfo.value.code == "PACK_REGISTRATION_INCOMPLETE"
+    assert _plannable(fab) == []
+
+
+def test_a_failed_compensation_is_reported_never_hidden(tmp_path: Path) -> None:
+    fab = fabric(tmp_path)
+    manifest, implementations = _two_adapter_pack()
+    with pytest.raises(PackManifestError) as excinfo:
+        register_pack(_Faulty(fab.registry, fail_register_at=2, fail_lifecycle=True), manifest, implementations,
+                      operator=OPERATOR)
+    assert excinfo.value.code == "PACK_REGISTRATION_COMPENSATION_FAILED"  # the registry is dirty and says so
+
+
+def test_any_unexpected_failure_mid_registration_is_compensated(tmp_path: Path) -> None:
+    fab = fabric(tmp_path)
+    with pytest.raises(PackManifestError) as excinfo:
+        register_pack(_Faulty(fab.registry, fail_install=RuntimeError("disk full")), reference.MANIFEST,
+                      {reference.ADAPTER_ID: reference.adapter()}, operator=OPERATOR)
+    assert excinfo.value.code == "PACK_REGISTRATION_INCOMPLETE"
+    assert _plannable(fab) == []
+
+
+def test_registration_without_event_headroom_is_refused_before_any_change(tmp_path: Path) -> None:
+    from pados.capability.registry import MAX_EVENTS
+    fab = fabric(tmp_path)
+    before = len(fab.registry.events)
+    with pytest.raises(PackManifestError) as excinfo:
+        register_pack(_Faulty(fab.registry, events_used=MAX_EVENTS - 2), reference.MANIFEST,
+                      {reference.ADAPTER_ID: reference.adapter()}, operator=OPERATOR)
+    assert excinfo.value.code == "PACK_REGISTRY_CAPACITY_INSUFFICIENT"
+    assert len(fab.registry.events) == before and not fab.registry.is_installed(reference.ADAPTER_ID)
+
+
+def test_disable_without_event_headroom_revokes_nothing(tmp_path: Path) -> None:
+    from pados.capability.registry import MAX_EVENTS
+    fab = fabric(tmp_path)
+    manifest, implementations = _two_adapter_pack()
+    register_pack(fab.registry, manifest, implementations, operator=OPERATOR)
+    with pytest.raises(PackManifestError) as excinfo:
+        disable_pack(_Faulty(fab.registry, events_used=MAX_EVENTS - 1), manifest, operator=OPERATOR)
+    assert excinfo.value.code == "PACK_REGISTRY_CAPACITY_INSUFFICIENT"
+    assert sorted(_plannable(fab)) == [reference.ADAPTER_ID, "reference.digest.alt"]
+
+
+class _Drifting:
+    """An installed implementation whose live descriptor drifts after registration."""
+
+    def __init__(self) -> None:
+        self._inner = reference.adapter()
+        self.calls = 0
+
+    @property
+    def descriptor(self) -> Any:
+        self.calls += 1
+        return self._inner.descriptor
+
+    def available(self) -> bool:
+        return True
+
+    def execute(self, request: StageRequest, *, context: StageContext) -> StageOutput:
+        return self._inner.execute(request, context=context)
+
+
+def test_disable_reads_recorded_descriptors_and_never_runs_adapter_code(tmp_path: Path) -> None:
+    fab = fabric(tmp_path)
+    register_pack(fab.registry, reference.MANIFEST, {reference.ADAPTER_ID: reference.adapter()}, operator=OPERATOR)
+    governed = fab.registry._installed[reference.ADAPTER_ID][0]
+    governed._descriptor = governed._descriptor.model_copy(update={"version": "drifted"})  # integrity now fails
+    disable_pack(fab.registry, reference.MANIFEST, operator=OPERATOR)
+    assert fab.registry.adapter(reference.ADAPTER_ID).recorded_descriptor().lifecycle is LifecycleState.REVOKED
+
+
+@pytest.mark.parametrize("host", ["0x7f000001", "0x7f.0x0.0x0.0x1", "metadata", "kubernetes", "svc.lan",
+                                  "db.corp", "host.localdomain", "api.example.c0m"])
+def test_numeric_single_label_and_intranet_egress_hosts_are_refused(host: str) -> None:
+    with pytest.raises(PackManifestError) as excinfo:
+        _variant(**_networked(security__egress_hosts=[host]))
+    assert excinfo.value.code == "PACK_EGRESS_HOST_INVALID"

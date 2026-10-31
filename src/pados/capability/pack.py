@@ -48,7 +48,7 @@ from pados.capability.model import (
     ResourceRequirement,
     descriptor_digest,
 )
-from pados.capability.registry import RegistryError
+from pados.capability.registry import MAX_EVENTS, RegistryError
 from pados.capability_loop.contracts import CapabilityState
 from pados.capability_loop.lifecycle import PromotionProposal, propose_transition
 from pados.connectivity.requirements import NetworkRequirement
@@ -75,7 +75,9 @@ _KEY = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CONTRACT = re.compile(r"^[a-z][a-z0-9_.-]{2,79}/v[0-9]{1,3}$")
 _CHECKER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
-_LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
+_LOCAL_SUFFIXES = (".localhost", ".local", ".localdomain", ".internal", ".intranet", ".lan", ".corp", ".home",
+                   ".home.arpa")
+_PUBLIC_TLD = re.compile(r"^[a-z]{2,63}$")
 # Mirrors the registry's own rule (``registry.register_adapter``) so the manifest is refused before any mutation.
 _DETERMINISM_RANK = {Determinism.DETERMINISTIC: 0, Determinism.SEEDED: 1, Determinism.PROBABILISTIC: 2}
 _HOST = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
@@ -213,7 +215,10 @@ class PackSecurity(_Frozen):
         # An allowlist names public hosts: no IP literals (metadata endpoints, private ranges) and no loopback or
         # link-local names, which would turn "egress" into access to the local machine or network.
         for host in hosts:
-            if host.rsplit(".", 1)[-1].isdigit() or host == "localhost" or host.endswith(_LOCAL_SUFFIXES):
+            # At least two labels and an alphabetic top-level label: this refuses dotted and integer/hex IP forms
+            # (``0x7f000001``) and single-label intranet names (``metadata``) as well as the local suffixes.
+            labels = host.split(".")
+            if len(labels) < 2 or not _PUBLIC_TLD.fullmatch(labels[-1]) or host.endswith(_LOCAL_SUFFIXES):
                 raise ValueError("PACK_EGRESS_HOST_INVALID")
         return hosts
 
@@ -481,8 +486,7 @@ def _check_evidence(manifest: CapabilityPackManifest, output: StageOutput) -> No
 
 
 class RegisteredView(Protocol):
-    @property
-    def descriptor(self) -> AdapterDescriptor: ...
+    def recorded_descriptor(self) -> AdapterDescriptor: ...
 
 
 class PackRegistry(Protocol):
@@ -495,6 +499,9 @@ class PackRegistry(Protocol):
     def is_registered(self, adapter_id: str) -> bool: ...
 
     def adapter(self, adapter_id: str) -> RegisteredView: ...
+
+    @property
+    def events(self) -> Sequence[object]: ...
 
     def register_capability(self, descriptor: CapabilityDescriptor, *, operator: str,
                             reason_code: str = ...) -> CapabilityDescriptor: ...
@@ -546,6 +553,10 @@ def register_pack(registry: PackRegistry, manifest: CapabilityPackManifest,
     if any(found is not None and found != descriptor_digest(item)
            for item, found in zip(manifest.capabilities, existing.values(), strict=True)):
         raise PackManifestError("PACK_CAPABILITY_CONFLICT")
+    # Every registry change is an event: new capabilities + install and register per adapter, plus one revocation
+    # per adapter held in reserve so a compensation can always be recorded.
+    new_capabilities = sum(1 for found in existing.values() if found is None)
+    _require_event_headroom(registry, new_capabilities + 3 * len(governed))
     try:
         for capability in manifest.capabilities:
             if existing[capability.capability_id] is None:
@@ -554,9 +565,10 @@ def register_pack(registry: PackRegistry, manifest: CapabilityPackManifest,
             registry.install(adapter, operator=operator)
             registry.register_adapter(adapter.descriptor.adapter_id, capability_id=adapter.descriptor.capability_id,
                                       operator=operator, reason_code=reason_code)
-    except (RegistryError, PermissionError):
-        _revoke_registered(registry, declared, operator=operator)
-        raise PackManifestError("PACK_REGISTRATION_INCOMPLETE") from None
+    except Exception:  # noqa: BLE001 - whatever stopped the registration, compensate before reporting it
+        compensated = _revoke_registered(registry, declared, operator=operator)
+        code = "PACK_REGISTRATION_INCOMPLETE" if compensated else "PACK_REGISTRATION_COMPENSATION_FAILED"
+        raise PackManifestError(code) from None
     return PackRegistration(manifest.pack_id, manifest.version, manifest.manifest_digest,
                             tuple(item.adapter_id for item in manifest.adapters))
 
@@ -573,35 +585,47 @@ def _registered(registry: PackRegistry, capability: CapabilityDescriptor) -> str
     return descriptor_digest(found.model_copy(update={"lifecycle": capability.lifecycle}))
 
 
-def _revoke_registered(registry: PackRegistry, adapter_ids: set[str], *, operator: str) -> None:
+def _require_event_headroom(registry: PackRegistry, needed: int) -> None:
+    if len(registry.events) + needed > MAX_EVENTS:
+        raise PackManifestError("PACK_REGISTRY_CAPACITY_INSUFFICIENT")
+
+
+def _revoke_registered(registry: PackRegistry, adapter_ids: set[str], *, operator: str) -> bool:
     """Compensation after a refused registration: revoke what this call registered (installed-only adapters are
-    never plannable). Best effort by construction -- a failure here still leaves the registration refused."""
+    never plannable). Returns whether every revocation was recorded; a failure is reported, never hidden."""
+    complete = True
     for adapter_id in sorted(adapter_ids):
         try:
             if registry.is_registered(adapter_id):
                 registry.set_adapter_lifecycle(adapter_id, LifecycleState.REVOKED, operator=operator,
                                                reason_code="PACK_REGISTRATION_INCOMPLETE")
-        except (RegistryError, PermissionError):
-            continue
+        except Exception:  # noqa: BLE001 - keep revoking the rest; the caller learns the registry is dirty
+            complete = False
+    return complete
 
 
 def disable_pack(registry: PackRegistry, manifest: CapabilityPackManifest, *, operator: str,
                  reason_code: str = "PACK_DISABLED") -> None:
     """Operator action: revoke every adapter of the pack (unplannable; receipts and history are kept).
 
-    All or nothing: every adapter must be registered as this pack declared it before any is revoked. Already
-    revoked adapters are left as they are, so disabling twice changes nothing.
+    All or nothing: every adapter must be registered as this pack declared it, and the registry must have room to
+    record every revocation, before any is revoked. Descriptors are read as RECORDED at registration, never by
+    running adapter code, so a pack whose implementation drifted can still be disabled. Already revoked adapters
+    are left as they are, so disabling twice changes nothing.
     """
+    pending: list[str] = []
     for declared in manifest.adapters:
         if not registry.is_registered(declared.adapter_id):
             raise PackManifestError("PACK_NOT_REGISTERED")
-        live = registry.adapter(declared.adapter_id).descriptor
-        if descriptor_digest(live.model_copy(update={"lifecycle": declared.lifecycle})) != descriptor_digest(declared):
+        recorded = registry.adapter(declared.adapter_id).recorded_descriptor()
+        if descriptor_digest(recorded.model_copy(update={"lifecycle": declared.lifecycle})) != descriptor_digest(
+                declared):
             raise PackManifestError("PACK_IMPLEMENTATION_MISMATCH")  # a different pack owns this adapter id
-    for declared in manifest.adapters:
-        if registry.adapter(declared.adapter_id).descriptor.lifecycle is not LifecycleState.REVOKED:
-            registry.set_adapter_lifecycle(declared.adapter_id, LifecycleState.REVOKED, operator=operator,
-                                           reason_code=reason_code)
+        if recorded.lifecycle is not LifecycleState.REVOKED:
+            pending.append(declared.adapter_id)
+    _require_event_headroom(registry, len(pending))
+    for adapter_id in pending:
+        registry.set_adapter_lifecycle(adapter_id, LifecycleState.REVOKED, operator=operator, reason_code=reason_code)
 
 
 def propose_pack_transition(manifest: CapabilityPackManifest, *, current: CapabilityState, target: CapabilityState,
