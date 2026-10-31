@@ -71,9 +71,14 @@ from pados.packs.research.contracts import (
     ResearchRuntimeUnavailable,
     RunStatus,
 )
-from pados.packs.research.manifest import build_run_manifest, verify_run_manifest
+from pados.packs.research.manifest import (
+    build_run_manifest,
+    canonical_request,
+    request_digest_of,
+    verify_run_manifest,
+)
 
-__all__ = ["ResearchRuntimeProfile", "ResearchRuntimeTimeout", "ResearchRuntimeUnavailable", "outputs_digest"]
+__all__ = ["ResearchRuntimeProfile", "canonical_request", "ResearchRuntimeTimeout", "ResearchRuntimeUnavailable", "outputs_digest"]
 
 PACK_ID = "pados.research-campaign"
 CAPABILITY_ID = "RESEARCH_CAMPAIGN"
@@ -167,10 +172,6 @@ def canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
 
-def canonical_request(campaign: CampaignRequest) -> bytes:
-    return canonical_json(campaign.model_dump(mode="json"))
-
-
 def task_parameters(profile: ResearchRuntimeProfile, request_payload: bytes) -> dict[str, str]:
     """The task-owned stage parameters: which profile, and the digest of the exact request the task approved."""
     return {"profile_id": profile.profile_id, "request_digest": hashlib.sha256(request_payload).hexdigest()}
@@ -244,10 +245,11 @@ class ResearchCampaignAdapter:
 
     def _execute(self, request: StageRequest, context: StageContext) -> StageOutput:
         campaign, request_digest = self._campaign(request, context)
-        manifest, promoted = build_run_manifest(self._run(campaign), campaign=campaign, profile=self._profile,
-                                                request_digest=request_digest)
+        manifest, promoted = build_run_manifest(self._run(campaign), campaign=campaign, profile=self._profile)
         refs = [context.artifacts.put(canonical_json(manifest.model_dump(mode="json")), media_type=JSON_MEDIA_TYPE,
-                                      kind=KIND_MANIFEST)]
+                                      kind=KIND_MANIFEST),
+                # the pinned request travels with its manifest, so verification can bind to its requested phases
+                context.artifacts.put(canonical_request(campaign), media_type=JSON_MEDIA_TYPE, kind=KIND_REQUEST)]
         refs += [context.artifacts.put(promoted[entry.relative_path], media_type=ARTIFACT_MEDIA_TYPE,
                                        kind=artifact_kind(entry.kind.value)) for entry in manifest.artifacts]
         evidenced = sum(1 for claim in manifest.claims if claim.status is ClaimStatus.EVIDENCED)
@@ -263,30 +265,44 @@ class ResearchCampaignAdapter:
         return StageOutput(outputs=tuple(refs), metrics={"artifacts": float(len(refs))}, evidence=evidence)
 
 
-def _unpack(outputs: Sequence[tuple[ArtifactRef, bytes]]) -> tuple[ResearchRunManifest, dict[str, bytes]] | None:
-    """The manifest and its promoted bytes (by relative path), matched by kind, digest and size; else ``None``."""
-    manifests = [(ref, data) for ref, data in outputs if ref.kind == KIND_MANIFEST]
-    if len(manifests) != 1:
+def _matches(ref: ArtifactRef, data: bytes) -> bool:
+    return len(data) == ref.size_bytes and hashlib.sha256(data).hexdigest() == ref.sha256
+
+
+def _unpack(outputs: Sequence[tuple[ArtifactRef, bytes]]
+            ) -> tuple[ResearchRunManifest, dict[str, bytes], CampaignRequest] | None:
+    """The manifest, its promoted bytes (by relative path) and the pinned request it names; else ``None``.
+
+    Every output's bytes must match its own reference (digest and size) -- the manifest and the request included --
+    and the request copy must be exactly the canonical request whose digest the manifest records.
+    """
+    if any(not _matches(ref, data) for ref, data in outputs):
+        return None
+    manifests = [data for ref, data in outputs if ref.kind == KIND_MANIFEST]
+    requests = [data for ref, data in outputs if ref.kind == KIND_REQUEST]
+    if len(manifests) != 1 or len(requests) != 1:
         return None
     try:
-        manifest = ResearchRunManifest.model_validate(json.loads(manifests[0][1].decode("ascii")))
+        manifest = ResearchRunManifest.model_validate(json.loads(manifests[0].decode("ascii")))
+        campaign = CampaignRequest.model_validate(json.loads(requests[0].decode("ascii")))
     except (ValidationError, ValueError, UnicodeDecodeError, RecursionError):
         return None
-    if canonical_json(manifest.model_dump(mode="json")) != manifests[0][1]:
+    if canonical_json(manifest.model_dump(mode="json")) != manifests[0] or canonical_request(campaign) != requests[0]:
         return None
-    remaining = [(ref, data) for ref, data in outputs if ref.kind != KIND_MANIFEST]
+    if request_digest_of(campaign) != manifest.request_digest:
+        return None
+    remaining = [(ref, data) for ref, data in outputs if ref.kind not in (KIND_MANIFEST, KIND_REQUEST)]
     if len(remaining) != len(manifest.artifacts):
         return None
     promoted: dict[str, bytes] = {}
     for entry in manifest.artifacts:
         match = next((item for item in remaining if item[0].kind == artifact_kind(entry.kind.value)
-                      and item[0].sha256 == entry.sha256 and len(item[1]) == entry.size_bytes
-                      and hashlib.sha256(item[1]).hexdigest() == entry.sha256), None)
+                      and item[0].sha256 == entry.sha256 and item[0].size_bytes == entry.size_bytes), None)
         if match is None:
             return None
         remaining.remove(match)
         promoted[entry.relative_path] = match[1]
-    return manifest, promoted
+    return manifest, promoted, campaign
 
 
 def run_manifest_valid(outputs: Sequence[tuple[ArtifactRef, bytes]]) -> bool:
@@ -297,14 +313,16 @@ def run_manifest_valid(outputs: Sequence[tuple[ArtifactRef, bytes]]) -> bool:
 def run_manifest_reference_check(outputs: Sequence[tuple[ArtifactRef, bytes]]) -> bool:
     """REFERENCE_CHECK: the manifest re-derives from its own promoted artifacts (metrics, claims, status)."""
     unpacked = _unpack(outputs)
-    return unpacked is not None and verify_run_manifest(*unpacked)
+    return unpacked is not None and verify_run_manifest(unpacked[0], unpacked[1], campaign=unpacked[2])
 
 
-def research_projection(outputs: Sequence[tuple[ArtifactRef, bytes]], *, goal_id: str) -> dict[str, Any]:
+def research_projection(outputs: Sequence[tuple[ArtifactRef, bytes]], *, goal_id: str,
+                        request_digest: str) -> dict[str, Any]:
     """Project VERIFIED stage outputs onto the bounded provider-response fields ``work_protocol`` normalizes.
 
     The manifest is re-derived from its own promoted artifacts first (the REFERENCE_CHECK); outputs that do not
-    verify are ``RESEARCH_MANIFEST_UNVERIFIED`` -- a caller cannot project a manifest it merely holds.
+    verify are ``RESEARCH_MANIFEST_UNVERIFIED`` -- a caller cannot project a manifest it merely holds. The caller
+    passes the request digest the TASK pinned (its stage parameter): outputs naming any other request do not project.
 
     Content is rendered from PADOS-derived tokens only (phase states, final-evaluation metrics, EVIDENCED claims);
     nothing the runtime wrote as prose is presented. Only a COMPLETED run with no unsupported claim completes the
@@ -312,7 +330,8 @@ def research_projection(outputs: Sequence[tuple[ArtifactRef, bytes]], *, goal_id
     receipt, provenance and acceptance fields are supplied by PADOS when it normalizes, composes and verifies.
     """
     unpacked = _unpack(outputs)
-    if unpacked is None or not verify_run_manifest(*unpacked):
+    if (unpacked is None or unpacked[0].request_digest != request_digest
+            or not verify_run_manifest(unpacked[0], unpacked[1], campaign=unpacked[2])):
         raise ResearchError("RESEARCH_MANIFEST_UNVERIFIED")
     manifest = unpacked[0]
     phases = ", ".join(f"{p.phase.value}={p.state.value}" for p in manifest.phases)

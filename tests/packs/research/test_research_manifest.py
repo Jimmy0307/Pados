@@ -22,8 +22,7 @@ _profile = profile
 
 
 def _build(raw: Any, campaign: Any = None, profile: Any = None) -> Any:
-    return build_run_manifest(raw, campaign=campaign or request(), profile=profile or _profile(),
-                              request_digest="a" * 64)
+    return build_run_manifest(raw, campaign=campaign or request(), profile=profile or _profile())
 
 
 def _refused(raw: Any, **kwargs: Any) -> str:
@@ -39,7 +38,7 @@ def test_a_complete_run_yields_a_consistent_unaccepted_manifest() -> None:
     assert manifest.upstream_run_id == RUN_ID and manifest.final_evaluation == METRICS
     assert {entry.relative_path for entry in manifest.artifacts} == set(complete_files())
     assert all(claim.status is ClaimStatus.EVIDENCED for claim in manifest.claims)
-    assert verify_run_manifest(manifest, promoted)
+    assert verify_run_manifest(manifest, promoted, campaign=request())
 
 
 @pytest.mark.parametrize("raw", [None, "free text", {"exit_code": 0}, {"unexpected": True}, 42])
@@ -59,8 +58,9 @@ def test_a_completed_phase_whose_artifact_is_missing_is_refused() -> None:
 def test_an_artifact_whose_bytes_changed_after_the_manifest_fails_verification() -> None:
     manifest, promoted = _build(output())
     tampered = dict(promoted, **{"final_evaluation/result.json": b'{"metrics": {"packing_density": 0.99}}'})
-    assert not verify_run_manifest(manifest, tampered)
-    assert not verify_run_manifest(manifest, {k: v for k, v in promoted.items() if not k.startswith("paper/")})
+    assert not verify_run_manifest(manifest, tampered, campaign=request())
+    assert not verify_run_manifest(manifest, {k: v for k, v in promoted.items() if not k.startswith("paper/")},
+                               campaign=request())
 
 
 @pytest.mark.parametrize("path", ["../escape.txt", "/etc/passwd", "C:/Windows/win.ini", "paper\\paper.pdf",
@@ -100,7 +100,7 @@ def test_a_partial_run_is_recorded_as_partial_never_completed() -> None:
     files = {k: v for k, v in complete_files().items() if k.startswith(("task/", "investigation/"))}
     manifest, promoted = _build(output(phases=phases, files=files, claims=()))
     assert manifest.status is RunStatus.PARTIAL and manifest.final_evaluation is None
-    assert verify_run_manifest(manifest, promoted)
+    assert verify_run_manifest(manifest, promoted, campaign=request())
 
 
 def test_a_failed_phase_fails_the_run() -> None:
@@ -139,14 +139,14 @@ def test_a_semantic_claim_not_supported_by_the_final_evaluation_is_marked_not_ev
     manifest, promoted = _build(output(claims=(claim,)))
     assert [c.status for c in manifest.claims] == [ClaimStatus.NOT_EVIDENCED]
     assert manifest.review_required is True
-    assert verify_run_manifest(manifest, promoted)  # consistent: the claim is recorded as unsupported
+    assert verify_run_manifest(manifest, promoted, campaign=request())  # consistent: the claim is recorded as unsupported
 
 
 def test_a_manifest_whose_claim_status_was_upgraded_fails_verification() -> None:
     manifest, promoted = _build(output(claims=({"metric": "packing_density", "value": 0.95},)))
     forged_claims = tuple(c.model_copy(update={"status": ClaimStatus.EVIDENCED}) for c in manifest.claims)
     forged = manifest.model_copy(update={"claims": forged_claims, "review_required": False})
-    assert not verify_run_manifest(forged, promoted)
+    assert not verify_run_manifest(forged, promoted, campaign=request())
 
 
 # -- independent review: hostile numbers, unfinished evaluations, bounds, unrequested phases ---------------------
@@ -227,7 +227,7 @@ def test_case_colliding_paths_are_unauthorized() -> None:
 def test_verification_is_total_on_hostile_bytes() -> None:
     manifest, promoted = _build(output())
     hostile = dict(promoted, **{"final_evaluation/result.json": HUGE})
-    assert verify_run_manifest(manifest, hostile) is False
+    assert verify_run_manifest(manifest, hostile, campaign=request()) is False
 
 
 def test_verification_is_total_when_a_forged_entry_matches_hostile_bytes() -> None:
@@ -237,4 +237,4 @@ def test_verification_is_total_when_a_forged_entry_matches_hostile_bytes() -> No
     entries = tuple(e.model_copy(update={"sha256": hashlib.sha256(HUGE).hexdigest(), "size_bytes": len(HUGE)})
                     if e.relative_path == path else e for e in manifest.artifacts)
     forged = manifest.model_copy(update={"artifacts": entries})
-    assert verify_run_manifest(forged, dict(promoted, **{path: HUGE})) is False
+    assert verify_run_manifest(forged, dict(promoted, **{path: HUGE}), campaign=request()) is False

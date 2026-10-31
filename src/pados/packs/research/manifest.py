@@ -47,7 +47,7 @@ from pados.packs.research.contracts import (
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_BYTES = 64 * 1024 * 1024  # every file, quarantined ones included
 MAX_EXACT_INT = 2**53  # larger integers cannot be compared as floats (and overflow on conversion)
-MAX_PROMOTED = 31  # the fabric bounds a stage at 32 outputs; one is the manifest itself
+MAX_PROMOTED = 30  # the fabric bounds a stage at 32 outputs: one manifest, one pinned-request copy
 MAX_DEPTH = 8
 # Dot-files (``.env``, ``.hydra/``) are legal names -- quarantined, not refused; ``.``/``..`` are refused separately.
 _SEGMENT = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
@@ -70,6 +70,16 @@ PHASE_OUTPUT: dict[ResearchPhase, ArtifactKind] = {
 # Outputs that may exist only once their phase completed (a final evaluation that never completed proves nothing).
 _ONLY_WHEN_COMPLETED = {ResearchPhase.FINAL_EVALUATION, ResearchPhase.PAPER, ResearchPhase.REVIEW}
 FINAL_EVALUATION_PATH = "final_evaluation/result.json"
+
+
+def canonical_request(campaign: CampaignRequest) -> bytes:
+    """The canonical bytes of a campaign request; the task pins their SHA-256."""
+    return json.dumps(campaign.model_dump(mode="json"), sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True).encode("ascii")
+
+
+def request_digest_of(campaign: CampaignRequest) -> str:
+    return hashlib.sha256(canonical_request(campaign)).hexdigest()
 
 
 def _coerce(raw: object) -> ResearchRunOutput:
@@ -218,8 +228,8 @@ def _check_resume(campaign: CampaignRequest, output: ResearchRunOutput, records:
         raise ResearchError("RESEARCH_RESUME_MISMATCH")
 
 
-def build_run_manifest(raw: object, *, campaign: CampaignRequest, profile: ResearchRuntimeProfile,
-                       request_digest: str) -> tuple[ResearchRunManifest, dict[str, bytes]]:
+def build_run_manifest(raw: object, *, campaign: CampaignRequest,
+                       profile: ResearchRuntimeProfile) -> tuple[ResearchRunManifest, dict[str, bytes]]:
     """Admit an untrusted run: the manifest PADOS derives and the bytes it promotes (keyed by relative path)."""
     output = _coerce(raw)
     if output.exit_code != 0:
@@ -237,14 +247,22 @@ def build_run_manifest(raw: object, *, campaign: CampaignRequest, profile: Resea
     manifest = ResearchRunManifest(
         profile_id=profile.profile_id, upstream_repository=profile.upstream_repository,
         upstream_revision=profile.upstream_revision, image_digest=profile.image_digest,
-        upstream_run_id=output.upstream_run_id, request_digest=request_digest, task_snapshot_digest=snapshot,
+        upstream_run_id=output.upstream_run_id, request_digest=request_digest_of(campaign),
+        task_snapshot_digest=snapshot,
         phases=records, artifacts=entries, quarantined_count=quarantined, final_evaluation=metrics, claims=claims,
         status=_status(records), review_required=any(c.status is ClaimStatus.NOT_EVIDENCED for c in claims))
     return manifest, promoted
 
 
-def verify_run_manifest(manifest: ResearchRunManifest, promoted: Mapping[str, bytes]) -> bool:
-    """Deterministic re-check: every entry matches its bytes, and metrics, claim statuses and status re-derive."""
+def verify_run_manifest(manifest: ResearchRunManifest, promoted: Mapping[str, bytes], *,
+                        campaign: CampaignRequest) -> bool:
+    """Deterministic re-check against the PINNED campaign: the manifest names exactly that request and exactly its
+    requested phases (none dropped, none added), every entry matches its bytes, and metrics, claim statuses and the
+    run status re-derive. Without the campaign, a forger could drop pending phases and claim completion."""
+    if manifest.request_digest != request_digest_of(campaign):
+        return False
+    if tuple(record.phase for record in manifest.phases) != campaign.phases:
+        return False
     if set(promoted) != {entry.relative_path for entry in manifest.artifacts}:
         return False
     for entry in manifest.artifacts:
