@@ -46,6 +46,7 @@ from pados.capability.model import (
     ResourceRequirement,
     descriptor_digest,
 )
+from pados.capability.registry import RegistryError
 from pados.capability_loop.contracts import CapabilityState
 from pados.capability_loop.lifecycle import PromotionProposal, propose_transition
 from pados.connectivity.requirements import NetworkRequirement
@@ -416,9 +417,18 @@ class GovernedPackAdapter:
         return self._manifest
 
     def available(self) -> bool:
-        return bool(self._inner.available())
+        # A missing runtime or an unreachable provider is "unavailable", never an error that escapes the
+        # planner: the pack becomes unplannable (fail closed) and the platform keeps working.
+        try:
+            return self._inner.available() is True
+        except Exception:  # noqa: BLE001 - closed boundary: an availability probe cannot crash planning
+            return False
 
     def execute(self, request: StageRequest, *, context: StageContext) -> StageOutput:
+        if request.capability_id != self._descriptor.capability_id:
+            raise CapabilityAdapterError("PACK_CAPABILITY_MISMATCH")
+        if request.classification.rank > self._manifest.security.classification_ceiling.rank:
+            raise CapabilityAdapterError("PACK_CLASSIFICATION_CEILING_EXCEEDED")
         try:
             output = self._inner.execute(request, context=context)
         except ArtifactAccessDenied:
@@ -448,6 +458,10 @@ def _check_evidence(manifest: CapabilityPackManifest, output: StageOutput) -> No
 class PackRegistry(Protocol):
     """The operator surface of the existing ``CapabilityRegistry`` a pack registration uses (nothing more)."""
 
+    def capability(self, capability_id: str) -> CapabilityDescriptor: ...
+
+    def is_installed(self, adapter_id: str) -> bool: ...
+
     def register_capability(self, descriptor: CapabilityDescriptor, *, operator: str,
                             reason_code: str = ...) -> CapabilityDescriptor: ...
 
@@ -475,8 +489,10 @@ def register_pack(registry: PackRegistry, manifest: CapabilityPackManifest,
     """Operator action: install and register a pack through the EXISTING registry. Grants nothing.
 
     Every check runs before the registry is touched: a DISCOVERED pack is a known candidate, not an executable
-    one; every declared adapter needs exactly its declared implementation. The registry then applies its own
-    rules (determinism, lifecycle, revocation) as for any adapter.
+    one; every declared adapter needs exactly its declared implementation; an adapter id that already exists in
+    this registry (registered, superseded or disabled) makes the registration stale; a capability that is already
+    registered is reused only when its descriptor is identical, never silently redefined. The registry then
+    applies its own rules (determinism, lifecycle, revocation) as for any adapter.
     """
     if manifest.initial_state is CapabilityState.DISCOVERED:
         raise PackManifestError("PACK_DISCOVERED_NOT_REGISTRABLE")
@@ -486,14 +502,33 @@ def register_pack(registry: PackRegistry, manifest: CapabilityPackManifest,
     if not set(implementations) <= declared:
         raise PackManifestError("PACK_IMPLEMENTATION_UNDECLARED")
     governed = [GovernedPackAdapter(manifest, implementations[item.adapter_id]) for item in manifest.adapters]
+    if any(registry.is_installed(adapter_id) for adapter_id in declared):
+        raise PackManifestError("PACK_STALE_REGISTRATION")
+    existing = {item.capability_id: _registered(registry, item) for item in manifest.capabilities}
+    if any(found is not None and found != descriptor_digest(item)
+           for item, found in zip(manifest.capabilities, existing.values(), strict=True)):
+        raise PackManifestError("PACK_CAPABILITY_CONFLICT")
     for capability in manifest.capabilities:
-        registry.register_capability(capability, operator=operator, reason_code=reason_code)
+        if existing[capability.capability_id] is None:
+            registry.register_capability(capability, operator=operator, reason_code=reason_code)
     for adapter in governed:
         registry.install(adapter, operator=operator)
         registry.register_adapter(adapter.descriptor.adapter_id, capability_id=adapter.descriptor.capability_id,
                                   operator=operator, reason_code=reason_code)
     return PackRegistration(manifest.pack_id, manifest.version, manifest.manifest_digest,
                             tuple(item.adapter_id for item in manifest.adapters))
+
+
+def _registered(registry: PackRegistry, capability: CapabilityDescriptor) -> str | None:
+    """Digest of the already registered descriptor (compared at the pack's declared lifecycle, since operators
+    move lifecycle), or ``None`` when the capability is not registered yet."""
+    try:
+        found = registry.capability(capability.capability_id)
+    except RegistryError as exc:
+        if exc.code != "CAPABILITY_NOT_REGISTERED":
+            raise
+        return None
+    return descriptor_digest(found.model_copy(update={"lifecycle": capability.lifecycle}))
 
 
 def disable_pack(registry: PackRegistry, manifest: CapabilityPackManifest, *, operator: str,
