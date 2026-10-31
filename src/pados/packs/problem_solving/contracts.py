@@ -123,8 +123,10 @@ class EvidencePack(_Frozen):
             raise ValueError("PS_EVIDENCE_PACK_INVALID")
         if any(item.case_id not in self.cases for item in self.items):
             raise ValueError("PS_EVIDENCE_CASE_UNDECLARED")
-        # The same material stating the same thing twice is one piece of evidence, not corroboration.
-        facts = [(i.case_id, i.source_id, i.content_digest, i.subject, i.assertion) for i in self.items]
+        # The same material stating the same thing twice is one piece of evidence, not corroboration. Without
+        # comparable tokens, "the same thing" is the statement itself: distinct observations from one document stay.
+        facts = [(i.case_id, i.source_id, i.content_digest, i.subject, i.assertion,
+                  i.statement if i.subject is None else None) for i in self.items]
         if len(set(facts)) != len(facts):
             raise ValueError("PS_EVIDENCE_DUPLICATE")
         return self

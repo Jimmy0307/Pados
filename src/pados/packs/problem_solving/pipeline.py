@@ -180,7 +180,8 @@ def result_projection(pack: EvidencePack, claims: ClaimSet, report: ProblemSolvi
     by_id = {claim.claim_id: claim for claim in claims.claims}
     profile = PROFILES.get(report.profile_id)
     titles = {} if profile is None else {s.section_id: s.title for s in profile.sections}
-    tag = report.evidence_pack_digest[:16]
+    # Namespaced by goal and by this exact report, so separate goals and report revisions never collide.
+    tag = canonical_hash({"goal_id": goal_id, "report": report.model_dump(mode="json")})[:24]
     contributions: list[dict[str, Any]] = []
     cited: dict[str, dict[str, str]] = {}
     for section in report.sections:

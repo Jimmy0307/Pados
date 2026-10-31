@@ -98,3 +98,39 @@ def test_deeply_nested_evidence_is_a_closed_refusal_and_checkers_return_false() 
                          (ref.model_copy(update={"kind": ps.KIND_REPORT}), b"{}")]
     assert ps.report_output_valid(triple) is False
     assert ps.report_reference_check(triple) is False
+
+
+# -- Codex review: free-text duplicates and contribution identity ------------------------------------------
+def test_distinct_free_text_observations_from_one_document_are_admitted() -> None:
+    pack = EvidencePack(cases=(CASE_A,), items=(
+        evidence("ev-pump", CASE_A, None, None, "Synthetic note: the pump stopped.", material="doc-1"),
+        evidence("ev-pressure", CASE_A, None, None, "Synthetic note: pressure read ten bar.", material="doc-1")))
+    assert len(pack.items) == 2
+
+
+def test_the_same_free_text_restated_from_one_document_is_still_a_duplicate() -> None:
+    with pytest.raises(ValidationError, match="PS_EVIDENCE_DUPLICATE"):
+        EvidencePack(cases=(CASE_A,), items=(
+            evidence("ev-one", CASE_A, None, None, "Synthetic note: the pump stopped.", material="doc-1"),
+            evidence("ev-two", CASE_A, None, None, "Synthetic note: the pump stopped.", material="doc-1")))
+
+
+def _ids(goal_id: str, claims: ClaimSet | None = None) -> set[str]:
+    pack, complete = complete_case()
+    chosen = claims or complete
+    report = build_report(pack, chosen, EIGHT_D)
+    return {item["contribution_id"] for item in result_projection(pack, chosen, report, goal_id=goal_id)["contributions"]}
+
+
+def test_contribution_ids_are_namespaced_by_goal() -> None:
+    assert not _ids("goal-one") & _ids("goal-two")
+
+
+def test_contribution_ids_differ_between_reports_over_the_same_evidence() -> None:
+    _, claims = complete_case()
+    fewer = ClaimSet(claims=claims.claims[:4])
+    assert not _ids("goal-one") & _ids("goal-one", fewer)
+
+
+def test_contribution_ids_are_deterministic() -> None:
+    assert _ids("goal-one") == _ids("goal-one")
