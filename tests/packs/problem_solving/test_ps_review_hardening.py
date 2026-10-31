@@ -40,7 +40,7 @@ def test_a_cross_case_claim_needs_on_subject_support_in_every_case() -> None:
         evidence("ev-b-noise", CASE_B, "symptom", "noise")))
     claims = ClaimSet(claims=(
         claim("cl-both", "D4", "root_cause", "worn_bearing", ("ev-a-rc", "ev-b-noise"), (CASE_A, CASE_B)),))
-    (verdict,) = ground_claims(pack, claims)
+    (verdict,) = ground_claims(pack, claims, EIGHT_D)
     assert verdict.status is GroundingStatus.CASE_MISMATCH
     assert {s.section_id: s.status for s in build_report(pack, claims, EIGHT_D).sections}["D4"] is not (
         SectionStatus.SUPPORTED)

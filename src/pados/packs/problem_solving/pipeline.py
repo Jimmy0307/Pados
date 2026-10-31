@@ -73,8 +73,8 @@ def admit_evidence(pack: EvidencePack, *, pinned_digest: str, authorized_sources
         raise ProblemSolvingError("PS_EVIDENCE_SOURCE_UNAUTHORIZED")
 
 
-def _ground(claim: Claim, pack: EvidencePack, subjects: frozenset[str] | None) -> GroundingStatus:
-    if subjects is not None and claim.subject not in subjects:
+def _ground(claim: Claim, pack: EvidencePack, subjects: frozenset[str]) -> GroundingStatus:
+    if claim.subject not in subjects:
         return GroundingStatus.SECTION_MISMATCH  # e.g. a symptom filed as the root cause
     cited = [pack.item(evidence_id) for evidence_id in claim.citations]
     if not claim.citations or any(item is None for item in cited):
@@ -96,12 +96,11 @@ def _ground(claim: Claim, pack: EvidencePack, subjects: frozenset[str] | None) -
 
 
 def ground_claims(pack: EvidencePack, claims: ClaimSet,
-                  profile: ProblemSolvingProfile | None = None) -> tuple[ClaimVerdict, ...]:
-    """Deterministic grounding verdict for every claim, in claim order (section subjects checked with a profile)."""
-    allowed = None if profile is None else {s.section_id: frozenset(s.subjects) for s in profile.sections}
+                  profile: ProblemSolvingProfile) -> tuple[ClaimVerdict, ...]:
+    """Deterministic grounding verdict for every claim, in claim order, against the profile's section subjects."""
+    allowed = {s.section_id: frozenset(s.subjects) for s in profile.sections}
     return tuple(ClaimVerdict(claim_id=claim.claim_id,
-                              status=_ground(claim, pack, None if allowed is None else allowed.get(claim.section,
-                                                                                                   frozenset())))
+                              status=_ground(claim, pack, allowed.get(claim.section, frozenset())))
                  for claim in claims.claims)
 
 
@@ -162,8 +161,10 @@ MAX_CONTRIBUTION_CHARS = 16_000  # the work-protocol contribution bound
 
 
 def _cited_statements(pack: EvidencePack, claim: Claim) -> str:
+    # Only the cited items stating this very (subject, assertion): exactly the evidence that grounded the claim.
     items = [pack.item(evidence_id) for evidence_id in claim.citations]
-    return "; ".join(f"{item.evidence_id}: {item.statement}" for item in items if item is not None)
+    return "; ".join(f"{item.evidence_id}: {item.statement}" for item in items
+                     if item is not None and (item.subject, item.assertion) == (claim.subject, claim.assertion))
 
 
 def result_projection(pack: EvidencePack, claims: ClaimSet, report: ProblemSolvingReport, *,

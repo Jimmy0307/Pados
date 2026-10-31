@@ -75,7 +75,7 @@ def test_conflicting_evidence_is_surfaced_not_resolved() -> None:
 
 def test_cross_case_claims_must_preserve_case_identity() -> None:
     pack, claims = cross_case()
-    verdicts = {v.claim_id: v.status for v in ground_claims(pack, claims)}
+    verdicts = {v.claim_id: v.status for v in ground_claims(pack, claims, EIGHT_D)}
     assert verdicts == {"cl-shared": GroundingStatus.GROUNDED, "cl-half": GroundingStatus.CASE_MISMATCH,
                         "cl-wrong-case": GroundingStatus.CASE_MISMATCH}
 
