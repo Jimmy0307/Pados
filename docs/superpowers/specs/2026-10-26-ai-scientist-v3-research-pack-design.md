@@ -30,6 +30,20 @@ conflicting statement below:
 | Profile network class, temp root, secrets | Pack V1 security: `egress` `NONE` (offline) or `ALLOWLIST` (public hosts only), `allowed_roots` logical names, `secret_refs` as `secretref://` only, classification ceiling `INTERNAL`. Runtime `CONTAINER`: code not reviewed in-tree never runs `IN_PROCESS`. Provenance `OPERATOR_SUPPLIED`, `source_digest` = the pinned image digest. |
 | Failure semantics prose | Pack V1 closed failure vocabulary (`RESEARCH_*`); only `RESEARCH_RUNTIME_UNAVAILABLE` is retryable; a timeout never retries with a weaker network or model class. |
 
+Known V0 limitations, fail-closed and recorded rather than hidden. Both were raised by the Codex review of
+`ee344b2`:
+
+1. **One network class per registry.** Pack V1 binds every descriptor's network requirement to the pack runtime, so
+   an offline profile and a networked profile declare different `RESEARCH_CAMPAIGN` descriptors. The second one
+   registered is refused with `PACK_CAPABILITY_CONFLICT`.
+2. **One selectable profile per capability.** The planner does not read stage parameters when it picks an adapter.
+   With two same-class profiles registered, a task naming the second can be refused with
+   `RESEARCH_PARAMETERS_INVALID`; it never runs on the wrong runtime.
+
+Both need either a Pack V1 change (network bound per adapter rather than per capability descriptor) or
+profile-aware selection in the planner. Each is a change to merged or frozen code, so it is deliberately not made
+inside this research pack. Until then: one research profile per registry.
+
 Research-specific contracts stay in `src/pados/packs/research/`:
 - `CampaignRequest`, pinned by digest as a task parameter;
 - `ResearchRunOutput`, the untrusted runtime return;
