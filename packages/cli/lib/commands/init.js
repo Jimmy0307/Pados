@@ -98,6 +98,22 @@ function installPlatformRuntime(ctx, minFree) {
   return { runtime: runtimeAt(result.dir, pkg.version), installed: result.installed, bytes: pkg.manifest.files.bytes };
 }
 
+// RC2 INST-1: init installs; it never upgrades. On an existing installation a different runtime version is activated
+// (and its data migrated) only by `pados update`, which checks compatibility first and asks before migrating.
+function assertNoUnconsentedUpgrade(existing, previous, version) {
+  if (!existing || !previous || !previous.version || !version || previous.version === version) return;
+  throw new PadosError('UPDATE_REQUIRED', { details: { installed: previous.version, cli: version } });
+}
+
+// Lanes whose existing data would be migrated forward without consent (RC2 INST-1). Empty or missing databases hold no
+// data, so a fresh or recovering install still initializes them.
+function unconsentedMigration(check, { existing, flags }) {
+  if (!existing || flags.yes) return null;
+  const lanes = (check.lanes || []).filter((lane) => lane.state === 'UPGRADE_AVAILABLE')
+    .map((lane) => `${lane.lane} (${lane.database}): ${(lane.revisions || []).join(',') || 'empty'} -> ${lane.target_revision}`);
+  return lanes.length ? lanes : null;
+}
+
 // Flags that only take effect when the configuration is written (INST-2: never silently ignore them).
 const CONFIG_FLAGS = ['dbHost', 'dbPort', 'dbUser', 'dbName', 'dbPasswordRef', 'dbPassfile', 'apiPort'];
 
@@ -136,7 +152,7 @@ function python(ctx, runtime, args, options) {
   return runPython(runtime, ctx.home, args, { env: ctx.env, ...options });
 }
 
-function configureDatabase(ctx, runtime) {
+function configureDatabase(ctx, runtime, existing) {
   if (ctx.flags.skipDatabase) return { status: 'SKIPPED' };
   const check = python(ctx, runtime, ['migrate', '--check']).json;
   const states = new Set((check.lanes || []).map((lane) => lane.state));
@@ -146,6 +162,8 @@ function configureDatabase(ctx, runtime) {
   if (states.has('INCOMPATIBLE')) return { status: 'BLOCKED', code: 'MIGRATIONS_INCOMPATIBLE', check };
   if (states.has('DATABASE_MISSING') && !ctx.flags.createDatabases) return { status: 'BLOCKED', code: 'DATABASE_MISSING', check };
   if (check.status === 'CURRENT') return { status: 'CURRENT', check };
+  const unconsented = unconsentedMigration(check, { existing, flags: ctx.flags });
+  if (unconsented) return { status: 'BLOCKED', code: 'MIGRATION_CONSENT_REQUIRED', lanes: unconsented, check };
   const args = ['migrate', ...(ctx.flags.createDatabases ? ['--create-databases'] : [])];
   const applied = python(ctx, runtime, args, { timeoutMs: 900000 }).json;
   return { status: applied.status, code: applied.status === 'CURRENT' ? undefined : (applied.code || 'MIGRATIONS_PENDING'), applied };
@@ -164,7 +182,9 @@ async function run(ctx) {
   // Runtime package resolution + disk check happen before anything is written.
   const plan = { storage, reason: storage === 'FULL_LOCAL' ? 'FULL_LOCAL keeps artifacts locally' : 'runtime size', runtimeBytes: 0 };
   if (!(ctx.env.PADOS_CLI_DEV_PYTHON && ctx.env.PADOS_CLI_DEV_APP)) {
-    plan.runtimeBytes = resolveRuntimePackage({ env: ctx.env }).manifest.files.bytes;
+    const pkg = resolveRuntimePackage({ env: ctx.env });
+    assertNoUnconsentedUpgrade(existing || Boolean(previous), previous, pkg.version);
+    plan.runtimeBytes = pkg.manifest.files.bytes;
   }
   await confirmDisk(ctx, plan);
   const runtimeResult = installPlatformRuntime(ctx, minFree);
@@ -183,7 +203,7 @@ async function run(ctx) {
   if (validation.status !== 0) {
     throw new PadosError('CONFIG_INVALID', { details: validation.json, action: 'pados doctor; fix the configuration file or re-run pados init --reconfigure' });
   }
-  report.database = configureDatabase(ctx, runtimeResult.runtime);
+  report.database = configureDatabase(ctx, runtimeResult.runtime, existing);
   const doctor = python(ctx, runtimeResult.runtime, ['doctor']).json;
   report.doctor = doctor;
   if (ctx.json) {
@@ -196,6 +216,9 @@ async function run(ctx) {
     if (report.database.status !== 'CURRENT' && report.database.status !== 'SKIPPED') {
       for (const line of laneLines(report.database)) write(line);
     }
+    if (report.database.code === 'MIGRATION_CONSENT_REQUIRED') {
+      write('Nothing was migrated. Back up both PADOS databases (pg_dump), then run: pados init --yes');
+    }
     write('');
     write(renderDoctor(doctor));
     write('');
@@ -206,4 +229,4 @@ async function run(ctx) {
   return 0;
 }
 
-module.exports = { SPEC, run, STORAGE_MODES, freeBytes, ask, ignoredConfigFlags, laneLines };
+module.exports = { SPEC, run, STORAGE_MODES, freeBytes, ask, ignoredConfigFlags, laneLines, unconsentedMigration };

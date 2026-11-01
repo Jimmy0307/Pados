@@ -21,6 +21,7 @@ const CATALOG = Object.freeze({
   DATABASE_AUTHENTICATION_FAILED: ['PostgreSQL rejected the credentials.', 'set the variable named by PADOS_DB_PASSWORD_REF, then: pados doctor'],
   DATABASE_MISSING: ['A PADOS database does not exist yet.', 'create it, or run: pados init --create-databases'],
   MIGRATIONS_PENDING: ['Database migrations are pending.', 'pados init (applies them through the PADOS migration graph)'],
+  UPDATE_REQUIRED: ['This PADOS installation runs a different runtime version than this CLI ships. pados init never activates another runtime or migrates existing data; nothing was changed.', 'pados update (checks migration compatibility first and asks before migrating)'],
   MIGRATION_CONSENT_REQUIRED: ['This update must migrate the database forward; that needs explicit confirmation (afterwards rollback is no longer possible). Nothing was migrated and the previous runtime stays active.', 'back up both PADOS databases (pg_dump), then run: pados update --migrate (or --yes)'],
   MIGRATIONS_INCOMPATIBLE: ['The database schema does not match this PADOS version.', 'pados doctor; use the matching version (pados update --rollback) or restore a backup'],
   DATABASE_DRIVER_UNAVAILABLE: ['The PostgreSQL client library (libpq) was not found.', "install your distribution's libpq package (Debian/Ubuntu: libpq5; Fedora/RHEL: libpq), then: pados doctor"],

@@ -1,0 +1,54 @@
+'use strict';
+// RC2 INST-1: re-running `pados init` on an existing installation never activates another runtime or migrates its
+// data without consent; it points to `pados update`, which checks compatibility and asks before migrating.
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { ensureLayout, layout } = require('../lib/home');
+const { runtimePackageFor } = require('../lib/platform');
+const { readCurrent, versionDir, writeCurrent } = require('../lib/runtime');
+const { tempDir, fakeRuntimePackage, runCli } = require('./helpers');
+
+const CLI_VERSION = require('../package.json').version;
+const OLD = '0.0.1-installed';
+
+function existingInstallation() {
+  const home = path.join(tempDir(), 'home');
+  ensureLayout(home);
+  fs.mkdirSync(path.dirname(layout(home).configFile), { recursive: true });
+  fs.writeFileSync(layout(home).configFile, 'PADOS_DB_NAME=pados_existing\n');
+  writeCurrent(home, { schema: 'pados.cli.runtime-current.v1', version: OLD, previous: null, history: [] });
+  const wanted = runtimePackageFor();
+  const pkg = fakeRuntimePackage(tempDir(), { name: wanted.name, version: CLI_VERSION, platform: wanted.key });
+  return { home, pkg };
+}
+
+for (const extra of [[], ['--yes']]) {
+  test(`init ${extra.join(' ') || '(no flags)'} on an existing installation refuses to activate a newer runtime`, () => {
+    const { home, pkg } = existingInstallation();
+    const result = runCli(['init', '--non-interactive', '--json', ...extra],
+      { PADOS_HOME: home, PADOS_RUNTIME_PACKAGE_DIR: pkg.dir });
+    assert.equal(readCurrent(home).version, OLD, 'the installed runtime stays active');
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stdout}${result.stderr}`, /UPDATE_REQUIRED/);
+    assert.equal(fs.existsSync(versionDir(home, CLI_VERSION)), false, 'the new runtime is not even installed');
+    assert.equal(fs.readFileSync(layout(home).configFile, 'utf8'), 'PADOS_DB_NAME=pados_existing\n');
+  });
+}
+
+test('init migrates an existing installation forward only with explicit consent', () => {
+  const { unconsentedMigration } = require('../lib/commands/init');
+  const upgrade = { status: 'UPGRADE_AVAILABLE', lanes: [
+    { lane: 'operational', database: 'pados', state: 'UPGRADE_AVAILABLE', revisions: ['20261010_0018'],
+      target_revision: '20261101_0020' },
+    { lane: 'corpus', database: 'pados_corpus', state: 'CURRENT' }] };
+  assert.deepEqual(unconsentedMigration(upgrade, { existing: true, flags: {} }),
+    ['operational (pados): 20261010_0018 -> 20261101_0020']);
+  assert.equal(unconsentedMigration(upgrade, { existing: true, flags: { yes: true } }), null);
+  assert.equal(unconsentedMigration(upgrade, { existing: false, flags: {} }), null, 'a fresh install has no data');
+  const fresh = { status: 'UNINITIALIZED', lanes: [{ lane: 'operational', state: 'UNINITIALIZED' },
+    { lane: 'corpus', state: 'DATABASE_MISSING' }] };
+  assert.equal(unconsentedMigration(fresh, { existing: true, flags: {} }), null, 'empty databases hold no data to migrate');
+});
