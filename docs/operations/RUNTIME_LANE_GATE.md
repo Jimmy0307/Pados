@@ -2,7 +2,8 @@
 
 Contract: [`PADOS_SERVICE_ENGINEERING_STANDARD.md`](../PADOS_SERVICE_ENGINEERING_STANDARD.md) §9 (release rule). Code:
 `src/pados/release/runtime_lanes.py`, `scripts/release/runtime_lane_gate.py`. Registry:
-`scripts/release/runtime_lanes.v1.json`. Tests: `tests/release_supply_chain/test_op002_runtime_lane_gate.py`.
+`scripts/release/runtime_lanes.v1.json`. Index tool: `src/pados/release/runtime_lane_index.py`, `scripts/release/runtime_lane_index.py`. Tests:
+`tests/release_supply_chain/test_op002_runtime_lane_gate.py`, `tests/release_supply_chain/test_op002_runtime_lane_index.py`.
 
 The gate interprets evidence and nothing else. It grants no approval, acceptance or release decision (every report
 says `semantic_authority: NONE`). `promotion_check.py`, the approval paths and the WebAuthn/CAS acceptance path stay
@@ -50,6 +51,32 @@ An evidence index (`pados.runtime-lane-evidence.v1`) holds at most one record pe
 `NOT_VALIDATED` say why in `notes`. Evidence indexes stay with the machine-local evidence under `runtime/artifacts/`;
 they are not committed.
 
+## Building the index
+
+Do not write an evidence index by hand. Write a spec (`pados.runtime-lane-spec.v1`) that says what ran, and let
+`runtime_lane_index.py build` derive the rest:
+
+```json
+{"schema_version": "pados.runtime-lane-spec.v1", "commit": "<40-hex>", "lanes": [
+  {"lane_id": "windows-ci-gates", "platform": "windows", "command": "run_gates.ps1", "exit_code": 0,
+   "evidence_path": "windows-<sha>/gates/summary.txt"},
+  {"lane_id": "windows-full-suite", "platform": "windows", "command": "pytest -q tests", "exit_code": 1,
+   "evidence_path": "windows-<sha>/full_pytest.log", "declare": "NOT_VALIDATED",
+   "notes": "126 failures, identical to the recorded Windows baseline"},
+  {"lane_id": "github-ci", "platform": "github", "command": "ci.yml", "exit_code": null,
+   "notes": "no CI run for this commit"}]}
+```
+
+- The status is derived from the exit code: `0` gives PASS, anything else gives FAIL, and no exit code gives
+  NOT_VALIDATED. A spec may only downgrade a lane, to `SKIPPED` or `NOT_VALIDATED`, with a reason of at least ten
+  characters. A spec cannot declare `PASS`.
+- The tool computes the SHA-256 itself. `recorded_at` is the evidence file's modification time, so staleness counts
+  from when the evidence was produced.
+- The build is refused (exit 2) if a ran lane's evidence file is missing, if a path escapes the root, if one file
+  backs two lanes, or if a lane id is not in the registry.
+- `verify` re-hashes every referenced file and exits 1 on a mismatch or a missing file. Run it before reporting
+  numbers from an index that has sat on disk.
+
 ## How a lane is judged
 
 A required lane counts only as `PASS` / `VERIFIED`. Every other outcome blocks the target:
@@ -72,6 +99,14 @@ A required lane counts only as `PASS` / `VERIFIED`. Every other outcome blocks t
 Evidence binds to the exact commit, so a lane measured at an earlier commit, a model measurement included, has to be
 run again for the commit being judged.
 
+## What the gate does not prove
+
+The gate and the index prove *binding*: this commit, this platform, this command, this exit code, these bytes. They
+do not prove that the evidence is true, complete or sufficient. A log that says PASS for the wrong test set, a gate
+script that skips a check, or an E2E run against a mocked dependency all bind cleanly. Content truth stays with human
+review of the evidence and the existing approval and acceptance paths. A lane's `claims` and `does_not_cover` in the
+registry say what a verified lane may be quoted for; nothing outside `claims` may be quoted.
+
 ## Commands
 
 ```text
@@ -81,6 +116,10 @@ python scripts/release/runtime_lane_gate.py --target production --out gates/runt
 # Evaluate machine-local evidence for one commit.
 python scripts/release/runtime_lane_gate.py --target local-supervised-dogfood --commit <sha> \
   --evidence <evidence-dir>/runtime-lane-evidence-<sha>.json --out <evidence-dir>/runtime-readiness.json
+
+# Build and verify an index from a spec (see "Building the index").
+python scripts/release/runtime_lane_index.py build <evidence-dir>/lane-spec-<sha>.json   --out <evidence-dir>/runtime-lane-evidence-<sha>.json
+python scripts/release/runtime_lane_index.py verify <evidence-dir>/runtime-lane-evidence-<sha>.json
 
 # Claim: exits 1 with RUNTIME_READINESS_NOT_PROVEN and the blockers unless every required lane is VERIFIED.
 python scripts/release/runtime_lane_gate.py --target production --claim --out <file>
