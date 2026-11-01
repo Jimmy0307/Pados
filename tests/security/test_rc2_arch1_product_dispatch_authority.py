@@ -53,7 +53,7 @@ def _request(root: Path, **overrides: Any) -> GoalRequest:
 
 def _service(root: Path) -> tuple[ProductLoopService, InMemoryP6_19BStateGateway, _CountingMaker]:
     gateway = InMemoryP6_19BStateGateway(root / "objects")
-    maker = _CountingMaker(FileDirectMaker(root, protected_roots=(Path("C:/PADOS"), Path("C:/PADOS_WORKTREES"))))
+    maker = _CountingMaker(FileDirectMaker(root, protected_roots=(root.parent / "protected",)))
     return ProductLoopService(maker=maker, validator=FileValidator(), state_gateway=gateway), gateway, maker
 
 

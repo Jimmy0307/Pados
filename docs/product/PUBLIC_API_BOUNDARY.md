@@ -40,6 +40,29 @@ Before 1.0 nothing is frozen by semver, but PUBLIC_STABLE items change only with
 | `/api/graph/*`, `/api/corpus/*`, `/memory/*`, `/context/assemble`, other `/api/*` | INTERNAL until reviewed individually (used by the bundled UI) |
 | `/docs`, `/redoc`, `/openapi.json` | INTERNAL (developer aids) |
 
+### Product Loop dispatch authority (RC2 ARCH-1 / SEC-1, SEC-2)
+
+The Product Loop routes stay disabled unless `PADOS_PRODUCT_LOOP_ENABLED=true`. When enabled:
+- `authorized: true` only asks for dispatch. The service dispatches, and later commits through the CAS, only when
+  `approval_ref` names an `APPROVED` control approval in the run's project whose `proposal_hash` equals
+  `pados.product_loop.authorization.product_dispatch_hash(request)`. That is the canonical hash of the whole
+  requested operation (goal, scope, workspace root, file changes, acceptance criteria, revisions, attempt budget,
+  human gate, idempotency key and any supplied context), domain-separated as `pados.product-loop-dispatch.v1`.
+  Without it the run ends `AUTHORITY_BLOCK` and the Maker is never called. Other approvals are refused before
+  dispatch: one for another operation (`APPROVAL_SUBJECT_MISMATCH`), another project
+  (`APPROVAL_REF_NOT_BOUND_TO_SCOPE`), or one that is not approved (`APPROVAL_REF_NOT_APPROVED`).
+- The approval is checked again immediately before the CAS commit. If it was withdrawn during the attempt, the run ends
+  `AUTHORITY_BLOCK` / `NOT_COMMITTED`. The two checks and the commit are separate transactions on separate
+  databases: a withdrawal in the instant between the last check and the commit is not caught.
+- An approval already recorded on a committed semantic-audit row cannot dispatch again (`APPROVAL_CONSUMED`), including
+  after a restart.
+- Before the cloud Codex worker receives anything, the project's recorded `classification`, raised by any bundled
+  enterprise evidence, must parse and be within `PADOS_PRODUCT_LOOP_CLOUD_MAX_CLASSIFICATION`. The default is
+  `PUBLIC`; projects default to `internal`, so an unlabelled project is not released. A missing or unknown
+  classification refuses, as does a ceiling of `RESTRICTED` or an unknown ceiling. The refusal is
+  `CLOUD_EGRESS_*` (BLOCKED, `AUTHORITY_BLOCK`). Workspace file contents are not classified; the project label is the
+  operator's statement about them.
+
 ### Control approvals and work routing (approval subject binding)
 
 A control approval authorizes routing work only when it is bound to an immutable `WORK_ROUTE`
@@ -127,7 +150,10 @@ An `OLLAMA` job executes only after D2 resolves a measured binding for the reque
 measured chat provider completes one bounded call. `SUMMARIZE` uses `TEXT_SUMMARY`; `CLASSIFY_REQUEST`
 uses `STRUCTURED_OUTPUT`. Binding refusals finish the job as `BLOCKED`; no approval is inferred or granted.
 The loop sends a blocked step to `WAITING_HUMAN` before applying the negative-progress pause threshold.
-`CLAUDE_CODE` and `CODEX_CLI` jobs have no executor and remain `ROUTED` until cancelled or expired.
+`CLAUDE_CODE` and `CODEX_CLI` have no executor in this process, and neither does a `DETERMINISTIC_TOOL` route without
+a registered command. A route that selects such a worker is refused with `ROUTE_HAS_NO_EXECUTOR` (403, with a
+`ROUTE_REFUSED` audit event) before any job, context packet or handoff exists, so nothing waits in `ROUTED` for an
+executor that will never come (RC2 EXEC-1).
 
 When a routed job remains `ROUTED`, `QUEUED`, `RUNNING` or `VALIDATING`, `step()` returns
 `status=RUNNING`, `decision=WAIT_FOR_JOB` with the same iteration and job IDs. The loop stores that
