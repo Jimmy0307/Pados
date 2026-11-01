@@ -1,0 +1,129 @@
+{
+  "schema_version": "pados.runtime-lanes.v1",
+  "targets": {
+    "local-supervised-dogfood": {
+      "description": "Local, supervised, single-operator, non-sensitive dogfood (the RC2 dogfood boundary). Not a production claim.",
+      "required_lanes": [
+        "windows-native-e2e",
+        "vmware-linux-e2e",
+        "windows-ci-gates",
+        "vmware-linux-ci-gates",
+        "postgres-integration",
+        "github-ci"
+      ]
+    },
+    "production": {
+      "description": "Production readiness. Requires every runtime lane, including the external runtimes that are not validated today.",
+      "required_lanes": [
+        "windows-native-e2e",
+        "vmware-linux-e2e",
+        "windows-ci-gates",
+        "vmware-linux-ci-gates",
+        "postgres-integration",
+        "github-ci",
+        "windows-full-suite",
+        "local-model-measured-execution",
+        "local-model-governed-acceptance",
+        "rea-runtime",
+        "openmaic-runtime",
+        "ai-scientist-v3-runtime"
+      ]
+    }
+  },
+  "lanes": {
+    "windows-native-e2e": {
+      "description": "scripts/dogfood/local_dogfood_e2e.py on Windows 11 with a private PostgreSQL cluster; evidence is E2E_RESULT.json.",
+      "platform": "windows",
+      "max_age_days": 14,
+      "claims": ["LOCAL_SUPERVISED_DOGFOOD_E2E_WINDOWS"],
+      "does_not_cover": ["HARDWARE_WEBAUTHN_AUTHENTICATOR", "MULTI_USER", "NETWORK_EXPOSURE"]
+    },
+    "vmware-linux-e2e": {
+      "description": "The same E2E on the VMware Linux VM (virt=vmware, never WSL), from a fresh online clone.",
+      "platform": "linux",
+      "max_age_days": 14,
+      "claims": ["LOCAL_SUPERVISED_DOGFOOD_E2E_LINUX"],
+      "does_not_cover": ["HARDWARE_WEBAUTHN_AUTHENTICATOR", "MULTI_USER", "NETWORK_EXPOSURE"]
+    },
+    "windows-ci-gates": {
+      "description": "The 14 CI-required gates run natively on Windows (ci_policy, ruff, mypy, mypy_win32, compileall, d1, d2, d4, migration_gate, win_native_1, win_native_2, win_local_intel, public_export, secret_scan); evidence is the gate summary.",
+      "platform": "windows",
+      "max_age_days": 14,
+      "claims": ["CI_REQUIRED_GATES_WINDOWS"],
+      "notes": "win_local_intel contains a pre-existing timing-sensitive test (R19-3); a run where it failed is FAIL, not PASS."
+    },
+    "vmware-linux-ci-gates": {
+      "description": "The CI gate set on the VMware Linux VM, including the full deterministic suite with CI-provisioned databases and the wheel build.",
+      "platform": "linux",
+      "max_age_days": 14,
+      "claims": ["CI_GATES_LINUX"]
+    },
+    "postgres-integration": {
+      "description": "scripts/release/postgres_integration_gate.py, all suites, skips refused.",
+      "platform": "any",
+      "max_age_days": 14,
+      "claims": ["POSTGRES_INTEGRATION_SUITES"]
+    },
+    "github-ci": {
+      "description": "The required GitHub status checks for the exact commit.",
+      "platform": "github",
+      "max_age_days": 14,
+      "claims": ["GITHUB_REQUIRED_CHECKS"]
+    },
+    "windows-full-suite": {
+      "description": "pytest tests --ignore=tests/integration on Windows.",
+      "platform": "windows",
+      "max_age_days": 14,
+      "claims": ["FULL_DETERMINISTIC_SUITE_WINDOWS"],
+      "known_status": "FAIL",
+      "notes": "R19-3: 126 environment-dependent failures that are identical on pristine main. A baseline-identical run is recorded as FAIL with its comparison, never as PASS."
+    },
+    "local-model-measured-execution": {
+      "description": "Stage B M2 -> M2.1/M3 (Windows and VMware) -> M4.1 live run of the pinned qwen3:8b artifact on local Ollama.",
+      "platform": "windows",
+      "max_age_days": 30,
+      "claims": ["MEASURED_LOCAL_EXECUTION_QWEN3_8B"],
+      "does_not_cover": [
+        "MODEL_OUTPUT_TO_RESULT_CANDIDATE_OR_CAS",
+        "REA_RUNTIME",
+        "OPENMAIC_RUNTIME",
+        "AI_SCIENTIST_V3_RUNTIME",
+        "OTHER_MODELS_OR_RUNTIMES",
+        "HARDWARE_ATTESTATION"
+      ],
+      "notes": "PR #19: proves only the bounded measured-execution path that ran (receipt, schema validation, semantic_authority NONE)."
+    },
+    "local-model-governed-acceptance": {
+      "description": "Model output entering a ResultCandidate, human approval and the CAS.",
+      "platform": "any",
+      "max_age_days": 30,
+      "claims": ["MODEL_OUTPUT_GOVERNED_ACCEPTANCE"],
+      "known_status": "NOT_VALIDATED",
+      "notes": "R19-6: the path does not exist by design (MODEL OUTPUT != TRUTH); the measured-execution lane never satisfies it."
+    },
+    "rea-runtime": {
+      "description": "The REA real runtime.",
+      "platform": "any",
+      "max_age_days": 30,
+      "claims": ["REA_RUNTIME"],
+      "known_status": "NOT_VALIDATED",
+      "notes": "PR #16 explicitly did not validate the real REA runtime."
+    },
+    "openmaic-runtime": {
+      "description": "The OpenMAIC real runtime.",
+      "platform": "any",
+      "max_age_days": 30,
+      "claims": ["OPENMAIC_RUNTIME"],
+      "known_status": "NOT_VALIDATED",
+      "notes": "PR #16 explicitly did not validate the real OpenMAIC runtime."
+    },
+    "ai-scientist-v3-runtime": {
+      "description": "The AI-Scientist-v3 governed research pack real runtime.",
+      "platform": "any",
+      "max_age_days": 30,
+      "claims": ["AI_SCIENTIST_V3_RUNTIME"],
+      "known_status": "NOT_VALIDATED",
+      "notes": "PR #17 is a draft and its real runtime is REAL_RUNTIME_NOT_VALIDATED."
+    }
+  }
+}
