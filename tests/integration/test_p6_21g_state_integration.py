@@ -16,6 +16,7 @@ from pados.product_loop.service import ProductLoopService
 from pados.product_loop.state import P6_19BStateGateway
 from pados.product_loop.validation import FileValidator
 from pados.state_proof import ObjectStore, StateProofService, repository
+from tests.product_loop_approval import approved_in_database
 
 
 def _registered_scope(root: Path) -> str:
@@ -114,7 +115,7 @@ def test_p6_21g_happy_and_self_correction_use_p6_19b_receipts(
         }
     )
     failed_then_revised = asyncio.run(
-        service.execute(request)
+        service.execute(approved_in_database(request))
     )
     assert failed_then_revised.status.value == "COMMITTED"
     assert len(failed_then_revised.attempts) == 2
@@ -151,21 +152,21 @@ def test_p6_21g_stale_candidate_retains_receipt_in_p6_19b(
         )
     _pin_context_snapshot(service, scope_id)
     first = asyncio.run(
-        service.execute(
+        service.execute(approved_in_database(
             _request(
                 workspace,
                 scope_id=scope_id,
                 content="def result():\n    return 'good'\n",
-            )
+            ))
         )
     )
     second = asyncio.run(
-        service.execute(
+        service.execute(approved_in_database(
             _request(
                 workspace,
                 scope_id=scope_id,
                 content="def result():\n    return 'good'\n",
-            )
+            ))
         )
     )
     assert first.status.value == "COMMITTED"

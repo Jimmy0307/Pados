@@ -40,6 +40,7 @@ from pados.product_loop.schemas import GoalRequest, ProductLoopStatus
 from pados.product_loop.service import ProductLoopService
 from pados.product_loop.state import InMemoryP6_19BStateGateway
 from pados.product_loop.validation import FileValidator
+from tests.product_loop_approval import approved
 
 CONTROL_TOKEN = "pados-test-control-" + "value"  # never the public shipped default
 
@@ -104,6 +105,7 @@ def _build(tmp_path: Path) -> tuple[FastAPI, ProductLoopService, InMemoryP6_19BS
     )
     app = FastAPI()
     register_product_loop_routes(app, Settings(PADOS_PRODUCT_LOOP_ENABLED=True), service=service)
+    app.state.product_gateway = gateway  # where _post records the human approval of a dispatch
     return app, service, gateway, maker
 
 
@@ -123,6 +125,8 @@ def _durable_writes(gateway: InMemoryP6_19BStateGateway) -> int:
 
 
 def _post(client: TestClient, request: GoalRequest, **header_kwargs: Any):
+    # RC2 ARCH-1: an authorized request is dispatched only with a human approval of exactly this operation.
+    request = approved(request, client.app.state.product_gateway)
     return client.post(
         "/product-loop/runs",
         json=request.model_dump(mode="json"),
@@ -368,7 +372,7 @@ def test_g4_maker_keeps_its_own_independent_approved_root_check(tmp_path: Path) 
     )
     other = tmp_path / "other"
     other.mkdir(parents=True, exist_ok=True)
-    report = asyncio.run(unguarded.execute(_request(workspace, workspace_root=str(other))))
+    report = asyncio.run(unguarded.execute(approved(_request(workspace, workspace_root=str(other)), gateway)))
     assert report.status == ProductLoopStatus.AUTHORITY_BLOCK
     assert report.final_result is not None
     assert report.final_result.changed_paths == []

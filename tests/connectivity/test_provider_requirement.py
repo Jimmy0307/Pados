@@ -35,6 +35,7 @@ from pados.product_loop.state import InMemoryP6_19BStateGateway
 from pados.product_loop.validation import FileValidator
 from pados.worker.schemas import CapabilityId, RiskLevel, WorkerAvailability, WorkerSpec, WorkerType
 from tests.connectivity.connectivity_support import FakeProbes, write_config
+from tests.product_loop_approval import approved
 
 
 @pytest.fixture(autouse=True)
@@ -278,7 +279,7 @@ def test_default_wiring_wan_offline_fails_closed_without_fallback(tmp_path: Path
         _codex(tmp_path, settings, runner_calls, {"codex-cli": CODEX, "ollama-local": OLLAMA}), settings)
     gateway = InMemoryP6_19BStateGateway(tmp_path / "objects")
     loop = ProductLoopService(maker=maker, validator=FileValidator(), state_gateway=gateway)
-    report = asyncio.run(loop.execute(_goal(tmp_path / "ws")))
+    report = asyncio.run(loop.execute(approved(_goal(tmp_path / "ws"), gateway)))
     assert report.status is not ProductLoopStatus.COMMITTED
     assert report.final_result is not None and report.final_result.summary == "PROVIDER_UNREACHABLE"
     assert report.final_result.runtime_id.startswith("connectivity-gate-")

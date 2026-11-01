@@ -17,6 +17,7 @@ from pados.product_loop.schemas import GoalRequest, ProductLoopStatus
 from pados.product_loop.service import ProductLoopService
 from pados.product_loop.state import InMemoryP6_19BStateGateway
 from pados.product_loop.validation import FileValidator
+from tests.product_loop_approval import approved
 
 ROOT = Path(__file__).resolve().parents[2]
 TARGET = "docs/ENTERPRISE_EVIDENCE_BRIEF.md"
@@ -29,6 +30,11 @@ def _loop(root, extension):
     loop = ProductLoopService(maker=FileDirectMaker(workspace), validator=FileValidator(), state_gateway=gateway,
                               approved_workspace_root=workspace, context_extensions=(extension,) if extension else ())
     return loop, gateway, workspace
+
+
+def _run(loop, request):
+    # RC2 ARCH-1: an authorized request is dispatched only with a human approval of exactly this operation.
+    return asyncio.run(loop.execute(approved(request, loop.state_gateway)))
 
 
 def _request(workspace, content, key):
@@ -54,7 +60,7 @@ def test_authorized_evidence_is_bound_into_governed_context_and_committed_by_cas
         f"- {item['source_id']} ({item['classification']})" for item in package["package"]["evidence"])
     assert_no_withheld_content(brief, env.pipeline.unauthorized_texts(who, env.authorize(who)))
     loop, gateway, workspace = _loop(tmp_path, extension)
-    report = asyncio.run(loop.execute(_request(workspace, brief, "authorized")))
+    report = _run(loop, _request(workspace, brief, "authorized"))
     assert report.status == ProductLoopStatus.COMMITTED
     assert report.final_result.execution_receipt["evidence_kind"] == "DETERMINISTIC_HOST"
     persisted = json.loads(gateway.object_store.read(gateway.read_index[report.run_id]["context_ref"]))
@@ -70,7 +76,7 @@ def test_unauthorized_extension_fails_closed_before_any_run(env, tmp_path):
     extension.access = access("analyst", project="project-beta")  # scope/access mismatch
     loop, gateway, workspace = _loop(tmp_path, extension)
     with pytest.raises(ProductAuthorizationError, match="CONTEXT_EXTENSION_UNAUTHORIZED"):
-        asyncio.run(loop.execute(_request(workspace, "Evidence package none", "denied")))
+        _run(loop, _request(workspace, "Evidence package none", "denied"))
     assert not gateway.read_index and not gateway.receipts and not gateway.commits
     assert not (workspace / TARGET).exists()
 
@@ -86,13 +92,13 @@ def test_over_budget_evidence_fails_closed_before_provider(env, tmp_path, monkey
     monkeypatch.setattr(context_module, "assert_within_budget", oversized)
     loop, gateway, workspace = _loop(tmp_path, extension)
     with pytest.raises(ProductAuthorizationError):
-        asyncio.run(loop.execute(_request(workspace, "Evidence package x", "budget")))
+        _run(loop, _request(workspace, "Evidence package x", "budget"))
     assert not gateway.receipts
 
 
 def test_without_extensions_core_context_is_unchanged(tmp_path):
     loop, gateway, workspace = _loop(tmp_path, None)
-    report = asyncio.run(loop.execute(_request(workspace, "Evidence package core-only", "core")))
+    report = _run(loop, _request(workspace, "Evidence package core-only", "core"))
     assert report.status == ProductLoopStatus.COMMITTED
     persisted = json.loads(gateway.object_store.read(gateway.read_index[report.run_id]["context_ref"]))
     assert "extensions" not in persisted["bounded_context"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from pados.product_loop.state import P6_19BStateGateway
 from pados.product_loop.validation import FileValidator
 from pados.state_proof import ObjectStore, StateProofService, repository
 from tests.private_markers import leaked_markers
+from tests.product_loop_approval import approved_in_database
 
 
 class _ExplodingMaker:
@@ -54,12 +56,12 @@ class _CapturingMaker(FileDirectMaker):
         return await super().make(contract, run_id=run_id, attempt=attempt)
 
 
+CONTROL_TOKEN = "pados-test-control-" + "value"  # never the public shipped default, which is refused (SEC-7)
+
+
 @pytest.fixture(scope="module")
 def h_settings() -> Settings:
-    return Settings()
-
-
-CONTROL_TOKEN = "pados-local-control-" + "token"
+    return Settings(PADOS_CONTROL_API_TOKEN_HASH=hashlib.sha256(CONTROL_TOKEN.encode()).hexdigest().upper())
 
 
 def _registered_scope(root: Path) -> str:
@@ -158,7 +160,7 @@ def _pin_context_snapshot(service: ProductLoopService, scope_id: str) -> None:
 
 
 def _run(service: ProductLoopService, request: GoalRequest):
-    return asyncio.run(service.execute(request))
+    return asyncio.run(service.execute(approved_in_database(request)))
 
 
 def _counts(engine: Any) -> dict[str, int]:

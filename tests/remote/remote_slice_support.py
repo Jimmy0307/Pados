@@ -28,6 +28,7 @@ from pados.remote.service import RemoteOperationsService
 from pados.remote.simulated import InMemoryRemotePorts
 from pados.remote.staging import StagingArea
 from pados.remote.step_up import SESSION_HEADER, InMemoryStepUpStore, StepUpService
+from tests.product_loop_approval import approved
 from tests.remote.presence_support import SoftwareAuthenticator, verifier
 
 PROJECT = "proj-remote"
@@ -115,7 +116,8 @@ class Slice:
                 "human_gate": True,
             }
         )
-        return str(asyncio.run(self.loop.execute(request)).run_id)
+        # RC2 ARCH-1: the dispatch itself carries a human approval of exactly this operation.
+        return str(asyncio.run(self.loop.execute(approved(request, self.gateway))).run_id)
 
 
 def build_slice(
