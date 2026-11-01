@@ -46,6 +46,20 @@ EXPECTED_PROFILE_ID = "mcp-bd7794d49caed931f7063d8e021f97bd2e1b2cc6c10c09f46f1e0
 PROTECTED = Path(r"C:\PADOS")
 
 
+def assert_pinned_artifact(profile: Any) -> None:
+    """Refuse a profile that does not name exactly the M1-pinned artifact the M2 benchmark measures.
+
+    The profile id alone is not an anchor once the operator names the report: the artifact reference, manifest digest
+    and layer digests must equal the benchmark's immutable pin.
+    """
+    from windows_m2_benchmark import APPROVED_LAYERS, APPROVED_MANIFEST_DIGEST, APPROVED_MODEL
+
+    artifact = profile.artifact
+    observed = (artifact.artifact_ref, artifact.manifest_digest, tuple(artifact.layer_digests))
+    if observed != (APPROVED_MODEL, APPROVED_MANIFEST_DIGEST, tuple(APPROVED_LAYERS)):
+        raise RuntimeError("M3_PROFILE_ARTIFACT_NOT_PINNED")
+
+
 def _git(*args: str) -> str:
     return subprocess.run(["git", *args], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,  # noqa: S603,S607
                           text=True, check=False).stdout.strip()
@@ -69,9 +83,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rehearsal", action="store_true", help="Linux development rehearsal with test fakes")
     # A re-measurement of the same pinned artifact on another runtime release (M2 -> M3) names its own M3 report and
     # the profile id it must contain; the id check itself is never skipped.
-    parser.add_argument("--m3-report", type=Path, default=M3_REPORT)
-    parser.add_argument("--expected-profile-id", default=EXPECTED_PROFILE_ID)
+    parser.add_argument("--m3-report", type=Path, default=None)
+    parser.add_argument("--expected-profile-id", default=None)
     args = parser.parse_args(argv)
+    if args.m3_report is not None and args.expected_profile_id is None:
+        print("REFUSED: --m3-report needs --expected-profile-id (the id the named report must contain)")
+        return 2
+    args.m3_report = args.m3_report or M3_REPORT
+    args.expected_profile_id = args.expected_profile_id or EXPECTED_PROFILE_ID
 
     if str(ROOT).lower().startswith(str(PROTECTED).lower()):
         print("REFUSED: run from a Stage B checkout, not C:\\PADOS")
@@ -134,6 +153,7 @@ def run(args: argparse.Namespace, out: Path, result: dict[str, Any], record: Cal
         description = ModelRuntimeProfile.model_validate(report["catalog_description"])
         if profile.profile_id != args.expected_profile_id:
             raise RuntimeError("M3_PROFILE_ID_UNEXPECTED")
+        assert_pinned_artifact(profile)
     store = ModelCatalogStore(out / "state" / "model-catalog.json")
     digest = store.save(ModelCatalog([description]).register_capability_profile(profile))
     reloaded = store.load().capability_profile(description.model_id)
