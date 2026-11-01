@@ -90,3 +90,40 @@ def downstream_headers() -> dict[str, str]:
     if context is None:
         return {}
     return {REQUEST_ID_HEADER: context.request_id, CORRELATION_ID_HEADER: context.correlation_id}
+
+
+def trace_fields() -> dict[str, str]:
+    """The trace persisted beside a durable record: identifiers only, never authority or proof.
+
+    Callers store it outside any sealed or hashed content (receipt, capability result, idempotency key), so the same
+    work traced under two different requests keeps one identity.
+    """
+    context = _CURRENT.get()
+    if context is None:
+        return {}
+    return {"request_id": context.request_id, "correlation_id": context.correlation_id}
+
+
+@contextmanager
+def operation_scope(component: str, *, project_id: str | None = None, run_id: str | None = None,
+                    job_id: str | None = None) -> Iterator[OperationContext]:
+    """Continue the caller's operation in ``component`` (or start one, for CLI and background work)."""
+    current = _CURRENT.get()
+    if current is None:
+        generated = new_id()
+        current = OperationContext(request_id=generated, correlation_id=generated, component=component)
+    scoped = replace(current, component=component).scoped(project_id=project_id, run_id=run_id, job_id=job_id)
+    with bind_context(scoped) as bound:
+        yield bound
+
+
+def error_code_of(exc: BaseException) -> str:
+    """A stable code for a log record: the exception's declared code, a code-shaped message prefix, or its type."""
+    declared = getattr(exc, "code", None)
+    if isinstance(declared, str) and re.fullmatch(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*", declared):
+        return declared
+    prefix = str(exc).split(":", 1)[0].split(" ", 1)[0].strip()
+    if re.fullmatch(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*", prefix) and len(prefix) <= 80:
+        return prefix
+    return type(exc).__name__.upper() if type(exc).__name__.isupper() else "UNCLASSIFIED_" + re.sub(
+        r"(?<!^)(?=[A-Z])", "_", type(exc).__name__).upper()

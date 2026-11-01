@@ -36,10 +36,12 @@ from pados.control.approval_subject import (
     scope_version_is_current,
     subject_hash,
 )
+from pados.logging_config import get_logger
 from pados.loop import scope_authority
 from pados.memory import packet as context_packet
 from pados.memory.retrieval import RetrievalRequest
 from pados.memory.security import assert_no_secret
+from pados.operability.context import operation_scope, trace_fields
 from pados.providers.execution_binding import ExecutionBindingRefused, ExecutionIntent
 from pados.providers.factory import build_chat_provider
 from pados.providers.ollama import MeasuredChatProvider
@@ -58,12 +60,16 @@ from pados.worker.schemas import (
 )
 
 LOGGER = logging.getLogger("pados.worker.service")
+_LOG = get_logger("pados.worker")
 NON_TERMINAL_JOB_STATUSES = frozenset({"ROUTED", "QUEUED", "RUNNING", "VALIDATING"})
 # RC2 EXEC-1: a selected worker this process cannot execute for the route is refused, never left ROUTED.
 ROUTE_HAS_NO_EXECUTOR = "ROUTE_HAS_NO_EXECUTOR"
 
 
 def _event(session: Session, job_id: str, project_id: str, event_type: str, payload: dict[str, Any]) -> None:
+    trace = trace_fields()
+    if trace and "trace" not in payload:
+        payload = {**payload, "trace": trace}  # OP-001: identifiers only; never read as authority
     session.execute(
         text(
             """
@@ -188,7 +194,10 @@ def _record_route_refusal(
         "surface": route.surface,
         "step_sequence": route.step_sequence,
         "subject_hash": subject_hash,
+        **({"trace": trace_fields()} if trace_fields() else {}),
     }
+    _LOG.warning("worker.route.refused", outcome="rejected", error_code=code, capability_id=route.capability_id.value,
+                 surface=route.surface)
     bind = session.get_bind()
     engine = bind if isinstance(bind, Engine) else bind.engine
     try:
@@ -377,6 +386,25 @@ def _idempotent_job(session: Session, request_id: str, route: RouteRequest) -> d
 
 
 def route_work_request(
+    session: Session,
+    *,
+    request_id: str,
+    route: RouteRequest,
+    settings: Any,
+    artifact_root: Path,
+    defer_model_execution: bool = False,
+) -> dict[str, Any]:
+    """``_route_work_request`` traced under the caller's operation as the ``worker`` component (OP-001)."""
+    with operation_scope("worker"):
+        routed = _route_work_request(session, request_id=request_id, route=route, settings=settings,
+                                     artifact_root=artifact_root, defer_model_execution=defer_model_execution)
+        job = routed["job"]
+        _LOG.info("worker.job.routed", outcome="completed", job_id=str(job["id"]), worker_type=job["worker_type"],
+                  job_status=job["status"], idempotent=routed.get("routing", {}).get("status") == "idempotent")
+        return routed
+
+
+def _route_work_request(
     session: Session,
     *,
     request_id: str,
@@ -963,6 +991,14 @@ def _execute_model_once(
 
 
 def execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any = None) -> dict[str, Any]:
+    """``_execute_routed_model_job`` traced under the caller's operation for this job (OP-001)."""
+    with operation_scope("worker", job_id=job_id):
+        result = _execute_routed_model_job(settings, job_id, session_factory=session_factory)
+        _LOG.info("worker.model_job.finished", job_status=result.get("status"), error_code=result.get("error_code"))
+        return result
+
+
+def _execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any = None) -> dict[str, Any]:
     """Run one ROUTED local-model job with no database transaction or row lock held during the call (RC2 SEC-9).
 
     1. A short transaction claims the job (ROUTED -> RUNNING); only one caller can win the claim.

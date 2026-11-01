@@ -29,6 +29,7 @@ from pados.loop.engine import (
     ensure_stop_policy_is_bounded,
 )
 from pados.loop.runtime_bindings import insert_goal_runtime_binding
+from pados.logging_config import get_logger
 from pados.loop.schemas import (
     LoopCreate,
     LoopDecision,
@@ -48,9 +49,10 @@ from pados.worker.service import (
     record_job_event,
     route_work_request,
 )
-
+from pados.operability.context import error_code_of, operation_scope, trace_fields
 
 _MAX_RESIDUAL_DEPTH = 64
+_LOG = get_logger("pados.task_loop")
 
 
 def _stable_json(payload: Any) -> str:
@@ -62,6 +64,10 @@ def _hash(payload: Any) -> str:
 
 
 def _event(session: Session, loop_id: str, project_id: str, event_type: str, payload: dict[str, Any]) -> None:
+    trace = trace_fields()
+    if trace and "trace" not in payload:
+        # OP-001: identifiers only, beside the event and never inside sealed content; never read as authority.
+        payload = {**payload, "trace": trace}
     session.execute(
         text(
             """
@@ -525,6 +531,29 @@ def run_one_iteration(
     idempotency_key: str,
     defer_model_execution: bool = False,
 ) -> dict[str, Any]:
+    """One TaskLoop iteration, traced under the caller's operation (OP-001); behaviour is unchanged."""
+    with operation_scope("task_loop", run_id=loop_id):
+        try:
+            result = _run_one_iteration(session, loop_id=loop_id, settings=settings, artifact_root=artifact_root,
+                                        idempotency_key=idempotency_key,
+                                        defer_model_execution=defer_model_execution)
+        except Exception as exc:
+            _LOG.warning("task_loop.iteration.refused", outcome="rejected", error_code=error_code_of(exc))
+            raise
+        _LOG.info("task_loop.iteration.finished", outcome="completed", status=result.get("status"),
+                  decision=result.get("decision"))
+        return result
+
+
+def _run_one_iteration(
+    session: Session,
+    *,
+    loop_id: str,
+    settings: Any,
+    artifact_root: Path,
+    idempotency_key: str,
+    defer_model_execution: bool = False,
+) -> dict[str, Any]:
     loop = get_loop_for_update(session, loop_id)
     if loop["status"] != "RUNNING":
         previous = session.execute(
@@ -734,6 +763,15 @@ def _deferred_model_job(session: Session, loop_id: str) -> str | None:
 
 
 def run_step(
+    settings: Any, *, loop_id: str, artifact_root: Path, idempotency_key: str, session_factory: Any = None
+) -> dict[str, Any]:
+    """``_run_step`` under the caller's operation, so the deferred model call is traced with it (OP-001)."""
+    with operation_scope("task_loop", run_id=loop_id):
+        return _run_step(settings, loop_id=loop_id, artifact_root=artifact_root, idempotency_key=idempotency_key,
+                         session_factory=session_factory)
+
+
+def _run_step(
     settings: Any, *, loop_id: str, artifact_root: Path, idempotency_key: str, session_factory: Any = None
 ) -> dict[str, Any]:
     """One TaskLoop step for an operator surface (RC2 SEC-9).

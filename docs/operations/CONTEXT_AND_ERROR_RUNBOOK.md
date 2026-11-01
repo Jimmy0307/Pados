@@ -15,9 +15,21 @@ keeps its own authorization, approval, TaskLoop, evidence and CAS behaviour, and
 | Standalone remote listener (`create_remote_app`) | `component="remote"` |
 | Compute node service (`create_node_app`) | `component="compute_node"` |
 | Home Base → compute node calls (`NodeClient`) | The caller's `X-Request-ID` / `X-Correlation-ID` are forwarded. They never replace the node credential. |
+| TaskLoop (`run_step`, `run_one_iteration`) | Runs under the caller's operation as `component="task_loop"`, or under a generated one for CLI and background work. Every `task_loop_events` row gets `payload_json.trace = {request_id, correlation_id}`. Logs: `task_loop.iteration.finished` or `.refused` (stable `error_code`, never message text). |
+| Worker routing and deferred model jobs | `component="worker"`. `worker_job_events` rows get `trace`. The independent `ROUTE_REFUSED` audit row in `control_sync_events` gets `trace`. Logs: `worker.job.routed`, `worker.route.refused`, `worker.model_job.finished`. |
+| P6.10 capability receipt (`CAPABILITY_RESULT_NORMALIZED`) | `trace` is a top-level key **beside** the sealed `execution_receipt` and `capability_result`, never inside them. Their hashes and every acceptance and lineage check are unchanged. |
 
-Not yet covered, tracked for the next OP-001 increments: TaskLoop iterations and job/provider dispatch, capability
-execution receipts, CLI and healthcheck output, and the browser client (OP-007).
+The trace is identifiers only. Nothing reads it as authorization, approval, idempotency or evidence. A refusal is
+decided exactly as before, even when the request id equals an approval id. The same work traced under two requests
+keeps one receipt identity. Proof: `tests/integration/test_op001_trace_continuity_postgres.py`, which covers the API →
+TaskLoop → job → receipt chain, a retry under one correlation, a generated CLI trace, a traced refusal and an unhandled
+failure whose text never leaks.
+
+Not yet covered: the P7 capability executor's execution ledger (`src/pados/capability/executor.py`), CLI and
+healthcheck output (the CLI path persists a generated trace but does not print it), and the browser client (OP-007).
+
+To find everything one request did: `SELECT event_type FROM task_loop_events WHERE payload_json->'trace'->>'request_id'
+= '<id>'`. Do the same for `worker_job_events`, and for `control_sync_events` refusals.
 
 ## Identifiers
 
