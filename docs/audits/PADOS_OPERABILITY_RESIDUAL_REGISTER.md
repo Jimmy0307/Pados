@@ -40,15 +40,32 @@ that commit.
 | OP | Status | What landed | Remaining (with unblock condition) |
 |---|---|---|---|
 | OP-001 | Implemented | `pados.operability` context and `pados.error.v1` envelope across API, TaskLoop, worker jobs, capability executor, CLI, healthcheck and browser (OP-007). The trace is stored beside sealed content, never inside it. | None in scope. |
-| OP-002 | Implemented | Lane registry, per-target gate (report and `--claim`), spec-driven index builder and `verify` (`runtime_lane_index.py`), and a doc stating that the gate proves binding, not content truth. CI runs the report. | Required `production` lanes stay NOT_VALIDATED or FAIL until their evidence exists (see R19-3, R19-6, and the REA/OpenMAIC/AI-Scientist-v3 lanes). |
+| OP-002 | Implemented | Lane registry, per-target gate (report and `--claim`), and an index builder and `verify` (`runtime_lane_index.py`) that take a PASS only from a machine-written runner record for the same commit. The doc states that the gate proves binding, not content truth. CI runs the report. | Required `production` lanes stay NOT_VALIDATED or FAIL until their evidence exists (see R19-3, R19-6, and the REA/OpenMAIC/AI-Scientist-v3 lanes). |
 | OP-003 | Implemented | `/health/live` and `/health/ready` (`pados.health.v1`), bounded probes, and no driver text in `/health`. | Corpus lane readiness is not in `/health/ready` (gap C08 in the operability registry). |
-| OP-004 | Implemented | Parent deadlines, bounded retry, idempotency content conflicts, mutation inventory, TaskLoop lease renewal and fencing. | Cross-database fencing (R19-1). |
+| OP-004 | Implemented | Parent deadlines, bounded retry, and idempotency content conflicts for messages, work requests, approvals, task goals, task plans, loops and routes. A mutation inventory (approval decisions are STATE_GUARDED). TaskLoop lease renewal and fencing for named owners; owner-less operator steps only observe the lease. | Fencing protects only callers that name themselves; a multi-instance scheduler must pass its instance id. Cross-database fencing (R19-1). |
 | OP-005 | Implemented | Deterministic failure injection (`failure_injection` marker) and component recovery runbooks. | Runbooks for C06, C12, C13 and C17 stay listed gaps. |
 | OP-006 | Implemented | `operability_gate.py` with 17 components, run in CI; dangling references fail and gaps stay INCOMPLETE. | 6 components INCOMPLETE with named gaps. |
-| OP-007 | Implemented | `web/src/http.ts`: deadline, request id, envelope, REQUEST_TIMEOUT / WRITE_OUTCOME_UNKNOWN / SESSION_STALE, safe-read-only retry, duplicate-write protection. | Remote PWA notices show the code, not the guidance text. |
-| OP-008 | Foundation implemented | Bounded metrics catalog, `/metrics`, W3C `traceparent` propagation in logs and downstream headers. | Exporter, dashboards, alerts and span export need deployment infrastructure. Other processes do not serve `/metrics` yet. |
+| OP-007 | Implemented | `web/src/http.ts`: request id and envelope; a read deadline that covers the body; writes with no client deadline; REQUEST_TIMEOUT / WRITE_OUTCOME_UNKNOWN / SESSION_STALE; safe-read-only retry; duplicate-write protection. The remote CORS allow-list carries the new headers. | Remote PWA notices show the code, not the guidance text. |
+| OP-008 | Foundation implemented | Bounded metrics catalog (method label limited to standard methods, a cap of 2048 series per metric), `/metrics`, and W3C `traceparent` propagation in logs and downstream headers. | Exporter, dashboards, alerts and span export need deployment infrastructure. Other processes do not serve `/metrics` yet. |
 | OP-009 | Implemented | Cross-pack contract (`pack_operability.py`): a checker per output, retryable codes transient-shaped, refusals never retryable, health is a bool. | Retry limits and health intervals need a manifest schema v2: an owner decision, since it changes every pack digest. |
 | OP-010 | Implemented | Glossary, and a doc reference lint over all of `docs/` (0 findings) run in CI. | Persisted field names are not renamed (by design). |
+
+## Independent review (2026-11-02)
+
+An independent review of `origin/main...feat/operability-remediation-20261101` found no breach of the context
+invariant: trace stays beside sealed content and never enters receipts, ledger hashes or CAS. Its eight findings and
+their outcomes:
+
+| # | Severity | Finding | Outcome |
+|---|---|---|---|
+| 1 | HIGH | Owner-less loop steps renewed or revived any holder's lease, blocking takeovers | Fixed in `2262f95`, with PostgreSQL tests that failed before the fix |
+| 2 | HIGH | Remote CORS refused the new browser headers, breaking the cross-origin Remote console | Fixed in `fed562e`, with a preflight test that failed before the fix |
+| 3 | MEDIUM | Writes inherited the 15 s read deadline, and the budget header capped server model calls | Fixed in `76c2ba5`, with a test that failed before the fix |
+| 4 | MEDIUM | The lane index took PASS, commit and freshness from the spec author | Fixed in `b5f1c8d`: PASS only from a machine-written runner record |
+| 5 | MEDIUM | Task goal and loop creates silently returned the old row on key reuse | Fixed in `2262f95` (plus named route conflicts; approval decisions reclassified), with tests that failed before the fix |
+| 6 | LOW-MEDIUM | Arbitrary request methods could fill the metrics series cap | Fixed in `f3a8765` |
+| 7 | LOW | Each readiness request started a probe thread; a hung database accumulated them | Fixed in `f3a8765` (one probe in flight per app) |
+| 8 | LOW | The browser read deadline stopped at the response headers | Fixed in `76c2ba5`, with a test that failed before the fix |
 
 ## Standard adoption checklist (§10), branch status
 
