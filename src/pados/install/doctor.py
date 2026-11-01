@@ -212,6 +212,7 @@ def port_is_free(host: str, port: int) -> bool:
 def check_readiness(settings: Any, db_ok: bool) -> tuple[dict[str, Any], dict[str, Any]]:
     from pados.execution.readiness import readiness
     from pados.operations.service import system_health
+    from pados.providers.factory import chat_provider_mode
 
     if not db_ok:
         return (finding("providers", Level.WARNING, "NOT_ASSESSED", "Provider routing needs the database."),
@@ -227,6 +228,11 @@ def check_readiness(settings: Any, db_ok: bool) -> tuple[dict[str, Any], dict[st
                         "An execution provider is selected by the Worker Router." if provider_ok else
                         "No execution provider is configured (Core runs; product loop execution is unavailable).",
                         chat_provider=settings.chat_provider, embed_provider=settings.embed_provider)
+    if chat_provider_mode(settings) == "MOCK_CONTRACT_TEST_ONLY":
+        providers = finding("providers", Level.WARNING, "MOCK_CHAT_PROVIDER_SELECTED",
+                            "PADOS_CHAT_PROVIDER=mock: cognitive output is MOCK_CONTRACT_TEST_ONLY, not model output.",
+                            "unset PADOS_CHAT_PROVIDER, or configure a local model provider",
+                            previous_code=providers["code"], chat_provider=settings.chat_provider)
     state = readiness({"runtime": {"status": "ok"}, "files": {"alembic_ini": True, "migrations": True},
                        "database": {"status": "ok"}, "status": "ok", "system_health": health})
     level = {"ready": Level.PASS, "degraded": Level.WARNING}.get(str(state["state"]), Level.BLOCKED)

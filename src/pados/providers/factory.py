@@ -17,6 +17,14 @@ class ProviderNotConfiguredError(RuntimeError):
     pass
 
 
+def chat_provider_mode(settings: Settings) -> str:
+    """UNCONFIGURED, MOCK_CONTRACT_TEST_ONLY or CONFIGURED: how operator surfaces label the chat provider."""
+    name = settings.chat_provider.strip().casefold()
+    if not name:
+        return "UNCONFIGURED"
+    return "MOCK_CONTRACT_TEST_ONLY" if name == "mock" else "CONFIGURED"
+
+
 def check_chat_provider_configured(settings: Settings, *, allow_mock: bool = False) -> None:
     """Cheap configuration check (no live observation, no call); raises ``ProviderNotConfiguredError``.
 

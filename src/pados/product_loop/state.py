@@ -27,7 +27,11 @@ from sqlalchemy.orm import Session
 
 from pados.execution.semantic_context import resolve_database_semantic_context
 from pados.product_loop import read_model
-from pados.product_loop.authorization import ProductAuthorizationError
+from pados.product_loop.authorization import (
+    APPROVAL_REF_INVALID,
+    ProductAuthorizationError,
+    check_product_approval,
+)
 from pados.product_loop.schemas import (
     DurableProductRead,
     ProductLoopReport,
@@ -164,23 +168,44 @@ class P6_19BStateGateway:
                     proof_session=proof_session,
                 )
 
-    def verify_approval(self, approval_ref: str, scope_id: str) -> None:
+    def verify_approval(self, approval_ref: str, scope_id: str, proposal_hash: str) -> None:
+        """RC2 ARCH-1: the approval must be APPROVED, in this scope, and name exactly this operation."""
         try:
             UUID(str(approval_ref))
         except ValueError as exc:
-            raise ProductAuthorizationError("APPROVAL_REF_INVALID") from exc
+            raise ProductAuthorizationError(APPROVAL_REF_INVALID) from exc
         with self._operational_session() as session:
             row = session.execute(
                 text(
-                    "SELECT project_id::text AS project_id, status FROM control_approvals "
-                    "WHERE id = CAST(:approval_id AS uuid)"
+                    "SELECT project_id::text AS project_id, status, proposal_hash "
+                    "FROM control_approvals WHERE id = CAST(:approval_id AS uuid)"
                 ),
                 {"approval_id": str(approval_ref)},
             ).mappings().first()
-        if row is None or str(row["project_id"]) != scope_id:
-            raise ProductAuthorizationError("APPROVAL_REF_NOT_BOUND_TO_SCOPE")
-        if row["status"] != "APPROVED":
-            raise ProductAuthorizationError("APPROVAL_REF_NOT_APPROVED")
+        with self.proof_service._session() as proof_session:
+            consumed = proof_session.execute(
+                text(
+                    "SELECT 1 FROM state_proof_semantic_audit "
+                    "WHERE approval_ref = :approval_ref AND outcome = 'COMMITTED' LIMIT 1"
+                ),
+                {"approval_ref": str(approval_ref)},
+            ).first() is not None
+        check_product_approval(
+            None if row is None else dict(row), scope_id=scope_id, proposal_hash=proposal_hash, consumed=consumed
+        )
+
+    def project_classification(self, project_id: str) -> str | None:
+        """The registered project's recorded classification (RC2 SEC-2), or None when it cannot be read."""
+        try:
+            UUID(str(project_id))
+        except ValueError:
+            return None
+        with self._operational_session() as session:
+            value = session.execute(
+                text("SELECT classification FROM projects WHERE id = CAST(:project_id AS uuid)"),
+                {"project_id": str(project_id)},
+            ).scalar_one_or_none()
+        return None if value is None else str(value)
 
     async def persist_run_context(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         ref = self.proof_service.object_store.put_json(dict(payload), object_kind="OTHER")
@@ -318,9 +343,25 @@ class InMemoryP6_19BStateGateway:
         self.commits: dict[str, dict[str, Any]] = {}
         self.projections: dict[str, dict[str, Any]] = {}
         self.read_index: dict[str, dict[str, Any]] = {}
+        self.approvals: dict[str, dict[str, str]] = {}
+        self.committed_approvals: set[str] = set()
 
     def semantic_context(self, scope_id: str) -> dict[str, Any]:
         return {"scope_version": self.versions.get(scope_id, 0)}
+
+    def grant_approval(self, scope_id: str, proposal_hash: str) -> str:
+        """Test seam for a human approval of one operation (``product_dispatch_hash``)."""
+        ref = str(uuid4())
+        self.approvals[ref] = {"project_id": scope_id, "proposal_hash": proposal_hash, "status": "APPROVED"}
+        return ref
+
+    def revoke_approval(self, approval_ref: str) -> None:
+        self.approvals[approval_ref]["status"] = "CANCELLED"
+
+    def verify_approval(self, approval_ref: str, scope_id: str, proposal_hash: str) -> None:
+        row = self.approvals.get(approval_ref)
+        check_product_approval(None if row is None else dict(row), scope_id=scope_id, proposal_hash=proposal_hash,
+                               consumed=approval_ref in self.committed_approvals)
 
     async def persist_run_context(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         ref = self.object_store.put_json(dict(payload), object_kind="OTHER")
@@ -391,6 +432,8 @@ class InMemoryP6_19BStateGateway:
         current = self.versions.get(scope_id, 0)
         if current == receipt.input_scope_version:
             self.versions[scope_id] = current + 1
+            if contract.approval_ref is not None:
+                self.committed_approvals.add(contract.approval_ref)
             result: dict[str, Any] = {
                 "status": "COMMITTED",
                 "result_id": receipt.receipt_id,

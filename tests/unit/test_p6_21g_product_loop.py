@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterator
+
 import asyncio
 from pathlib import Path
 from typing import Any
@@ -24,8 +27,19 @@ from pados.product_loop.service import ProductLoopService
 from pados.product_loop.state import InMemoryP6_19BStateGateway
 from pados.product_loop.validation import FileValidator
 from tests.private_markers import leaked_markers
+from tests.product_loop_approval import approved
 
-CONTROL_TOKEN = "pados-local-control-" + "token"
+CONTROL_TOKEN = "pados-test-control-" + "value"  # never the public shipped default
+
+@pytest.fixture(autouse=True)
+def _unique_control_hash(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The shipped default hash authenticates nothing: configure the hash of this module's test value."""
+    from pados.config import get_settings
+    monkeypatch.setenv("PADOS_CONTROL_API_TOKEN_HASH", hashlib.sha256(CONTROL_TOKEN.encode()).hexdigest().upper())
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
 
 
 def _headers(scope_id: str) -> dict[str, str]:
@@ -76,7 +90,8 @@ def _service(root: Path) -> tuple[ProductLoopService, InMemoryP6_19BStateGateway
 
 
 def _run(service: ProductLoopService, request: GoalRequest):
-    return asyncio.run(service.execute(request))
+    # RC2 ARCH-1: an authorized request is dispatched only with a human approval of exactly this operation.
+    return asyncio.run(service.execute(approved(request, service.state_gateway)))
 
 
 def test_t01_goal_is_composed_into_six_contract_compatible_fields(tmp_path: Path) -> None:
@@ -332,12 +347,15 @@ def test_t22_no_external_orchestration_is_selected(tmp_path: Path) -> None:
 
 
 def test_t23_api_surface_submits_and_reads_one_report(tmp_path: Path) -> None:
-    service, _ = _service(tmp_path)
+    service, gateway = _service(tmp_path)
     app = FastAPI()
-    register_product_loop_routes(app, Settings(), service=service)
-    request = _request(
-        tmp_path,
-        changes=[{"path": "app.py", "content": "def result():\n    return 'good'\n"}],
+    register_product_loop_routes(app, Settings(PADOS_PRODUCT_LOOP_ENABLED=True), service=service)
+    request = approved(
+        _request(
+            tmp_path,
+            changes=[{"path": "app.py", "content": "def result():\n    return 'good'\n"}],
+        ),
+        gateway,
     )
     with TestClient(app) as client:
         created = client.post(
@@ -358,7 +376,7 @@ def test_t23_api_surface_submits_and_reads_one_report(tmp_path: Path) -> None:
 def test_t24_api_rejects_unknown_contract_fields(tmp_path: Path) -> None:
     service, _ = _service(tmp_path)
     app = FastAPI()
-    register_product_loop_routes(app, Settings(), service=service)
+    register_product_loop_routes(app, Settings(PADOS_PRODUCT_LOOP_ENABLED=True), service=service)
     request = _request(
         tmp_path,
         changes=[{"path": "app.py", "content": "def result():\n    return 'good'\n"}],

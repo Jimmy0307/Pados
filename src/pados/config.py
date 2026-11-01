@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 OPERATIONAL_DATABASE_DEFAULT = "pados_local_runtime"
 CORPUS_DATABASE_DEFAULT = "pados_corpus_runtime"
-OPERATIONAL_REVISION_DEFAULT = "20261010_0019"
+OPERATIONAL_REVISION_DEFAULT = "20261101_0020"
 CORPUS_REVISION_DEFAULT = "20260730_0011"
 EXCLUDED_REVISION_DEFAULT = "20260730_0012"
+
+
+def artifact_root(settings: "Settings") -> Path:
+    """The absolute execution-output root for operator surfaces."""
+    return Path(settings.artifact_root).expanduser().resolve()
 
 
 class Settings(BaseSettings):
@@ -46,7 +52,8 @@ class Settings(BaseSettings):
     api_host: str = Field(default="127.0.0.1", alias="PADOS_API_HOST")
     api_port: int = Field(default=8088, alias="PADOS_API_PORT")
     ollama_base_url: str = Field(default="http://127.0.0.1:11434", alias="OLLAMA_BASE_URL")
-    chat_provider: str = Field(default="mock", alias="PADOS_CHAT_PROVIDER")
+    # Unset means no chat model is configured (RC2 MODEL-1); "mock" must be chosen explicitly and is contract-test only.
+    chat_provider: str = Field(default="", alias="PADOS_CHAT_PROVIDER")
     chat_model: str = Field(default="", alias="PADOS_CHAT_MODEL")
     # Measured execution binding of the consumer inference path: the operator ModelCatalog document holding the
     # REGISTERED measured profiles (empty = not configured; local model calls are then refused, never run unbound).
@@ -69,10 +76,23 @@ class Settings(BaseSettings):
         alias="PADOS_CONTROL_API_TOKEN_HASH",
     )
     control_request_max_bytes: int = Field(default=8192, alias="PADOS_CONTROL_REQUEST_MAX_BYTES")
+    # How long an approved WORK_ROUTE approval may authorize new work (RC2 SEC-4); 5 minutes to 7 days.
+    approval_ttl_seconds: int = Field(default=86400, ge=300, le=604800, alias="PADOS_APPROVAL_TTL_SECONDS")
     product_workspace_root: str = Field(default="", alias="PADOS_PRODUCT_WORKSPACE_ROOT")
     product_object_root: str = Field(default="", alias="PADOS_PRODUCT_OBJECT_ROOT")
+    # Where worker jobs write handoffs and outputs. Receipts record these paths and verification re-reads them, so
+    # operator surfaces resolve it to an absolute path (never relative to whatever directory the server runs in).
+    artifact_root: str = Field(default="runtime/artifacts", alias="PADOS_ARTIFACT_ROOT")
     product_database_name: str = Field(default="", alias="PADOS_PRODUCT_DATABASE_NAME")
+    # A proof DB for P6.10 acceptance must not implicitly enable the separate Product Loop runtime.
+    product_loop_enabled: bool = Field(default=False, alias="PADOS_PRODUCT_LOOP_ENABLED")
     product_loop_provider: str = Field(default="AUTO", alias="PADOS_PRODUCT_LOOP_PROVIDER")
+    # RC2 SEC-2: the most sensitive project data the Product Loop may send to a cloud worker. Parsed fail-closed at
+    # dispatch; RESTRICTED is never released, whatever is configured. Projects default to ``internal``, so by default
+    # only a project explicitly classified PUBLIC is released; raising the ceiling is an operator decision.
+    product_loop_cloud_max_classification: str = Field(
+        default="PUBLIC", alias="PADOS_PRODUCT_LOOP_CLOUD_MAX_CLASSIFICATION"
+    )
     # Optional Enterprise Capability Pack manifest file; unset never affects Core readiness.
     enterprise_config: str = Field(default="", alias="PADOS_ENTERPRISE_CONFIG")
     # Optional Local Compute Node registry; unset never affects Core readiness.

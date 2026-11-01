@@ -16,6 +16,7 @@ from pados.product_loop.service import ProductLoopService
 from pados.product_loop.state import InMemoryP6_19BStateGateway
 from pados.product_loop.validation import FileValidator
 from tests.connectivity.connectivity_support import SimRemoteClient
+from tests.product_loop_approval import approved
 from tests.remote.remote_slice_support import PROJECT, build_slice
 
 
@@ -80,11 +81,11 @@ def test_scenario_b_cloud_provider_job_fails_closed_without_fallback(tmp_path: P
 
     maker = ConnectivityGatedMaker(CloudMaker(workspace), endpoint="https://api.provider.example/v1", gate=_gate(net))
     loop = ProductLoopService(maker=maker, validator=FileValidator(), state_gateway=gateway)  # type: ignore[arg-type]
-    report = asyncio.run(loop.execute(GoalRequest.model_validate({
+    report = asyncio.run(loop.execute(approved(GoalRequest.model_validate({
         "goal": "cloud job", "workspace_root": str(workspace), "scope_id": "proj-cloud",
         "changes": [{"path": "app.py", "content": "def result():\n    return 'good'\n"}],
         "acceptance_criteria": [{"criterion_id": "c", "check": "FILE_CONTAINS", "target_path": "app.py",
-                                 "expected_text": "return 'good'"}], "authorized": True})))
+                                 "expected_text": "return 'good'"}], "authorized": True}), gateway)))
     assert report.status is not ProductLoopStatus.COMMITTED
     assert report.final_result is not None and report.final_result.summary == "PROVIDER_UNREACHABLE"
     assert report.final_result.retryable is True

@@ -11,7 +11,10 @@ from sqlalchemy.orm import Session
 
 from pados.control.approval_subject import (
     APPROVAL_ACTOR_MISMATCH,
+    APPROVAL_CONSUMED,
+    APPROVAL_EXPIRED,
     APPROVAL_REQUEST_MISMATCH,
+    APPROVAL_REVOKED,
     APPROVAL_SCOPE_MISMATCH,
     WorkRouteSubject,
     find_operation,
@@ -40,6 +43,7 @@ from pados.work_protocol.models import TaskEnvelope
 from pados.worker.schemas import RISK_ORDER, RouteRequest
 from pados.worker.service import (
     NON_TERMINAL_JOB_STATUSES,
+    execute_routed_model_job,
     expire_overdue_jobs,
     record_job_event,
     route_work_request,
@@ -69,16 +73,58 @@ def _event(session: Session, loop_id: str, project_id: str, event_type: str, pay
     )
 
 
+_APPROVAL_LIFECYCLE_SQL = (
+    "SELECT *, (expires_at IS NOT NULL AND expires_at <= now()) AS is_expired "
+    "FROM control_approvals WHERE id = CAST(:id AS uuid)"
+)
+
+
 def _approved_approval(session: Session, approval_id: str, project_id: str) -> dict[str, Any]:
-    row = session.execute(
-        text("SELECT * FROM control_approvals WHERE id = CAST(:id AS uuid)"),
-        {"id": approval_id},
-    ).mappings().one()
+    row = session.execute(text(_APPROVAL_LIFECYCLE_SQL), {"id": approval_id}).mappings().one()
     if str(row["project_id"]) != project_id:
         raise PermissionError("cross-project approval rejected")
+    if row["status"] == "CANCELLED":
+        raise PermissionError(APPROVAL_REVOKED)
     if row["status"] != "APPROVED":
         raise PermissionError("approval is not approved")
+    if row["is_expired"]:
+        raise PermissionError(APPROVAL_EXPIRED)
     return dict(row)
+
+
+def _consume_for_loop(session: Session, approval: dict[str, Any], loop_id: str) -> None:
+    """Bind a WORK_ROUTE approval to this one loop; an approval already bound to another loop is refused."""
+    if approval.get("subject_kind") != "WORK_ROUTE":
+        return
+    consumed = session.execute(
+        text(
+            """
+            UPDATE control_approvals SET consumed_by_loop_id = CAST(:loop_id AS uuid), updated_at = now()
+            WHERE id = CAST(:id AS uuid)
+              AND status = 'APPROVED' AND (expires_at IS NULL OR expires_at > now())
+              AND (consumed_by_loop_id IS NULL OR consumed_by_loop_id = CAST(:loop_id AS uuid))
+            RETURNING id
+            """
+        ),
+        {"id": str(approval["id"]), "loop_id": loop_id},
+    ).first()
+    if consumed is None:
+        raise PermissionError(APPROVAL_CONSUMED)
+
+
+def _approval_revalidation_failure(session: Session, loop: dict[str, Any]) -> str | None:
+    """Before every route: the loop's approval must still be approved, unexpired and bound to this loop."""
+    row = session.execute(text(_APPROVAL_LIFECYCLE_SQL + " FOR UPDATE"), {"id": str(loop["approval_id"])}).mappings().first()
+    if row is None or row["status"] == "CANCELLED":
+        return APPROVAL_REVOKED
+    if row["status"] != "APPROVED":
+        return "APPROVAL_NOT_APPROVED"
+    if row["is_expired"]:
+        return APPROVAL_EXPIRED
+    bound = row.get("consumed_by_loop_id")
+    if bound is not None and str(bound) != str(loop["id"]):
+        return APPROVAL_CONSUMED
+    return None
 
 
 def _bound_subject(approval: dict[str, Any]) -> WorkRouteSubject:
@@ -418,6 +464,7 @@ def create_loop(session: Session, payload: LoopCreate) -> dict[str, Any]:
     ).scalar_one()
     if int(conflicting_bindings) > 0:
         raise PermissionError("GOAL_RUNTIME_PLAN_ALREADY_BOUND_TO_OTHER_LOOP")
+    _consume_for_loop(session, approval, str(row["id"]))
     session.execute(
         text(
             """
@@ -476,6 +523,7 @@ def run_one_iteration(
     settings: Any,
     artifact_root: Path,
     idempotency_key: str,
+    defer_model_execution: bool = False,
 ) -> dict[str, Any]:
     loop = get_loop_for_update(session, loop_id)
     if loop["status"] != "RUNNING":
@@ -544,7 +592,7 @@ def run_one_iteration(
         if states and all(str(status) == "PASSED" for status in states):
             return _complete_loop(session, loop, "all plan steps passed")
         return _block_loop(session, loop, "no ready step; dependencies or failed work remain")
-    revalidation_failure = _product_step_revalidation_failure(
+    revalidation_failure = _approval_revalidation_failure(session, loop) or _product_step_revalidation_failure(
         session, loop=loop, step=step, settings=settings
     )
     if revalidation_failure is not None:
@@ -634,6 +682,7 @@ def run_one_iteration(
         route=route,
         settings=settings,
         artifact_root=artifact_root,
+        defer_model_execution=defer_model_execution,
     )
     job = routed["job"]
     job_status = str(job["status"])
@@ -666,6 +715,45 @@ def run_one_iteration(
         settings=settings,
         artifact_root=artifact_root,
     )
+
+
+def _deferred_model_job(session: Session, loop_id: str) -> str | None:
+    """The active iteration's local-model job that is routed but not yet executed, if any."""
+    job_id = session.execute(
+        text(
+            """
+            SELECT j.id::text FROM task_loop_iterations i JOIN worker_jobs j ON j.id = i.job_id
+            WHERE i.loop_id = CAST(:loop_id AS uuid) AND i.status = 'RUNNING'
+              AND j.status = 'ROUTED' AND j.worker_type = 'OLLAMA'
+            ORDER BY i.iteration_number DESC LIMIT 1
+            """
+        ),
+        {"loop_id": loop_id},
+    ).scalar_one_or_none()
+    return None if job_id is None else str(job_id)
+
+
+def run_step(
+    settings: Any, *, loop_id: str, artifact_root: Path, idempotency_key: str, session_factory: Any = None
+) -> dict[str, Any]:
+    """One TaskLoop step for an operator surface (RC2 SEC-9).
+
+    Routing commits first. A local-model job then runs with no transaction or lock held, and the same iteration is
+    resumed in a new transaction. A model job left ROUTED by an interrupted step is picked up here as well.
+    """
+    from pados.db import session_scope
+
+    scope = session_factory or session_scope
+    with scope(settings) as session:
+        result = run_one_iteration(session, loop_id=loop_id, settings=settings, artifact_root=artifact_root,
+                                   idempotency_key=idempotency_key, defer_model_execution=True)
+        deferred = _deferred_model_job(session, loop_id)
+    if deferred is None:
+        return result
+    execute_routed_model_job(settings, deferred, session_factory=scope)
+    with scope(settings) as session:
+        return run_one_iteration(session, loop_id=loop_id, settings=settings, artifact_root=artifact_root,
+                                 idempotency_key=f"{idempotency_key}:model-result", defer_model_execution=True)
 
 
 def _waiting_for_job(
@@ -1284,29 +1372,35 @@ def loop_events(session: Session, loop_id: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def pause_loop(session: Session, loop_id: str) -> dict[str, Any]:
-    row = session.execute(
-        text("UPDATE task_loops SET status = 'PAUSED', paused_at = now() WHERE id = CAST(:id AS uuid) RETURNING *"),
-        {"id": loop_id},
-    ).mappings().one()
-    _event(session, loop_id, str(row["project_id"]), "LOOP_PAUSED", {})
+# A finished loop is never rewritten by an operator control (RC2 SEC-3): the predicate lives in the UPDATE itself.
+_TERMINAL_LOOP_SQL = "('COMPLETED', 'PARTIALLY_COMPLETED', 'FAILED_TERMINAL', 'CANCELLED', 'TIMED_OUT')"
+
+
+def _transitioned(session: Session, statement: str, loop_id: str) -> dict[str, Any]:
+    row = session.execute(text(statement), {"id": loop_id}).mappings().one_or_none()
+    if row is None:
+        raise ValueError("LOOP_TRANSITION_REFUSED: the loop is unknown or its status does not allow this action")
     return dict(row)
+
+
+def pause_loop(session: Session, loop_id: str) -> dict[str, Any]:
+    row = _transitioned(session, "UPDATE task_loops SET status = 'PAUSED', paused_at = now() "
+                        f"WHERE id = CAST(:id AS uuid) AND status NOT IN {_TERMINAL_LOOP_SQL} "
+                        "AND status <> 'PAUSED' RETURNING *", loop_id)
+    _event(session, loop_id, str(row["project_id"]), "LOOP_PAUSED", {})
+    return row
 
 
 def resume_loop(session: Session, loop_id: str) -> dict[str, Any]:
-    row = session.execute(
-        text("UPDATE task_loops SET status = 'RUNNING', paused_at = NULL WHERE id = CAST(:id AS uuid) AND status = 'PAUSED' RETURNING *"),
-        {"id": loop_id},
-    ).mappings().one()
+    row = _transitioned(session, "UPDATE task_loops SET status = 'RUNNING', paused_at = NULL "
+                        "WHERE id = CAST(:id AS uuid) AND status = 'PAUSED' RETURNING *", loop_id)
     _event(session, loop_id, str(row["project_id"]), "LOOP_RESUMED", {})
-    return dict(row)
+    return row
 
 
 def cancel_loop(session: Session, loop_id: str) -> dict[str, Any]:
-    row = session.execute(
-        text("UPDATE task_loops SET status = 'CANCELLED', completed_at = now() WHERE id = CAST(:id AS uuid) RETURNING *"),
-        {"id": loop_id},
-    ).mappings().one()
+    row = _transitioned(session, "UPDATE task_loops SET status = 'CANCELLED', completed_at = now() "
+                        f"WHERE id = CAST(:id AS uuid) AND status NOT IN {_TERMINAL_LOOP_SQL} RETURNING *", loop_id)
     cancelled_jobs = session.execute(
         text(
             """

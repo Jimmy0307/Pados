@@ -135,16 +135,32 @@ async function waitHealthy(state, { timeoutMs = 90000, intervalMs = 500 } = {}) 
   return { healthy: false, exited: false, last };
 }
 
-async function stopProcess(pid, { timeoutMs = 15000, platform = process.platform } = {}) {
-  if (platform === 'win32') {
-    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, encoding: 'utf8' });
-  } else {
-    try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
-  }
+async function waitExit(pid, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!isAlive(pid)) return { stopped: true, forced: platform === 'win32' };
+    if (!isAlive(pid)) return true;
     await sleep(250);
+  }
+  return !isAlive(pid);
+}
+
+// Windows has no SIGTERM for a detached console-less process: ask the server itself to drain (UX-2), and force
+// termination only if it has not exited within gracefulMs.
+async function stopProcess(pid, { timeoutMs = 15000, gracefulMs = 10000, platform = process.platform, stopFile,
+  instanceId } = {}) {
+  if (platform === 'win32') {
+    if (stopFile && instanceId) {
+      fs.mkdirSync(path.dirname(stopFile), { recursive: true });
+      fs.writeFileSync(stopFile, instanceId, { mode: 0o600 });
+      const graceful = await waitExit(pid, gracefulMs);
+      fs.rmSync(stopFile, { force: true });
+      if (graceful) return { stopped: true, forced: false };
+    }
+    spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, encoding: 'utf8' });
+    if (await waitExit(pid, timeoutMs)) return { stopped: true, forced: true };
+  } else {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+    if (await waitExit(pid, timeoutMs)) return { stopped: true, forced: false };
   }
   try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
   await sleep(500);
@@ -160,7 +176,9 @@ async function stopApi(home, { lookup = commandLineOf } = {}) {
     if (!alive) return { stopped: false, stale: true, pid: state.pid };
     throw new PadosError('NOT_OWNED', { details: { pid: state.pid } });
   }
-  const result = await stopProcess(state.pid);
+  const result = await stopProcess(state.pid, {
+    stopFile: path.join(layout(home).state, 'api.stop'), instanceId: state.instance_id,
+  });
   if (!result.stopped) {
     throw new PadosError('INTERNAL_ERROR', { cause: `PADOS process ${state.pid} did not stop.` });
   }
@@ -169,6 +187,7 @@ async function stopApi(home, { lookup = commandLineOf } = {}) {
 }
 
 module.exports = {
+  stopProcess,
   readState, writeState, clearState, commandLineOf, isOwned, portIsFree, getJson, startApi, waitHealthy,
   stopApi, isAlive, sleep,
 };

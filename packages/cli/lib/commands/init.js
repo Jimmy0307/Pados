@@ -17,7 +17,7 @@ const STORAGE_MODES = ['LIGHTWEIGHT', 'STANDARD', 'FULL_LOCAL'];
 const LARGE_DISK_BYTES = 1024 ** 3;
 
 const SPEC = {
-  booleans: ['reconfigure', 'create-databases', 'skip-database', 'rotate-control-token'],
+  booleans: ['reconfigure', 'create-databases', 'skip-database', 'rotate-control-token', 'migrate', 'adopt-runtime'],
   values: ['storage', 'min-free-bytes', 'db-host', 'db-port', 'db-user', 'db-name', 'db-password-ref',
     'db-passfile', 'db-password', 'api-port'],
 };
@@ -98,8 +98,53 @@ function installPlatformRuntime(ctx, minFree) {
   return { runtime: runtimeAt(result.dir, pkg.version), installed: result.installed, bytes: pkg.manifest.files.bytes };
 }
 
+// RC2 INST-1: init installs; it never upgrades. On an existing installation a different runtime version is activated
+// (and its data migrated) only by `pados update`, which checks compatibility first and asks before migrating.
+// A configuration with no readable runtime record (deleted or corrupt) is not a fresh install: activating this CLI's
+// runtime there needs the explicit --adopt-runtime consent.
+function assertNoUnconsentedUpgrade(existing, previous, version, flags = {}) {
+  if (!existing || !version) return;
+  if (!previous || !previous.version) {
+    if (flags.adoptRuntime) return;
+    throw new PadosError('RUNTIME_RECORD_MISSING', { details: { cli: version } });
+  }
+  if (previous.version === version) return;
+  throw new PadosError('UPDATE_REQUIRED', { details: { installed: previous.version, cli: version } });
+}
+
+// Lanes whose existing data would be migrated forward without consent (RC2 INST-1). Empty or missing databases hold no
+// data, so a fresh or recovering install still initializes them. Consent is the dedicated --migrate flag, as for
+// `pados update`: the global --yes only confirms disk use and never migrates data.
+function unconsentedMigration(check, flags) {
+  if (flags.migrate) return null;
+  const lanes = (check.lanes || []).filter((lane) => lane.state === 'UPGRADE_AVAILABLE')
+    .map((lane) => `${lane.lane} (${lane.database}): ${(lane.revisions || []).join(',') || 'empty'} -> ${lane.target_revision}`);
+  return lanes.length ? lanes : null;
+}
+
+// Flags that only take effect when the configuration is written (INST-2: never silently ignore them).
+const CONFIG_FLAGS = ['dbHost', 'dbPort', 'dbUser', 'dbName', 'dbPasswordRef', 'dbPassfile', 'apiPort'];
+
+function ignoredConfigFlags(flags, existing) {
+  if (!existing || flags.reconfigure) return [];
+  return CONFIG_FLAGS.filter((name) => flags[name] !== undefined);
+}
+
+// One line per lane, so a partly applied migration shows which lanes moved and where each one is (INST-4).
+function laneLines(database) {
+  const lanes = ((database.applied && (database.applied.after || database.applied.before))
+    || database.check || {}).lanes || [];
+  return lanes.map((lane) => `  ${lane.lane}: ${lane.state}${lane.current_revision ? ` at ${lane.current_revision}` : ''}`
+    + `${lane.target_revision && lane.state !== 'CURRENT' ? ` (target ${lane.target_revision})` : ''}`);
+}
+
 function writeConfiguration(ctx, existing) {
   const paths = layout(ctx.home);
+  const ignored = ignoredConfigFlags(ctx.flags, existing);
+  if (ignored.length) {
+    throw new PadosError('CONFIG_EXISTS', { details: { ignored_flags: ignored },
+      cause: `These options only apply when the configuration is written: ${ignored.join(', ')}.` });
+  }
   if (existing && !ctx.flags.reconfigure) return { written: false, file: paths.configFile };
   const entries = buildConfig(ctx.home, {
     dbHost: ctx.flags.dbHost, dbPort: ctx.flags.dbPort, dbUser: ctx.flags.dbUser, dbName: ctx.flags.dbName,
@@ -125,6 +170,8 @@ function configureDatabase(ctx, runtime) {
   if (states.has('INCOMPATIBLE')) return { status: 'BLOCKED', code: 'MIGRATIONS_INCOMPATIBLE', check };
   if (states.has('DATABASE_MISSING') && !ctx.flags.createDatabases) return { status: 'BLOCKED', code: 'DATABASE_MISSING', check };
   if (check.status === 'CURRENT') return { status: 'CURRENT', check };
+  const unconsented = unconsentedMigration(check, ctx.flags);
+  if (unconsented) return { status: 'BLOCKED', code: 'MIGRATION_CONSENT_REQUIRED', lanes: unconsented, check };
   const args = ['migrate', ...(ctx.flags.createDatabases ? ['--create-databases'] : [])];
   const applied = python(ctx, runtime, args, { timeoutMs: 900000 }).json;
   return { status: applied.status, code: applied.status === 'CURRENT' ? undefined : (applied.code || 'MIGRATIONS_PENDING'), applied };
@@ -143,7 +190,9 @@ async function run(ctx) {
   // Runtime package resolution + disk check happen before anything is written.
   const plan = { storage, reason: storage === 'FULL_LOCAL' ? 'FULL_LOCAL keeps artifacts locally' : 'runtime size', runtimeBytes: 0 };
   if (!(ctx.env.PADOS_CLI_DEV_PYTHON && ctx.env.PADOS_CLI_DEV_APP)) {
-    plan.runtimeBytes = resolveRuntimePackage({ env: ctx.env }).manifest.files.bytes;
+    const pkg = resolveRuntimePackage({ env: ctx.env });
+    assertNoUnconsentedUpgrade(existing || Boolean(previous), previous, pkg.version, ctx.flags);
+    plan.runtimeBytes = pkg.manifest.files.bytes;
   }
   await confirmDisk(ctx, plan);
   const runtimeResult = installPlatformRuntime(ctx, minFree);
@@ -172,6 +221,12 @@ async function run(ctx) {
     write(`Configuration: ${report.config.file}${report.config.written ? '' : ' (kept)'}`);
     write(`Storage mode: ${storage}`);
     write(`Database: ${report.database.status}${report.database.code ? ` (${report.database.code})` : ''}`);
+    if (report.database.status !== 'CURRENT' && report.database.status !== 'SKIPPED') {
+      for (const line of laneLines(report.database)) write(line);
+    }
+    if (report.database.code === 'MIGRATION_CONSENT_REQUIRED') {
+      write('Nothing was migrated. Back up both PADOS databases (pg_dump), then run: pados init --migrate');
+    }
     write('');
     write(renderDoctor(doctor));
     write('');
@@ -182,4 +237,4 @@ async function run(ctx) {
   return 0;
 }
 
-module.exports = { SPEC, run, STORAGE_MODES, freeBytes, ask };
+module.exports = { SPEC, run, STORAGE_MODES, freeBytes, ask, ignoredConfigFlags, laneLines, unconsentedMigration };

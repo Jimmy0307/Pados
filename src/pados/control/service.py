@@ -146,6 +146,25 @@ _INSERT_BOUND_APPROVAL = """
 """
 
 
+_DECIDE_UNBOUND_APPROVAL = """
+    UPDATE control_approvals
+    SET status = :status, version = version + 1, decision_reason = :decision_reason,
+        decided_at = now(), updated_at = now()
+    WHERE id = :id AND version = :version AND status = 'PENDING'
+    RETURNING *
+"""
+
+_DECIDE_WORK_ROUTE_APPROVAL = """
+    UPDATE control_approvals
+    SET status = :status, version = version + 1, decision_reason = :decision_reason,
+        decided_at = now(),
+        expires_at = CASE WHEN :status = 'APPROVED' THEN now() + make_interval(secs => :ttl_seconds) END,
+        updated_at = now()
+    WHERE id = :id AND version = :version AND status = 'PENDING' AND subject_kind = 'WORK_ROUTE'
+    RETURNING *
+"""
+
+
 def _bound_subject_values(session: Session, values: dict[str, Any], raw_subject: object) -> dict[str, Any]:
     """Validate a WORK_ROUTE subject and derive proposal_hash from it (RC2 D1)."""
     subject = WorkRouteSubject.model_validate(raw_subject)
@@ -207,7 +226,13 @@ def decide_approval(
     status: str,
     reason: str,
     idempotency_key: str,
+    ttl_seconds: int | None = None,
 ) -> dict[str, object]:
+    """Decide a PENDING approval. An approved WORK_ROUTE approval authorizes new work only until ``expires_at``."""
+    if ttl_seconds is None:
+        from pados.config import get_settings
+
+        ttl_seconds = get_settings().approval_ttl_seconds
     current = get_approval(session, approval_id)
     if current["status"] != "PENDING":
         if current.get("decision_reason") == idempotency_key:
@@ -218,27 +243,60 @@ def decide_approval(
         current_version = int(str(current_version))
     if current_version != version:
         raise ValueError("stale approval version")
+    # Only a WORK_ROUTE approval has a lifecycle; a subject-less approval is decided with the columns every schema
+    # has, as D1 inserts it, so the proof lane (main heads 0011/0013) keeps working.
+    lifecycle = current.get("subject_kind") == "WORK_ROUTE"
     row = session.execute(
-        text(
-            """
-            UPDATE control_approvals
-            SET status = :status,
-                version = version + 1,
-                decision_reason = :decision_reason,
-                decided_at = now(),
-                updated_at = now()
-            WHERE id = :id AND version = :version AND status = 'PENDING'
-            RETURNING *
-            """
-        ),
+        text(_DECIDE_WORK_ROUTE_APPROVAL if lifecycle else _DECIDE_UNBOUND_APPROVAL),
         {
             "id": approval_id,
             "version": version,
             "status": status,
             "decision_reason": idempotency_key if not reason else f"{idempotency_key}: {reason}",
+            **({"ttl_seconds": ttl_seconds} if lifecycle else {}),
         },
     ).mappings().one()
     append_sync_event(session, str(row["project_id"]), f"APPROVAL_{status}", {"approval_id": approval_id})
+    return dict(row)
+
+
+def revoke_approval(
+    session: Session,
+    approval_id: str,
+    *,
+    version: int,
+    reason: str,
+    idempotency_key: str,
+) -> dict[str, object]:
+    """Revoke a PENDING or APPROVED WORK_ROUTE approval (status CANCELLED); no new work can route under it.
+
+    Subject-less approvals (ResultCandidate and remote decisions) keep their own governed lifecycle and are refused.
+    A loop already running under the approval stops before its next route and waits for a human.
+    """
+    current = get_approval(session, approval_id)
+    marker = f"revoked:{idempotency_key}"
+    if current["status"] == "CANCELLED" and str(current.get("decision_reason") or "").startswith(marker):
+        return current
+    if current.get("subject_kind") != "WORK_ROUTE" or current["status"] not in {"PENDING", "APPROVED"}:
+        raise ValueError("APPROVAL_NOT_REVOCABLE")
+    if int(str(current["version"])) != version:
+        raise ValueError("stale approval version")
+    row = session.execute(
+        text(
+            """
+            UPDATE control_approvals
+            SET status = 'CANCELLED', version = version + 1, decision_reason = :decision_reason,
+                decided_at = now(), updated_at = now()
+            WHERE id = :id AND version = :version AND status IN ('PENDING', 'APPROVED')
+              AND subject_kind = 'WORK_ROUTE'
+            RETURNING *
+            """
+        ),
+        {"id": approval_id, "version": version, "decision_reason": f"{marker}: {reason}" if reason else marker},
+    ).mappings().one_or_none()
+    if row is None:
+        raise ValueError("stale approval version")
+    append_sync_event(session, str(row["project_id"]), "APPROVAL_REVOKED", {"approval_id": approval_id})
     return dict(row)
 
 

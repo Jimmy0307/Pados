@@ -45,3 +45,19 @@ RC CI and packaging are not required checks. CI success never authorizes deploym
 - No public release was made.
 - Promotion beyond local dogfood requires a verified RC artifact, a passing live acceptance of the same commit and
   tree, closure or explicit acceptance of the P1 defects, and a human decision.
+
+## Owner-approved local proof-database amendment (2026-11-01)
+
+This amendment supersedes only the prohibition above on configuring a proof database, and only for the narrow
+local P6.10 ResultCandidate acceptance path:
+
+- The proof database must be isolated on loopback and used only for the existing verified ResultCandidate,
+  WebAuthn step-up, and single-CAS flow.
+- Use remains limited to one supervised operator and synthetic, public, or PADOS-owned non-sensitive data.
+- `PADOS_PRODUCT_LOOP_ENABLED=false` remains required. Configuring the proof database must not activate the separate
+  `/product-loop/*` runtime or authorize cloud workers, unattended execution, multi-user, LAN/WAN, or production use.
+- Every semantic acceptance still requires the existing WebAuthn step-up and CAS path. Database configuration,
+  candidate submission, and task completion do not grant semantic acceptance.
+
+All other RC2 dogfood restrictions remain in force. This amendment does not authorize merging PR #19 or promotion
+beyond local supervised dogfood.

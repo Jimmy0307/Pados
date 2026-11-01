@@ -20,6 +20,7 @@ from pados.remote.intent import parse_client_intent
 from pados.remote.live import LiveRemotePorts
 from pados.state_proof import ObjectStore, StateProofService
 from tests.integration.test_p6_21g_state_integration import _registered_scope, _request
+from tests.product_loop_approval import approved_in_database
 
 
 @pytest.fixture
@@ -43,7 +44,7 @@ def _human_gated(service: ProductLoopService) -> tuple[str, str]:
         **_request(workspace, scope_id=scope_id, content="def result():\n    return 'good'\n").model_dump(mode="json"),
         "human_gate": True,
     })
-    report = asyncio.run(service.execute(request))
+    report = asyncio.run(service.execute(approved_in_database(request)))
     assert report.status.value == "HUMAN_REVIEW_REQUIRED"
     return str(report.run_id), scope_id
 

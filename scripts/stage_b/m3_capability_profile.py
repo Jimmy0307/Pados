@@ -5,6 +5,11 @@ Run on the VMware side with the checkout's own interpreter (nothing is downloade
 
     .venv/bin/python scripts/stage_b/m3_capability_profile.py --archive <m2-...zip> --sha256 <hex> --out <dir>
 
+A re-measurement of the same pinned artifact on another runtime release names the code commit/tree that produced
+the evidence and the runtime version it ran on (``--measured-commit``, ``--measured-tree``, ``--runtime-version``).
+The artifact identity (manifest and layer digests and sizes) is never an argument, and the evidence must still prove
+every pinned value.
+
 Writes ``M2_1_EVIDENCE_VERIFICATION.json``, ``M2_1_BENCHMARK_RECOMPUTATION.json`` and
 ``M3_MODEL_CAPABILITY_PROFILE.json``. The archive is extracted into a temporary directory that is removed
 afterwards; the raw evidence is never modified or copied into the report. Registration means: the measured
@@ -18,6 +23,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -63,7 +69,12 @@ def main() -> int:
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--sha256", required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--measured-commit", default=PIN.commit)
+    parser.add_argument("--measured-tree", default=PIN.tree)
+    parser.add_argument("--runtime-version", default=PIN.runtime_version)
     args = parser.parse_args()
+    pin = replace(PIN, commit=args.measured_commit, tree=args.measured_tree, runtime_version=args.runtime_version)
+    license_info = LICENSE.model_copy(update={"engine_version": args.runtime_version})
     args.out.mkdir(parents=True, exist_ok=True)
     repo = Path(__file__).resolve().parents[2]
     code = {"commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True,  # noqa: S603,S607
@@ -72,7 +83,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="pados-m2-1-") as scratch:
         root = extract_archive(args.archive, args.sha256, Path(scratch) / "x")
         evidence = load_evidence(root)
-        checks = verify_evidence(evidence, PIN)
+        checks = verify_evidence(evidence, pin)
         recomputed = recompute_summary(evidence)
         independent = Path(scratch) / "independent.json"
         tool = repo / "scripts" / "stage_b" / "m2_1_independent_recompute.py"
@@ -85,9 +96,9 @@ def main() -> int:
             "schema": "pados.stage-b.m2-1-evidence-verification.v1", "verified_at": now, "verifier_code": code,
             "archive": args.archive.name, "archive_sha256_expected": args.sha256,
             "archive_sha256_actual": sha256_file(args.archive), "pin": {
-                "artifact_ref": PIN.artifact_ref, "manifest_digest": PIN.manifest_digest,
-                "layer_digests": list(PIN.layer_digests), "layer_sizes": dict(PIN.layer_sizes),
-                "commit": PIN.commit, "tree": PIN.tree, "runtime_version": PIN.runtime_version},
+                "artifact_ref": pin.artifact_ref, "manifest_digest": pin.manifest_digest,
+                "layer_digests": list(pin.layer_digests), "layer_sizes": dict(pin.layer_sizes),
+                "commit": pin.commit, "tree": pin.tree, "runtime_version": pin.runtime_version},
             "checks": [c.__dict__ for c in checks], "file_sha256": files,
             "result": "PASS" if passed else "FAIL",
             "labels": ["MACHINE_CAPTURED", "RAW_EVIDENCE_VERIFIED", "M2_1_ACCEPTED"] if passed else []})
@@ -100,8 +111,8 @@ def main() -> int:
         if not passed:
             print("M2_1_EVIDENCE_VERIFICATION=FAIL")
             return 1
-        profile = build_capability_profile(evidence, PIN, archive_sha256=args.sha256)
-    description = profile_from_capability(profile, license=LICENSE)
+        profile = build_capability_profile(evidence, pin, archive_sha256=args.sha256)
+    description = profile_from_capability(profile, license=license_info)
     catalog = ModelCatalog([description]).register_capability_profile(profile)
     registered = catalog.capability_profile(description.model_id) == profile
     _write(args.out / "M3_MODEL_CAPABILITY_PROFILE.json", {

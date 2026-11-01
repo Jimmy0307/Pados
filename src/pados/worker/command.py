@@ -11,6 +11,7 @@ from pados.memory.security import assert_no_secret
 from pados.worker.schemas import CommandInvocation, ErrorCode
 
 SAFE_ENV = {"PYTHONPATH", "PADOS_RUNTIME_MODE", "PADOS_LOG_LEVEL"}
+_PROBES = Path(__file__).resolve().parent / "probes"
 SECRET_ENV_WORDS = ("PASSWORD", "TOKEN", "SECRET", "KEY", "COOKIE")
 
 
@@ -39,6 +40,16 @@ COMMANDS = {
         arguments=["-m", "ruff", "check"],
         allowed_args={"target"},
         timeout=120,
+        risk_level="LOW",
+    ),
+    # Emits a pados.capability-outcome.v1 document derived from the references it checked; isolated mode (-I)
+    # keeps the project's own modules and PYTHON* variables out of the interpreter.
+    "markdown_reference_check": CommandSpec(
+        command_id="markdown_reference_check",
+        executable="python",
+        arguments=["-I", str(_PROBES / "markdown_references.py")],
+        allowed_args=set(),
+        timeout=60,
         risk_level="LOW",
     ),
     "pytest_targeted": CommandSpec(

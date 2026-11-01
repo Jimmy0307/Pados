@@ -11,6 +11,7 @@ from pados.product_loop.schemas import GoalRequest, ProductLoopStatus
 from pados.product_loop.service import ProductLoopService
 from pados.product_loop.state import InMemoryP6_19BStateGateway
 from pados.product_loop.validation import FileValidator
+from tests.product_loop_approval import approved
 
 TARGET = "docs/NODE_BRIEF.md"
 
@@ -41,6 +42,11 @@ def _loop(node, tmp_path, registration=None, classification="INTERNAL", maker_cl
     return loop, gateway, workspace, registry
 
 
+def _run(loop, request):
+    # RC2 ARCH-1: an authorized request is dispatched only with a human approval of exactly this operation.
+    return asyncio.run(loop.execute(approved(request, loop.state_gateway)))
+
+
 def _request(workspace, content="Summarize the evidence.", expected="Deterministic local completion", key="k"):
     return GoalRequest.model_validate({
         "goal": "node brief", "workspace_root": str(workspace), "scope_id": PROJECT, "idempotency_key": key,
@@ -52,7 +58,7 @@ def _request(workspace, content="Summarize the evidence.", expected="Determinist
 
 def test_authorized_local_execution_commits_only_through_core_cas(node, tmp_path):
     loop, gateway, workspace, registry = _loop(node, tmp_path)
-    report = asyncio.run(loop.execute(_request(workspace)))
+    report = _run(loop, _request(workspace))
     assert report.status == ProductLoopStatus.COMMITTED and gateway.versions[PROJECT] == 1
     receipt = report.final_result.execution_receipt
     assert receipt["provider_id"] == "PADOS_LOCAL_INFERENCE" and receipt["semantic_authority"] is False
@@ -65,7 +71,7 @@ def test_authorized_local_execution_commits_only_through_core_cas(node, tmp_path
 
 def test_unauthorized_node_fails_before_execution(node, tmp_path):
     loop, gateway, workspace, _ = _loop(node, tmp_path, node.registration(authorized=False))
-    report = asyncio.run(loop.execute(_request(workspace)))
+    report = _run(loop, _request(workspace))
     assert report.status != ProductLoopStatus.COMMITTED and not gateway.commits
     assert report.final_result.summary == "NO_ELIGIBLE_LOCAL_NODE"
     assert report.final_result.failure_classification.value == "AUTHORITY_BLOCK"
@@ -75,7 +81,7 @@ def test_unauthorized_node_fails_before_execution(node, tmp_path):
 
 def test_classification_policy_blocks_restricted_evidence_on_unapproved_node(node, tmp_path):
     loop, gateway, workspace, _ = _loop(node, tmp_path, classification="RESTRICTED")  # ceiling CONFIDENTIAL
-    report = asyncio.run(loop.execute(_request(workspace)))
+    report = _run(loop, _request(workspace))
     assert report.final_result.failure_classification.value == "AUTHORITY_BLOCK" and not gateway.commits
     assert not node.runtime.jobs._jobs
 
@@ -88,7 +94,7 @@ def test_tampered_workspace_artifact_is_not_committed(node, tmp_path):
             return result
 
     loop, gateway, workspace, _ = _loop(node, tmp_path, maker_cls=TamperingMaker)
-    report = asyncio.run(loop.execute(_request(workspace)))
+    report = _run(loop, _request(workspace))
     assert report.status != ProductLoopStatus.COMMITTED and not gateway.commits
 
 
@@ -101,11 +107,11 @@ def test_bounded_batch_work_contract(node, tmp_path):
     request = request.model_copy(update={"changes": [request.changes[0].model_copy(update={"path": "batch/labels.jsonl"})],
                                          "acceptance_criteria": [request.acceptance_criteria[0].model_copy(
                                              update={"target_path": "batch/labels.jsonl"})]})
-    report = asyncio.run(loop.execute(request))
+    report = _run(loop, request)
     assert report.status == ProductLoopStatus.COMMITTED
     lines = (workspace / "batch/labels.jsonl").read_text().splitlines()
     assert len(lines) == 2 and json.loads(json.loads(lines[1])["output"])["label"] == "finance"
     bad = _request(workspace, content=json.dumps({"schema": BATCH_SCHEMA, "capability": "LOCAL_INFERENCE",
                                                   "items": [{}] * 65}), key="bad-batch")
-    report = asyncio.run(loop.execute(bad))
+    report = _run(loop, bad)
     assert report.final_result.summary == "BATCH_SPEC_INVALID"

@@ -28,6 +28,8 @@ def test_project_create_json_output_and_root_validation(
         "bootstrap_project",
         lambda session, **kwargs: "11111111-1111-4111-8111-111111111111",
     )
+    initialized_scopes: list[str] = []
+    monkeypatch.setattr(cli_main, "_ensure_local_proof_scope", lambda project_id: initialized_scopes.append(project_id))
 
     result = CliRunner().invoke(
         cli_main.app,
@@ -54,3 +56,4 @@ def test_project_create_json_output_and_root_validation(
         "project_id": "11111111-1111-4111-8111-111111111111",
         "status": "ok",
     }
+    assert initialized_scopes == ["11111111-1111-4111-8111-111111111111"]

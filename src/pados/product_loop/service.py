@@ -12,6 +12,7 @@ from uuid import uuid4
 from pados.execution.context import ProjectContextLoader
 from pados.product_loop.authorization import (
     ProductAuthorizationError,
+    product_dispatch_hash,
     resolve_approved_workspace_root,
 )
 from pados.product_loop.maker import DirectMaker
@@ -222,11 +223,10 @@ class ProductLoopService:
                 raise ProductAuthorizationError("REGISTERED_PROJECT_ROOT_MISMATCH")
         else:
             semantic = self.state_gateway.semantic_context(request.scope_id)
+        # RC2 ARCH-1 / SEC-1: the operation is hashed before the server fills its context, exactly as approved.
+        dispatch_hash = product_dispatch_hash(request)
         if request.approval_ref is not None:
-            verify_approval = getattr(self.state_gateway, "verify_approval", None)
-            if not callable(verify_approval):
-                raise ProductAuthorizationError("APPROVAL_VERIFICATION_UNAVAILABLE")
-            verify_approval(request.approval_ref, request.scope_id)
+            self._verify_approval(request, dispatch_hash)
         if self.approved_workspace_root is not None:
             context = ProjectContextLoader(self.approved_workspace_root).load(
                 scope_id=request.scope_id, semantic=semantic,
@@ -287,7 +287,8 @@ class ProductLoopService:
             final_validation=None,
             commit=None,
         )
-        if not request.authorized:
+        if not request.authorized or request.approval_ref is None:
+            # The flag only asks for dispatch; authority is the verified approval of this exact operation.
             blocked_contract = contract.model_copy(update={"state": ContractState.READY})
             report = self._report(
                 status=ProductLoopStatus.AUTHORITY_BLOCK,
@@ -302,7 +303,11 @@ class ProductLoopService:
                 reflections=[],
                 final_result=None,
                 final_validation=None,
-                user_report="Work is ready but not authorized for dispatch.",
+                user_report=(
+                    "Work is ready but not authorized for dispatch."
+                    if not request.authorized
+                    else "Work is ready; dispatch needs a human approval of this exact operation."
+                ),
                 semantic_state="NOT_COMMITTED",
                 human_decision_required=True,
             )
@@ -466,6 +471,14 @@ class ProductLoopService:
                 final_validation = validation.model_copy(update={"semantic_accepted": False})
                 break
 
+            try:
+                # The approval must still stand at the CAS: a revocation during the attempt stops the commit.
+                self._verify_approval(request, dispatch_hash)
+            except ProductAuthorizationError:
+                status = ProductLoopStatus.AUTHORITY_BLOCK
+                semantic_state = "NOT_COMMITTED"
+                final_validation = validation.model_copy(update={"semantic_accepted": False})
+                break
             commit = await self.state_gateway.commit(receipt=receipt, contract=current_contract)
             attempts[-1] = attempt_record.model_copy(
                 update={"receipt": receipt.model_copy(update={"commit": commit})}
@@ -623,6 +636,12 @@ class ProductLoopService:
             run_id=run_id,
             payload=read.model_dump(mode="json"),
         )
+
+    def _verify_approval(self, request: GoalRequest, dispatch_hash: str) -> None:
+        verify_approval = getattr(self.state_gateway, "verify_approval", None)
+        if not callable(verify_approval) or request.approval_ref is None:
+            raise ProductAuthorizationError("APPROVAL_VERIFICATION_UNAVAILABLE")
+        verify_approval(request.approval_ref, request.scope_id, dispatch_hash)
 
     def _run_context_payload(
         self,

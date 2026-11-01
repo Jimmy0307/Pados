@@ -18,6 +18,9 @@ from pados.product_loop.schemas import (
 )
 from pados.worker.schemas import CapabilityId, RiskLevel, WorkerAvailability, WorkerSpec, WorkerType
 
+# RC2 SEC-2: the cloud Maker sends nothing without a known project classification within its ceiling.
+PUBLIC_PROJECT = lambda _project_id: "public"  # noqa: E731
+
 
 def contract(root: Path, **updates) -> WorkContract:
     values = {
@@ -87,7 +90,7 @@ def test_codex_exec_runs_in_allowlisted_workspace_and_returns_live_receipt(tmp_p
     maker = CodexCliMaker(
         tmp_path, settings=object(), runner=runner,
         worker_discovery=lambda _settings: {"codex-cli": codex_worker()},
-        executable_resolver=lambda: "/usr/bin/codex",
+        executable_resolver=lambda: "/usr/bin/codex", classification_source=PUBLIC_PROJECT,
     )
     result = asyncio.run(maker.make(work, run_id="run-1", attempt=1))
     assert result.status.value == "COMPLETED"
@@ -110,7 +113,7 @@ def test_unavailable_codex_is_blocked_without_fallback_or_execution(tmp_path):
     maker = CodexCliMaker(
         tmp_path, settings=object(), runner=lambda *args, **kwargs: calls.append(args),
         worker_discovery=lambda _settings: {"codex-cli": codex_worker(WorkerAvailability.UNAVAILABLE)},
-        executable_resolver=lambda: "/usr/bin/codex",
+        executable_resolver=lambda: "/usr/bin/codex", classification_source=PUBLIC_PROJECT,
     )
     result = asyncio.run(maker.make(contract(tmp_path), run_id="run-1", attempt=1))
     assert result.status.value == "BLOCKED"
@@ -123,7 +126,7 @@ def test_unapproved_work_contract_is_blocked_before_provider_start(tmp_path):
     maker = CodexCliMaker(
         tmp_path, settings=object(), runner=lambda *args, **kwargs: calls.append(args),
         worker_discovery=lambda _settings: {"codex-cli": codex_worker()},
-        executable_resolver=lambda: "/usr/bin/codex",
+        executable_resolver=lambda: "/usr/bin/codex", classification_source=PUBLIC_PROJECT,
     )
     work = contract(tmp_path).model_copy(update={"state": ContractState.READY})
     result = asyncio.run(maker.make(work, run_id="run-1", attempt=1))
@@ -140,7 +143,7 @@ def test_codex_cannot_export_unallowlisted_files_to_registered_workspace(tmp_pat
     maker = CodexCliMaker(
         tmp_path, settings=object(), runner=runner,
         worker_discovery=lambda _settings: {"codex-cli": codex_worker()},
-        executable_resolver=lambda: "/usr/bin/codex",
+        executable_resolver=lambda: "/usr/bin/codex", classification_source=PUBLIC_PROJECT,
     )
     result = asyncio.run(maker.make(contract(tmp_path), run_id="run-1", attempt=1))
     assert result.status.value == "BLOCKED"
@@ -164,7 +167,7 @@ def test_provider_io_is_decoded_as_utf8_and_no_write_is_diagnosed(tmp_path):
     maker = CodexCliMaker(
         tmp_path, settings=object(), runner=runner,
         worker_discovery=lambda _settings: {"codex-cli": codex_worker()},
-        executable_resolver=lambda: "/usr/bin/codex",
+        executable_resolver=lambda: "/usr/bin/codex", classification_source=PUBLIC_PROJECT,
     )
     result = asyncio.run(maker.make(contract(tmp_path), run_id="run-1", attempt=1))
     assert calls[0]["encoding"] == "utf-8" and calls[0]["errors"] == "replace"

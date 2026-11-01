@@ -132,3 +132,20 @@ test('down stops only a process it can identify, and never a foreign pid', async
   assert.equal(services.isAlive(owned.pid), false);
   await assert.rejects(services.stopApi(home), (e) => e.code === 'NOT_RUNNING');
 });
+
+test('on Windows, down asks the server to drain through the stop file before any forced kill (UX-2)', async () => {
+  const dir = tempDir();
+  const stopFile = path.join(dir, 'state', 'api.stop');
+  // Stands in for `pados.install serve`: exits on its own when the stop file names its instance id.
+  const watcher = spawn(process.execPath, ['-e', `
+    const fs = require('node:fs');
+    setInterval(() => {
+      try { if (fs.readFileSync(${JSON.stringify(stopFile)}, 'utf8').trim() === 'instance-graceful') process.exit(0); }
+      catch { /* not yet */ }
+    }, 50);`], { stdio: 'ignore' });
+  await services.sleep(300);
+  const result = await services.stopProcess(watcher.pid, { platform: 'win32', stopFile, instanceId: 'instance-graceful',
+    gracefulMs: 5000 });
+  assert.deepEqual(result, { stopped: true, forced: false });
+  assert.equal(fs.existsSync(stopFile), false, 'the stop request is removed after use');
+});

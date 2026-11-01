@@ -21,7 +21,7 @@ Before 1.0 nothing is frozen by semver, but PUBLIC_STABLE items change only with
 |---|---|
 | `pados version`, `pados init`, `pados doctor`, `pados serve` | PUBLIC_STABLE (first-run path) |
 | `pados node serve`, `pados node probe` | PUBLIC_EXPERIMENTAL |
-| `pados project create` | PUBLIC_STABLE |
+| `pados project create`, `pados project initialize-proof-scope` | PUBLIC_STABLE (local setup; proof scope requires a separate loopback database) |
 | `pados memory …` (`project-register`, `fact-add`, `promote`, `decision-add`, `artifact-register`, `event-add`, `search`, `stale`) | PUBLIC_EXPERIMENTAL |
 | `pados context assemble / inspect` | PUBLIC_EXPERIMENTAL |
 | `pados worker list / health / capabilities / diagnose` | PUBLIC_EXPERIMENTAL (diagnostics) |
@@ -39,6 +39,29 @@ Before 1.0 nothing is frozen by semver, but PUBLIC_STABLE items change only with
 | `/control/*` (approvals, jobs, loops, …) | PUBLIC_EXPERIMENTAL |
 | `/api/graph/*`, `/api/corpus/*`, `/memory/*`, `/context/assemble`, other `/api/*` | INTERNAL until reviewed individually (used by the bundled UI) |
 | `/docs`, `/redoc`, `/openapi.json` | INTERNAL (developer aids) |
+
+### Product Loop dispatch authority (RC2 ARCH-1 / SEC-1, SEC-2)
+
+The Product Loop routes stay disabled unless `PADOS_PRODUCT_LOOP_ENABLED=true`. When enabled:
+- `authorized: true` only asks for dispatch. The service dispatches, and later commits through the CAS, only when
+  `approval_ref` names an `APPROVED` control approval in the run's project whose `proposal_hash` equals
+  `pados.product_loop.authorization.product_dispatch_hash(request)`. That is the canonical hash of the whole
+  requested operation (goal, scope, workspace root, file changes, acceptance criteria, revisions, attempt budget,
+  human gate, idempotency key and any supplied context), domain-separated as `pados.product-loop-dispatch.v1`.
+  Without it the run ends `AUTHORITY_BLOCK` and the Maker is never called. Other approvals are refused before
+  dispatch: one for another operation (`APPROVAL_SUBJECT_MISMATCH`), another project
+  (`APPROVAL_REF_NOT_BOUND_TO_SCOPE`), or one that is not approved (`APPROVAL_REF_NOT_APPROVED`).
+- The approval is checked again immediately before the CAS commit. If it was withdrawn during the attempt, the run ends
+  `AUTHORITY_BLOCK` / `NOT_COMMITTED`. The two checks and the commit are separate transactions on separate
+  databases: a withdrawal in the instant between the last check and the commit is not caught.
+- An approval already recorded on a committed semantic-audit row cannot dispatch again (`APPROVAL_CONSUMED`), including
+  after a restart.
+- Before the cloud Codex worker receives anything, the project's recorded `classification`, raised by any bundled
+  enterprise evidence, must parse and be within `PADOS_PRODUCT_LOOP_CLOUD_MAX_CLASSIFICATION`. The default is
+  `PUBLIC`; projects default to `internal`, so an unlabelled project is not released. A missing or unknown
+  classification refuses, as does a ceiling of `RESTRICTED` or an unknown ceiling. The refusal is
+  `CLOUD_EGRESS_*` (BLOCKED, `AUTHORITY_BLOCK`). Workspace file contents are not classified; the project label is the
+  operator's statement about them.
 
 ### Control approvals and work routing (approval subject binding)
 
@@ -63,9 +86,42 @@ approval's project cannot be changed (a database trigger rejects the UPDATE). Ap
 subject are still accepted for non-routing uses, such as result candidates and gates, but they can
 never route work.
 
+A `WORK_ROUTE` approval authorizes new work only while all of these hold, checked under a row lock at every route
+and again before every TaskLoop step:
+- **Not expired.** Approving it sets `expires_at` to now plus `PADOS_APPROVAL_TTL_SECONDS`. The default is 24 h; the
+  allowed range is 5 min to 7 days. After that, routes are refused with `APPROVAL_EXPIRED`.
+- **Not revoked.** `POST /control/approvals/{id}/revoke` (`version`, `reason`, `idempotency_key`) moves a pending or
+  approved `WORK_ROUTE` approval to `CANCELLED`. Routes are then refused with `APPROVAL_REVOKED`. Subject-less
+  approvals cannot be revoked here (`APPROVAL_NOT_REVOCABLE`).
+- **Not consumed.**
+  - The first TaskLoop created from the approval consumes it. A second loop, or a direct route, is refused with
+    `APPROVAL_CONSUMED`; a database trigger keeps the binding write-once.
+  - On the control API, each approved operation routes once. A replay with the same idempotency key returns the same
+    job.
+- **Request and project can take work.** A `CANCELLED` or `SUPERSEDED` work request is refused with
+  `REQUEST_NOT_ROUTABLE`. A project whose status is not active is refused with `PROJECT_NOT_ACTIVE`.
+
+A running loop whose approval expires, is revoked or is bound elsewhere stops before its next route. It moves to
+`WAITING_HUMAN`, records the reason, and runs nothing.
+
+Further rules:
+- Revocation does not cancel a job that already finished.
+- A routed local-model job is checked again just before the model is called. Its deadline, its approval and the
+  SHA-256 of its handoff must still hold. Otherwise the job closes without a model call (`TIMED_OUT`,
+  `APPROVAL_REVOKED`/`APPROVAL_EXPIRED`, `HANDOFF_EVIDENCE_TAMPERED`).
+- A direct operation is one-shot even when its job fails; a retry needs a new approval.
+- Approvals decided before migration `20261101_0020` expire 24 h after their decision.
+
 `CONTROL_API` is a structural binding to the requesting surface, not a user identity: the control API
 has no authenticated user. `POST /control/work-requests/{id}/route` always routes as
 `CONTROL_API` with no step, whatever the client sends.
+
+`POST /control/loops/{loop_id}/result-candidate` is a local control-token operation that composes and verifies the
+completed TaskLoop's ResultCandidate. The server reads the project's current ScopeVersion; the caller cannot supply
+or override it. The response contains only the candidate identity and digests, verification status, and pending
+approval reference; it never returns the candidate body. A passed candidate is submitted for human review, while a
+failed verification creates no approval. This operation does not accept a candidate or write a semantic commit.
+Acceptance remains exclusively on the existing WebAuthn step-up and CAS path.
 
 The route endpoint refuses with 403 and one of these codes, checked in this order before any worker is
 selected or any job is created:
@@ -94,7 +150,10 @@ An `OLLAMA` job executes only after D2 resolves a measured binding for the reque
 measured chat provider completes one bounded call. `SUMMARIZE` uses `TEXT_SUMMARY`; `CLASSIFY_REQUEST`
 uses `STRUCTURED_OUTPUT`. Binding refusals finish the job as `BLOCKED`; no approval is inferred or granted.
 The loop sends a blocked step to `WAITING_HUMAN` before applying the negative-progress pause threshold.
-`CLAUDE_CODE` and `CODEX_CLI` jobs have no executor and remain `ROUTED` until cancelled or expired.
+`CLAUDE_CODE` and `CODEX_CLI` have no executor in this process, and neither does a `DETERMINISTIC_TOOL` route without
+a registered command. A route that selects such a worker is refused with `ROUTE_HAS_NO_EXECUTOR` (403, with a
+`ROUTE_REFUSED` audit event) before any job, context packet or handoff exists, so nothing waits in `ROUTED` for an
+executor that will never come (RC2 EXEC-1).
 
 When a routed job remains `ROUTED`, `QUEUED`, `RUNNING` or `VALIDATING`, `step()` returns
 `status=RUNNING`, `decision=WAIT_FOR_JOB` with the same iteration and job IDs. The loop stores that

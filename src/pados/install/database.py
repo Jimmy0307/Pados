@@ -215,7 +215,9 @@ def upgrade(settings: Settings, *, root: Path | None = None) -> dict[str, Any]:
         applied.append({"lane": lane["lane"], "target_revision": lane["target_revision"],
                         "exit_code": completed.returncode})
         if completed.returncode != 0:
+            # Report where every lane is now, so an operator can see which lanes moved before the failure (INST-4).
             return {"status": "FAILED", "before": before, "applied": applied,
+                    "partial": any(item["exit_code"] == 0 for item in applied), "after": check(settings),
                     "detail": completed.stderr.strip().splitlines()[-1:] if completed.stderr else []}
     after = check(settings)
     return {"status": after["status"], "before": before, "applied": applied, "after": after}

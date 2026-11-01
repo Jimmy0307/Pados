@@ -16,18 +16,25 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from pados.control.approval_subject import (
+    APPROVAL_CONSUMED,
+    APPROVAL_EXPIRED,
     APPROVAL_NOT_APPROVED,
     APPROVAL_PROJECT_MISMATCH,
     APPROVAL_REF_NOT_FOUND,
     APPROVAL_REQUEST_MISMATCH,
     APPROVAL_SCOPE_MISMATCH,
+    APPROVAL_REVOKED,
     APPROVAL_SCOPE_VERSION_STALE,
+    NON_ROUTABLE_REQUEST_STATUSES,
+    PROJECT_NOT_ACTIVE,
+    REQUEST_NOT_ROUTABLE,
     ApprovalOperation,
     WorkRouteSubject,
     find_operation,
     load_bound_subject,
     match_route,
     scope_version_is_current,
+    subject_hash,
 )
 from pados.loop import scope_authority
 from pados.memory import packet as context_packet
@@ -52,6 +59,8 @@ from pados.worker.schemas import (
 
 LOGGER = logging.getLogger("pados.worker.service")
 NON_TERMINAL_JOB_STATUSES = frozenset({"ROUTED", "QUEUED", "RUNNING", "VALIDATING"})
+# RC2 EXEC-1: a selected worker this process cannot execute for the route is refused, never left ROUTED.
+ROUTE_HAS_NO_EXECUTOR = "ROUTE_HAS_NO_EXECUTOR"
 
 
 def _event(session: Session, job_id: str, project_id: str, event_type: str, payload: dict[str, Any]) -> None:
@@ -113,6 +122,16 @@ def list_jobs(session: Session) -> list[dict[str, Any]]:
 def get_job(session: Session, job_id: str) -> dict[str, Any]:
     row = session.execute(text("SELECT * FROM worker_jobs WHERE id = CAST(:id AS uuid)"), {"id": job_id}).mappings().one()
     return dict(row)
+
+
+def list_job_artifacts(session: Session, job_id: str) -> list[dict[str, Any]]:
+    """The execution evidence a job recorded (type, workspace-relative path, SHA-256); read-only."""
+    rows = session.execute(
+        text("SELECT artifact_type, path, sha256, created_at FROM worker_job_artifacts "
+             "WHERE job_id = CAST(:id AS uuid) ORDER BY created_at, id"),
+        {"id": job_id},
+    ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 def cancel_job(session: Session, job_id: str) -> dict[str, Any]:
@@ -216,8 +235,18 @@ def _authorize_subject(
     project_id = str(request["project_id"])
     if str(approval["project_id"]) != project_id:
         raise PermissionError(APPROVAL_PROJECT_MISMATCH)
+    if approval["status"] == "CANCELLED":
+        raise PermissionError(APPROVAL_REVOKED)
     if approval["status"] != "APPROVED":
         raise PermissionError(APPROVAL_NOT_APPROVED)
+    if approval.get("is_expired"):
+        raise PermissionError(APPROVAL_EXPIRED)
+    if str(request.get("status")) in NON_ROUTABLE_REQUEST_STATUSES:
+        raise PermissionError(REQUEST_NOT_ROUTABLE)
+    if str(request.get("project_status") or "").upper() != "ACTIVE":
+        raise PermissionError(PROJECT_NOT_ACTIVE)
+    if route.surface != "TASK_LOOP" and approval.get("consumed_by_loop_id") is not None:
+        raise PermissionError(APPROVAL_CONSUMED)
     subject = load_bound_subject(approval["subject_kind"], approval["subject_json"], approval["proposal_hash"])
     bound_approval = request.get("approval_id")
     if bound_approval is not None and str(bound_approval) != route.approval_id:
@@ -252,7 +281,7 @@ def _assert_ready(
     request = session.execute(
         text(
             """
-            SELECT cwr.*, p.root_path
+            SELECT cwr.*, p.root_path, p.status AS project_status
             FROM control_work_requests cwr
             JOIN projects p ON p.id = cwr.project_id
             WHERE cwr.id = CAST(:request_id AS uuid)
@@ -262,7 +291,10 @@ def _assert_ready(
         {"request_id": request_id},
     ).mappings().one()
     approval = session.execute(
-        text("SELECT * FROM control_approvals WHERE id = CAST(:approval_id AS uuid)"),
+        text(
+            "SELECT *, (expires_at IS NOT NULL AND expires_at <= now()) AS is_expired "
+            "FROM control_approvals WHERE id = CAST(:approval_id AS uuid) FOR UPDATE"
+        ),
         {"approval_id": route.approval_id},
     ).mappings().first()
     project_id = str(request["project_id"])
@@ -275,6 +307,9 @@ def _assert_ready(
         )
     except PermissionError as exc:
         _refuse(session, str(exc), request_id=request_id, route=route, project_id=project_id,
+                subject_hash=str(approval["proposal_hash"]))
+    if route.surface != "TASK_LOOP" and _direct_operation_already_routed(session, route):
+        _refuse(session, APPROVAL_CONSUMED, request_id=request_id, route=route, project_id=project_id,
                 subject_hash=str(approval["proposal_hash"]))
     if route.capability_id not in capability_registry():
         raise PermissionError("capability mismatch")
@@ -294,6 +329,25 @@ def _assert_ready(
     if int(active) > 0:
         raise PermissionError("BLOCKED_PROJECT_BUSY")
     return RouteAuthorization(request=dict(request), subject=subject, operation=operation)
+
+
+def _direct_operation_already_routed(session: Session, route: RouteRequest) -> bool:
+    """A direct (non-loop) route uses each approved operation once; a replay of the same key is idempotent."""
+    routed = session.execute(
+        text(
+            """
+            SELECT 1 FROM worker_jobs
+            WHERE approval_id = CAST(:approval_id AS uuid)
+              AND capability_id = :capability_id
+              AND route_payload->>'command_id' IS NOT DISTINCT FROM :command_id
+              AND idempotency_key <> :idempotency_key
+            LIMIT 1
+            """
+        ),
+        {"approval_id": route.approval_id, "capability_id": route.capability_id.value,
+         "command_id": route.command_id, "idempotency_key": route.idempotency_key},
+    ).first()
+    return routed is not None
 
 
 def _idempotent_job(session: Session, request_id: str, route: RouteRequest) -> dict[str, Any] | None:
@@ -329,7 +383,10 @@ def route_work_request(
     route: RouteRequest,
     settings: Any,
     artifact_root: Path,
+    defer_model_execution: bool = False,
 ) -> dict[str, Any]:
+    """Route one approved request. With ``defer_model_execution`` a local-model job is left ROUTED for
+    ``execute_routed_model_job`` after the caller commits, so no lock is held during the model call (RC2 SEC-9)."""
     existing = _idempotent_job(session, request_id, route)
     if existing is not None:
         return {"job": existing, "routing": {"status": "idempotent"}}
@@ -355,6 +412,10 @@ def route_work_request(
     worker = workers[decision.selected_worker_id]
     if worker.availability != WorkerAvailability.AVAILABLE:
         raise PermissionError(ErrorCode.WORKER_UNAVAILABLE.value)
+    if not _has_executor(worker.worker_type, route):
+        # Nothing would ever run the job: refuse before any job, context packet or handoff exists.
+        _refuse(session, ROUTE_HAS_NO_EXECUTOR, request_id=request_id, route=route, project_id=project_id,
+                subject_hash=subject_hash(authorization.subject))
 
     context = context_packet.assemble_context_packet(
         session,
@@ -460,7 +521,7 @@ def route_work_request(
         artifact_dir=handoff_dir,
         timeout_seconds=timeout,
     )
-    if worker.worker_type == WorkerType.OLLAMA:
+    if worker.worker_type == WorkerType.OLLAMA and not defer_model_execution:
         final_job = _execute_model_if_requested(
             session,
             job=final_job,
@@ -491,6 +552,17 @@ def route_work_request(
         },
     )
     return {"job": final_job, "routing": decision.__dict__, "handoff_path": handoff_json.as_posix()}
+
+
+def _has_executor(worker_type: WorkerType, route: RouteRequest) -> bool:
+    """Whether this process runs a job of ``worker_type`` for ``route`` (RC2 EXEC-1).
+
+    A deterministic tool runs only a registered command; a local Ollama model runs through the model executor.
+    Codex and Claude Code runtimes have no executor here.
+    """
+    if worker_type == WorkerType.DETERMINISTIC_TOOL:
+        return route.command_id is not None
+    return worker_type == WorkerType.OLLAMA
 
 
 def _execute_deterministic_if_requested(
@@ -677,9 +749,34 @@ def _finish_model_job(
     usage_metadata: dict[str, Any],
     result_summary: str,
     stdout_path: Path | None = None,
+    require_running: bool = False,
 ) -> dict[str, Any]:
+    """Persist a terminal model result. With ``require_running`` (the deferred path) a job that expired or was
+    cancelled while the model ran keeps its state, and the late result is not recorded."""
     job_id = str(job["id"])
     project_id = str(job["project_id"])
+    row = session.execute(
+        text(
+            """
+            UPDATE worker_jobs
+            SET status = :status, error_code = :error_code, validation_status = :validation_status,
+                result_summary = :summary, usage_metadata = CAST(:usage_metadata AS jsonb), completed_at = now()
+            WHERE id = CAST(:job_id AS uuid) AND (NOT :require_running OR status = 'RUNNING')
+            RETURNING *
+            """
+        ),
+        {
+            "job_id": job_id,
+            "status": status,
+            "error_code": error_code,
+            "validation_status": validation_status,
+            "summary": result_summary[:8000],
+            "usage_metadata": json.dumps(usage_metadata, sort_keys=True),
+            "require_running": require_running,
+        },
+    ).mappings().first()
+    if row is None:
+        return get_job(session, job_id)
     if stdout_path is not None:
         session.execute(
             text(
@@ -696,25 +793,6 @@ def _finish_model_job(
             },
         )
         _event(session, job_id, project_id, "OUTPUT_CAPTURED", {"stdout": stdout_path.as_posix()})
-    row = session.execute(
-        text(
-            """
-            UPDATE worker_jobs
-            SET status = :status, error_code = :error_code, validation_status = :validation_status,
-                result_summary = :summary, usage_metadata = CAST(:usage_metadata AS jsonb), completed_at = now()
-            WHERE id = CAST(:job_id AS uuid)
-            RETURNING *
-            """
-        ),
-        {
-            "job_id": job_id,
-            "status": status,
-            "error_code": error_code,
-            "validation_status": validation_status,
-            "summary": result_summary[:8000],
-            "usage_metadata": json.dumps(usage_metadata, sort_keys=True),
-        },
-    ).mappings().one()
     event_type = {
         "SUCCEEDED": "JOB_SUCCEEDED",
         "TIMED_OUT": "JOB_TIMED_OUT",
@@ -783,6 +861,83 @@ def _execute_model_if_requested(
         return failed
 
 
+@dataclass(frozen=True)
+class _ModelCall:
+    provider: Any
+    intent: ExecutionIntent
+    timeout: int
+
+
+def _plan_model_call(
+    job: Mapping[str, Any], *, settings: Any, timeout_seconds: int
+) -> _ModelCall | dict[str, Any]:
+    """Resolve the measured provider for a model job: a call to make, or the terminal result to persist."""
+    intent = _execution_intent_for_capability(str(job["capability_id"]))
+    if intent is None:
+        return {
+            "status": "BLOCKED",
+            "error_code": "MODEL_CAPABILITY_NOT_EXECUTABLE",
+            "validation_status": "FAILED",
+            "usage_metadata": {
+                "measured_execution_refusal": {"code": "MODEL_CAPABILITY_NOT_EXECUTABLE", "reasons": []}
+            },
+            "result_summary": "Model capability is not executable.",
+        }
+    timeout = min(int(job["timeout_seconds"]), int(settings.local_inference_timeout_seconds), timeout_seconds)
+    try:
+        provider = build_chat_provider(settings, intent=intent, project_id=str(job["project_id"]))
+    except ExecutionBindingRefused as exc:
+        return {
+            "status": "BLOCKED",
+            "error_code": exc.refusal.code,
+            "validation_status": "FAILED",
+            "usage_metadata": {"measured_execution_refusal": {"code": exc.refusal.code,
+                                                              "reasons": list(exc.refusal.reasons)}},
+            "result_summary": "Measured execution binding refused.",
+        }
+    except Exception as exc:  # noqa: BLE001 - model execution never aborts the loop transaction
+        return {
+            "status": "FAILED",
+            "error_code": str(getattr(exc, "code", "MODEL_PROVIDER_INITIALIZATION_FAILED")),
+            "validation_status": "FAILED",
+            "usage_metadata": {"measured_execution": None},
+            "result_summary": "Measured provider initialization failed.",
+        }
+    if isinstance(provider, MeasuredChatProvider):
+        provider.bound = replace(provider.bound, timeout_seconds=timeout)
+    return _ModelCall(provider=provider, intent=intent, timeout=timeout)
+
+
+def _call_model(call: _ModelCall, *, job: Mapping[str, Any], handoff_path: Path, artifact_dir: Path) -> dict[str, Any]:
+    """Make the one bounded model call; touches no database. Returns the terminal result to persist."""
+    provider = call.provider
+    try:
+        prompt = _model_prompt(handoff_path, job)
+        model_text = _run_model_chat(provider, prompt, call.timeout)
+        evidence = {"measured_execution": getattr(provider, "last_evidence", None)}
+        stdout_path = artifact_dir / "stdout.txt"
+        stdout_path.write_text(stable_json(_model_stdout_contract(str(model_text))), encoding="utf-8")
+        if not str(model_text).strip():
+            return {"status": "FAILED", "error_code": "OUTPUT_CONTRACT_FAILED", "validation_status": "FAILED",
+                    "usage_metadata": evidence, "result_summary": "Model returned empty text.",
+                    "stdout_path": stdout_path}
+        return {"status": "SUCCEEDED", "error_code": None, "validation_status": "PASSED",
+                "usage_metadata": evidence, "result_summary": str(model_text), "stdout_path": stdout_path}
+    except (TimeoutError, asyncio.TimeoutError, FutureTimeout):
+        return {"status": "TIMED_OUT", "error_code": "TIMED_OUT", "validation_status": "FAILED",
+                "usage_metadata": {"measured_execution": getattr(provider, "last_evidence", None)},
+                "result_summary": "Measured model call timed out."}
+    except ExecutionBindingRefused as exc:
+        return {"status": "FAILED", "error_code": exc.refusal.code, "validation_status": "FAILED",
+                "usage_metadata": {"measured_execution": getattr(provider, "last_evidence", None)},
+                "result_summary": "Measured model call refused during execution."}
+    except Exception as exc:  # noqa: BLE001 - provider errors become terminal job evidence
+        return {"status": "FAILED", "error_code": str(getattr(exc, "code", "MODEL_PROVIDER_FAILED")),
+                "validation_status": "FAILED",
+                "usage_metadata": {"measured_execution": getattr(provider, "last_evidence", None)},
+                "result_summary": "Measured model call failed."}
+
+
 def _execute_model_once(
     session: Session,
     *,
@@ -792,115 +947,123 @@ def _execute_model_once(
     settings: Any,
     timeout_seconds: int,
 ) -> dict[str, Any]:
-    """Run one measured local-model call and persist its bounded result without raising."""
+    """Run one measured local-model call inside the caller's transaction and persist its bounded result."""
     if job.get("worker_type") != WorkerType.OLLAMA.value:
         return job
-    job_id = str(job["id"])
-    project_id = str(job["project_id"])
-    intent = _execution_intent_for_capability(str(job["capability_id"]))
-    if intent is None:
-        return _finish_model_job(
-            session,
-            job=job,
-            status="BLOCKED",
-            error_code="MODEL_CAPABILITY_NOT_EXECUTABLE",
-            validation_status="FAILED",
-            usage_metadata={
-                "measured_execution_refusal": {
-                    "code": "MODEL_CAPABILITY_NOT_EXECUTABLE",
-                    "reasons": [],
-                }
-            },
-            result_summary="Model capability is not executable.",
-        )
-    timeout = min(int(job["timeout_seconds"]), int(settings.local_inference_timeout_seconds), timeout_seconds)
-    try:
-        provider = build_chat_provider(settings, intent=intent, project_id=project_id)
-    except ExecutionBindingRefused as exc:
-        refusal = {"code": exc.refusal.code, "reasons": list(exc.refusal.reasons)}
-        return _finish_model_job(
-            session,
-            job=job,
-            status="BLOCKED",
-            error_code=exc.refusal.code,
-            validation_status="FAILED",
-            usage_metadata={"measured_execution_refusal": refusal},
-            result_summary="Measured execution binding refused.",
-        )
-    except Exception as exc:  # noqa: BLE001 - model execution never aborts the loop transaction
-        return _finish_model_job(
-            session,
-            job=job,
-            status="FAILED",
-            error_code=str(getattr(exc, "code", "MODEL_PROVIDER_INITIALIZATION_FAILED")),
-            validation_status="FAILED",
-            usage_metadata={"measured_execution": None},
-            result_summary="Measured provider initialization failed.",
-        )
-    if isinstance(provider, MeasuredChatProvider):
-        provider.bound = replace(provider.bound, timeout_seconds=timeout)
-
-    _event(session, job_id, project_id, "JOB_STARTED", {"intent": intent.value})
+    planned = _plan_model_call(job, settings=settings, timeout_seconds=timeout_seconds)
+    if isinstance(planned, dict):
+        return _finish_model_job(session, job=job, **planned)
+    _event(session, str(job["id"]), str(job["project_id"]), "JOB_STARTED", {"intent": planned.intent.value})
     session.execute(
         text("UPDATE worker_jobs SET status = 'RUNNING', started_at = now() WHERE id = CAST(:id AS uuid)"),
-        {"id": job_id},
+        {"id": str(job["id"])},
     )
-    evidence: dict[str, Any] = {"measured_execution": getattr(provider, "last_evidence", None)}
+    outcome = _call_model(planned, job=job, handoff_path=handoff_path, artifact_dir=artifact_dir)
+    return _finish_model_job(session, job=job, **outcome)
+
+
+def execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any = None) -> dict[str, Any]:
+    """Run one ROUTED local-model job with no database transaction or row lock held during the call (RC2 SEC-9).
+
+    1. A short transaction claims the job (ROUTED -> RUNNING); only one caller can win the claim.
+    2. The provider is resolved and the model is called with no session open.
+    3. A short transaction records the result only if the job is still RUNNING. A job that expired or was cancelled
+       meanwhile keeps its state.
+    A crash between the steps leaves a RUNNING job that ``expire_overdue_jobs`` times out; a repeated call is a no-op.
+    """
+    from pados.db import session_scope
+
+    scope = session_factory or session_scope
+    with scope(settings) as session:
+        refused = _deferred_claim_refusal(session, job_id)
+        if refused is not None:
+            return refused
+        claimed = session.execute(
+            text(
+                """
+                UPDATE worker_jobs SET status = 'RUNNING', started_at = now()
+                WHERE id = CAST(:id AS uuid) AND status = 'ROUTED' AND worker_type = :worker_type
+                RETURNING *
+                """
+            ),
+            {"id": job_id, "worker_type": WorkerType.OLLAMA.value},
+        ).mappings().first()
+        if claimed is None:
+            return get_job(session, job_id)
+        job = dict(claimed)
+        handoff = session.execute(
+            text(
+                "SELECT path FROM worker_job_artifacts WHERE job_id = CAST(:id AS uuid) "
+                "AND artifact_type = 'handoff_json' ORDER BY created_at LIMIT 1"
+            ),
+            {"id": job_id},
+        ).scalar_one()
+        _event(session, job_id, str(job["project_id"]), "JOB_STARTED", {"deferred": True})
+    handoff_path = Path(str(handoff))
+    planned = _plan_model_call(job, settings=settings, timeout_seconds=int(job["timeout_seconds"]))
+    outcome = planned if isinstance(planned, dict) else _call_model(
+        planned, job=job, handoff_path=handoff_path, artifact_dir=handoff_path.parent
+    )
+    stdout_path = outcome.get("stdout_path")
+    with scope(settings) as session:
+        recorded = _finish_model_job(session, job=job, require_running=True, **outcome)
+        kept = isinstance(stdout_path, Path) and session.execute(
+            text(
+                "SELECT 1 FROM worker_job_artifacts WHERE job_id = CAST(:id AS uuid) "
+                "AND artifact_type = 'stdout' AND path = :path"
+            ),
+            {"id": job_id, "path": stdout_path.as_posix()},
+        ).first() is not None
+    if isinstance(stdout_path, Path) and not kept:
+        stdout_path.unlink(missing_ok=True)  # an unrecorded late result must not look like evidence later
+    return recorded
+
+
+def _deferred_claim_refusal(session: Session, job_id: str) -> dict[str, Any] | None:
+    """Before a routed model job is claimed: it must still be within its deadline, its approval still valid, and its
+    handoff byte-identical to the recorded digest. Otherwise the job is closed and the model is never called."""
+    job = session.execute(
+        text(
+            """
+            SELECT j.*, (now() > j.queued_at + make_interval(secs => j.timeout_seconds)) AS overdue,
+                   a.status AS approval_status,
+                   (a.expires_at IS NOT NULL AND a.expires_at <= now()) AS approval_expired
+            FROM worker_jobs j LEFT JOIN control_approvals a ON a.id = j.approval_id
+            WHERE j.id = CAST(:id AS uuid) AND j.status = 'ROUTED' AND j.worker_type = :worker_type
+            FOR UPDATE OF j
+            """
+        ),
+        {"id": job_id, "worker_type": WorkerType.OLLAMA.value},
+    ).mappings().first()
+    if job is None:
+        return None
+    handoff = session.execute(
+        text(
+            "SELECT path, sha256 FROM worker_job_artifacts WHERE job_id = CAST(:id AS uuid) "
+            "AND artifact_type = 'handoff_json' ORDER BY created_at LIMIT 1"
+        ),
+        {"id": job_id},
+    ).mappings().first()
+    status, code = "", ""
+    if job["overdue"]:
+        status, code = "TIMED_OUT", "JOB_DEADLINE_EXCEEDED"
+    elif job["approval_status"] == "CANCELLED":
+        status, code = "BLOCKED", APPROVAL_REVOKED
+    elif job["approval_status"] != "APPROVED":
+        status, code = "BLOCKED", APPROVAL_NOT_APPROVED
+    elif job["approval_expired"]:
+        status, code = "BLOCKED", APPROVAL_EXPIRED
+    elif handoff is None or _file_sha256(Path(str(handoff["path"]))) != str(handoff["sha256"]):
+        status, code = "FAILED", "HANDOFF_EVIDENCE_TAMPERED"
+    if not status:
+        return None
+    return _finish_model_job(session, job=dict(job), status=status, error_code=code, validation_status="FAILED",
+                             usage_metadata={"measured_execution": None},
+                             result_summary=f"Routed model job closed before the call: {code}.")
+
+
+def _file_sha256(path: Path) -> str | None:
     try:
-        prompt = _model_prompt(handoff_path, job)
-        model_text = _run_model_chat(provider, prompt, timeout)
-        evidence = {"measured_execution": getattr(provider, "last_evidence", None)}
-        contract = _model_stdout_contract(str(model_text))
-        stdout_path = artifact_dir / "stdout.txt"
-        stdout_path.write_text(stable_json(contract), encoding="utf-8")
-        if not str(model_text).strip():
-            return _finish_model_job(
-                session,
-                job=job,
-                status="FAILED",
-                error_code="OUTPUT_CONTRACT_FAILED",
-                validation_status="FAILED",
-                usage_metadata=evidence,
-                result_summary="Model returned empty text.",
-                stdout_path=stdout_path,
-            )
-        return _finish_model_job(
-            session,
-            job=job,
-            status="SUCCEEDED",
-            error_code=None,
-            validation_status="PASSED",
-            usage_metadata=evidence,
-            result_summary=str(model_text),
-            stdout_path=stdout_path,
-        )
-    except (TimeoutError, asyncio.TimeoutError, FutureTimeout):
-        return _finish_model_job(
-            session,
-            job=job,
-            status="TIMED_OUT",
-            error_code="TIMED_OUT",
-            validation_status="FAILED",
-            usage_metadata={"measured_execution": getattr(provider, "last_evidence", None)},
-            result_summary="Measured model call timed out.",
-        )
-    except ExecutionBindingRefused as exc:
-        return _finish_model_job(
-            session,
-            job=job,
-            status="FAILED",
-            error_code=exc.refusal.code,
-            validation_status="FAILED",
-            usage_metadata={"measured_execution": getattr(provider, "last_evidence", None)},
-            result_summary="Measured model call refused during execution.",
-        )
-    except Exception as exc:  # noqa: BLE001 - provider errors become terminal job evidence
-        return _finish_model_job(
-            session,
-            job=job,
-            status="FAILED",
-            error_code=str(getattr(exc, "code", "MODEL_PROVIDER_FAILED")),
-            validation_status="FAILED",
-            usage_metadata={"measured_execution": getattr(provider, "last_evidence", None)},
-            result_summary="Measured model call failed.",
-        )
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None

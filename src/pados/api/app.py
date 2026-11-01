@@ -3,11 +3,11 @@ from collections.abc import Callable
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DataError, NoResultFound, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from pados import __version__
-from pados.config import get_settings
+from pados.config import artifact_root, get_settings
 from pados.control import projections
 from pados.control import security as control_security
 from pados.control import service as control_service
@@ -26,6 +26,8 @@ from pados.db import check_database, get_engine, session_scope
 from pados.graph import register_graph_routes
 from pados.logging_config import configure_logging, get_logger
 from pados.loop import service as loop_service
+from pados.loop import acceptance as loop_acceptance
+from pados.loop import scope_authority
 from pados.loop.schemas import LoopCreate, TaskGoalCreate, TaskPlanCreate
 from pados.memory import packet as context_packet
 from pados.memory import service as memory_service
@@ -69,6 +71,13 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except NoResultFound as exc:  # an unknown id is a 404, not a server error
+            logger.info("control_lookup_not_found", error=type(exc).__name__)
+            raise HTTPException(status_code=404, detail="NOT_FOUND") from exc
+        except DataError as exc:  # a malformed id (for example not a UUID) is rejected without detail
+            # Logged server-side, so a genuine data fault never disappears behind the client error.
+            logger.warning("control_request_data_error", error=str(exc.orig)[:200])
+            raise HTTPException(status_code=422, detail="INVALID_IDENTIFIER") from exc
 
     def required_payload_value(payload: dict[str, object], key: str) -> str:
         value = payload.get(key)
@@ -116,7 +125,7 @@ def create_app() -> FastAPI:
         return {"status": "ready", **body}
 
     @app.get("/memory/search")
-    def memory_search(project_id: str, query: str) -> dict[str, object]:
+    def memory_search(project_id: str, query: str, _: ControlAuth) -> dict[str, object]:
         with session_scope(settings) as session:
             rows = search_memory(
                 session,
@@ -130,7 +139,7 @@ def create_app() -> FastAPI:
         return {"status": "ok", "results": [row.__dict__ for row in rows]}
 
     @app.post("/memory/facts")
-    def fact_add(payload: dict[str, object]) -> object:
+    def fact_add(payload: dict[str, object], _: ControlAuth) -> object:
         def _add() -> dict[str, Any]:
             requested_authority = payload.get("authority_state")
             if requested_authority is not None and str(requested_authority) != "CANDIDATE":
@@ -202,7 +211,7 @@ def create_app() -> FastAPI:
         return guarded(_promote)
 
     @app.post("/context/assemble")
-    def assemble(payload: dict[str, object]) -> dict[str, object]:
+    def assemble(payload: dict[str, object], _: ControlAuth) -> dict[str, object]:
         with session_scope(settings) as session:
             packet_payload = context_packet.assemble_context_packet(
                 session,
@@ -304,13 +313,20 @@ def create_app() -> FastAPI:
 
         def _route() -> dict[str, Any]:
             with session_scope(settings) as session:
-                return worker_service.route_work_request(
+                routed = worker_service.route_work_request(
                     session,
                     request_id=request_id,
                     route=route,
                     settings=settings,
-                    artifact_root=__import__("pathlib").Path("runtime/artifacts"),
+                    artifact_root=artifact_root(settings),
+                    defer_model_execution=True,
                 )
+            job = routed["job"]
+            if job.get("worker_type") == "OLLAMA" and job.get("status") == "ROUTED":
+                # The model runs after the routing transaction commits (RC2 SEC-9).
+                routed = {**routed, "job": worker_service.execute_routed_model_job(
+                    settings, str(job["id"]), session_factory=session_scope)}
+            return routed
 
         return guarded(lambda: {"status": "ok", **_route()})
 
@@ -368,6 +384,18 @@ def create_app() -> FastAPI:
     def control_revise(approval_id: str, payload: ApprovalDecision, _: ControlAuth) -> object:
         return _decide(approval_id, payload, "REVISION_REQUESTED")
 
+    @app.post("/control/approvals/{approval_id}/revoke")
+    def control_revoke(approval_id: str, payload: ApprovalDecision, _: ControlAuth) -> object:
+        """Withdraw a WORK_ROUTE approval: nothing new routes under it; a running loop waits for a human."""
+        def _apply() -> dict[str, Any]:
+            with session_scope(settings) as session:
+                return dict(control_service.revoke_approval(
+                    session, approval_id, version=payload.version, reason=payload.reason,
+                    idempotency_key=payload.idempotency_key,
+                ))
+
+        return guarded(lambda: {"status": "ok", "approval": _apply()})
+
     @app.post("/control/projections/render")
     def control_render_projection(payload: ProjectionRenderRequest, _: ControlAuth) -> object:
         control_security.assert_request_safe(payload.model_dump(), max_bytes=settings.control_request_max_bytes)
@@ -405,6 +433,14 @@ def create_app() -> FastAPI:
                 return worker_service.get_job(session, job_id)
 
         return guarded(lambda: {"status": "ok", "job": _job()})
+
+    @app.get("/control/jobs/{job_id}/artifacts")
+    def control_job_artifacts(job_id: str, _: ControlAuth) -> object:
+        def _artifacts() -> list[dict[str, Any]]:
+            with session_scope(settings) as session:
+                return worker_service.list_job_artifacts(session, job_id)
+
+        return guarded(lambda: {"status": "ok", "job_id": job_id, "artifacts": _artifacts()})
 
     @app.post("/control/jobs/{job_id}/cancel")
     def control_cancel_job(job_id: str, _: ControlAuth) -> object:
@@ -488,6 +524,24 @@ def create_app() -> FastAPI:
 
         return guarded(lambda: {"status": "ok", "loop": _get()})
 
+    @app.post("/control/loops/{loop_id}/result-candidate")
+    def control_submit_result_candidate(loop_id: str, _: ControlAuth) -> object:
+        """Submit a completed loop for governed verification; this endpoint never accepts or commits it."""
+        def _submit() -> dict[str, Any]:
+            with session_scope(settings) as session:
+                loop = loop_service.get_loop(session, loop_id)
+                current_scope_version = scope_authority.read_current_scope_version(
+                    settings, str(loop["project_id"])
+                )
+                row = loop_acceptance.submit_result_candidate(
+                    session,
+                    loop_id,
+                    current_scope_version=current_scope_version,
+                )
+                return loop_acceptance.submission_projection(row)
+
+        return guarded(lambda: {"status": "ok", "candidate": _submit()})
+
     @app.post("/control/loops/{loop_id}/start")
     def control_start_loop(loop_id: str, _: ControlAuth) -> object:
         def _start() -> dict[str, Any]:
@@ -501,14 +555,14 @@ def create_app() -> FastAPI:
         control_security.assert_request_safe(payload, max_bytes=settings.control_request_max_bytes)
 
         def _step() -> dict[str, Any]:
-            with session_scope(settings) as session:
-                return loop_service.run_one_iteration(
-                    session,
-                    loop_id=loop_id,
-                    settings=settings,
-                    artifact_root=__import__("pathlib").Path("runtime/artifacts"),
-                    idempotency_key=payload["idempotency_key"],
-                )
+            # A local-model call runs after the routing transaction commits (RC2 SEC-9).
+            return loop_service.run_step(
+                settings,
+                loop_id=loop_id,
+                artifact_root=artifact_root(settings),
+                idempotency_key=payload["idempotency_key"],
+                session_factory=session_scope,
+            )
 
         return guarded(lambda: {"status": "ok", **_step()})
 

@@ -117,8 +117,8 @@ def cmd_validate_config(args: argparse.Namespace) -> int:
 def cmd_serve(args: argparse.Namespace) -> int:
     from pados.install.serve import run
 
-    _bootstrapped(args)
-    run(args.instance_id)
+    home, _ = _bootstrapped(args)
+    run(args.instance_id, home)
     return 0
 
 

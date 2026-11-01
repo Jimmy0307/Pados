@@ -212,4 +212,4 @@ Final remediation:
 Status: `UNBLOCKED_FOR_PROJECT_GOAL_LOOP`
 
 P6.11 may now implement persistent Project Goal governance across multiple P6.10 Task Loops.
-P6.11 is not implemented in this run.
+Current state (2026-10-31): implemented on main (`src/pados/project_goal/`, migrations 0007-0009, `tests/integration/test_p6_11_*`). The protected legacy P6.11 branch lives in a separate legacy repository and is not touched by this repository's work.
