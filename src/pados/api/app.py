@@ -3,6 +3,7 @@ from collections.abc import Callable
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.exc import DataError, NoResultFound, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -35,7 +36,9 @@ from pados.memory.retrieval import RetrievalRequest, search_memory
 from pados.operations.routes import register_operations_routes
 from pados.operations.service import system_health
 from pados.product_loop.routes import register_product_loop_routes
+from pados.operability import health as health_contract
 from pados.operability.http import install_operability
+from pados.providers.factory import chat_provider_mode
 from pados.remote.app import mount_remote
 from pados.web import service as web_service
 from pados.web.routes import register_web_routes
@@ -97,8 +100,9 @@ def create_app() -> FastAPI:
             db_status = check_database(settings)
             status = "ok"
         except Exception as exc:  # noqa: BLE001 - /health must report degraded, never raise
-            logger.warning("healthcheck_failed", error=str(exc))
-            db_status = {"status": "error", "error": str(exc)}
+            # OP-003: a stable code only. Driver text can carry hosts, database names or credentials.
+            logger.warning("healthcheck_failed", error_type=type(exc).__name__)
+            db_status = {"status": "error", "error": "DATABASE_UNAVAILABLE"}
             status = "degraded"
         return {
             "status": status,
@@ -121,9 +125,30 @@ def create_app() -> FastAPI:
             "reasons": assessment["reasons"],
             "provider_live_uat": assessment["provider_live_uat"],
         }
+        # OP-003: the same decision, also expressed in the v1 health schema (Product Loop lanes required here).
+        body["health"] = health_contract.readiness(
+            "pados-api", __version__,
+            health_contract.checks_from_system_health(assessment, product_required=True, latency_ms=None, probe_error=None)
+            + (health_contract.chat_provider_check(chat_provider_mode(settings)),)).model_dump(mode="json")
         if not assessment["ready"]:
             raise HTTPException(status_code=503, detail={"status": "not_ready", **body})
         return {"status": "ready", **body}
+
+    @app.get("/health/live")
+    def health_live() -> JSONResponse:
+        # OP-003 liveness: the process serves requests; no dependency is probed or claimed.
+        return JSONResponse(health_contract.liveness("pados-api", __version__).model_dump(mode="json"))
+
+    @app.get("/health/ready")
+    def health_ready() -> JSONResponse:
+        # OP-003 readiness: bounded, non-mutating probes. Product Loop lanes are required only when it is enabled.
+        assessment, latency, error = health_contract.bounded(lambda: system_health(settings))
+        report = health_contract.readiness(
+            "pados-api", __version__,
+            health_contract.checks_from_system_health(assessment, product_required=settings.product_loop_enabled,
+                                             latency_ms=latency, probe_error=error)
+            + (health_contract.chat_provider_check(chat_provider_mode(settings)),))
+        return JSONResponse(report.model_dump(mode="json"), status_code=report.http_status)
 
     @app.get("/memory/search")
     def memory_search(project_id: str, query: str, _: ControlAuth) -> dict[str, object]:
