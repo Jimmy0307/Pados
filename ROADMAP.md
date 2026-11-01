@@ -59,6 +59,16 @@ Large models and optional OCR/Vision engines are runtime expansion work; they ar
 - Add Mac and additional Home Base environments after platform-specific validation.
 - Expand live network, hotspot, and intermittent-connectivity UAT.
 
+## Engineering Operability
+
+The operability remediation (OP-001 to OP-010) is implemented on `feat/operability-remediation-20261101`, in review
+and not merged. Status, remaining work and unblock conditions for each item and for the PR #19 residuals are in
+`docs/audits/PADOS_OPERABILITY_RESIDUAL_REGISTER.md`. Infrastructure-dependent follow-ups:
+
+- Metrics exporter, dashboards and alerts (OP-008 names and labels are fixed first).
+- Pack manifest schema v2 for retry limits and health intervals (OP-009), an owner decision.
+- Cross-database approval fencing for the Product Loop (R19-1), an owner-approved design.
+
 ## Pending Evidence
 
 - Live OCR backend

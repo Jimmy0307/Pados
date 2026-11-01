@@ -114,7 +114,7 @@
       "error_codes": ["PACK_MANIFEST_INVALID", "PACK_ADAPTER_FAILED", "PACK_CAPABILITY_CONFLICT"],
       "health": {"not_applicable": "packs are registry content, not a serving process"},
       "failure_injection": [{"path": "tests/capability/test_pack_boundaries.py"}],
-      "runbook": {"gap": "no pack/adapter recovery runbook; pack manifests do not yet declare operability metadata (OP-009)"},
+      "runbook": {"gap": "no pack/adapter recovery runbook; the OP-009 operability contract (docs/operations/PACK_OPERABILITY_CONTRACT.md) covers declarations, not recovery"},
       "runtime_lanes": ["ai-scientist-v3-runtime"]
     },
     "C14": {
