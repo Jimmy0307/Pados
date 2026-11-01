@@ -31,6 +31,7 @@ from pados.compute_node.identity_providers import (
 from pados.compute_node.manifest import ModelAvailability, NodeCapability, NodeDescriptor, NodeState
 from pados.enterprise import observability
 from pados.operability.context import downstream_headers
+from pados.operability.metrics import METRICS
 from pados.operability.resilience import DeadlineExceeded, RetryPolicy, capped_timeout, retry_call
 from pados.enterprise.classification import DataClassification
 from pados.enterprise.secrets import (
@@ -200,6 +201,7 @@ class NodeClient:
             # OP-004: never wait past the caller's remaining budget; a spent budget refuses before any network call.
             bounded_timeout = capped_timeout(timeout or self._timeout)
         except DeadlineExceeded:
+            METRICS.inc("pados_deadline_exceeded_total", {"component": "compute_node"})
             raise NodeClientError("NODE_DEADLINE_EXCEEDED") from None
         try:
             # OP-001: the caller's request context travels with the call; it never replaces the credential.

@@ -42,6 +42,7 @@ from pados.memory import packet as context_packet
 from pados.memory.retrieval import RetrievalRequest
 from pados.memory.security import assert_no_secret
 from pados.operability.context import operation_scope, trace_fields
+from pados.operability.metrics import METRICS
 from pados.operability.resilience import DeadlineExceeded, capped_timeout
 from pados.providers.execution_binding import ExecutionBindingRefused, ExecutionIntent
 from pados.providers.factory import build_chat_provider
@@ -947,6 +948,7 @@ def _call_model(call: _ModelCall, *, job: Mapping[str, Any], handoff_path: Path,
         if timeout < 1:
             raise DeadlineExceeded()
     except DeadlineExceeded:
+        METRICS.inc("pados_deadline_exceeded_total", {"component": "worker"})
         return {"status": "TIMED_OUT", "error_code": "PARENT_DEADLINE_EXCEEDED", "validation_status": "FAILED",
                 "usage_metadata": {"measured_execution": None},
                 "result_summary": "The caller's deadline had passed; the model was not called."}

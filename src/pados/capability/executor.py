@@ -141,6 +141,7 @@ from pados.capability.task import QualityRequirement, TaskContract, validated_ta
 from pados.capability.verification import VerificationEngine, VerificationResult
 from pados.logging_config import get_logger
 from pados.operability.context import error_code_of, operation_scope
+from pados.operability.metrics import timed
 
 _CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 _RUN_ID = re.compile(r"^[a-z0-9]{8,32}$")
@@ -260,7 +261,7 @@ class CapabilityExecutor:
         The trace is only logged, beside the plan and envelope hashes that identify the sealed ledger entry; it never
         enters a receipt, the ledger, a grant or a policy decision.
         """
-        with operation_scope("capability", run_id=getattr(task, "task_id", None)):
+        with operation_scope("capability", run_id=getattr(task, "task_id", None)), timed("capability.execute"):
             try:
                 result = self._execute(plan, task, human_decision=human_decision)
             except Exception as exc:

@@ -3,7 +3,7 @@ from collections.abc import Callable
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.exc import DataError, NoResultFound, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -37,6 +37,7 @@ from pados.operations.routes import register_operations_routes
 from pados.operations.service import system_health
 from pados.product_loop.routes import register_product_loop_routes
 from pados.operability import health as health_contract
+from pados.operability.metrics import METRICS
 from pados.operability.http import install_operability
 from pados.providers.factory import chat_provider_mode
 from pados.remote.app import mount_remote
@@ -149,6 +150,12 @@ def create_app() -> FastAPI:
                                              latency_ms=latency, probe_error=error)
             + (health_contract.chat_provider_check(chat_provider_mode(settings)),))
         return JSONResponse(report.model_dump(mode="json"), status_code=report.http_status)
+
+    @app.get("/metrics")
+    def metrics() -> Response:
+        # OP-008: bounded counters and histograms labelled by route template, status class and stable error code
+        # only (no ids, paths, queries or bodies); the same exposure class as /health. Read-only, never authority.
+        return Response(METRICS.render_prometheus(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
     @app.get("/memory/search")
     def memory_search(project_id: str, query: str, _: ControlAuth) -> dict[str, object]:

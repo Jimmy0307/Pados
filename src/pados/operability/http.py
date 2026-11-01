@@ -29,11 +29,13 @@ from pados.logging_config import get_logger
 from pados.operability.context import (
     CORRELATION_ID_HEADER,
     REQUEST_ID_HEADER,
+    TRACEPARENT_HEADER,
     bind_context,
     context_from_headers,
     current_context,
     new_id,
 )
+from pados.operability.metrics import METRICS, record_http_request
 from pados.operability.resilience import DEADLINE_HEADER, deadline_from_header, deadline_scope
 from pados.operability.errors import (
     GENERIC_CODE_BY_STATUS,
@@ -107,6 +109,7 @@ def install_operability(app: FastAPI, *, component: str) -> None:
         # for any other method the write outcome is unknown, so the client must read state before retrying.
         logger.warning("http.request.dependency_failed", dependency="database", error_type=type(exc).__name__,
                        error_code="DATABASE_UNAVAILABLE")
+        METRICS.inc("pados_dependency_failures_total", {"dependency": "database", "error_code": "DATABASE_UNAVAILABLE"})
         request_id, correlation_id = _ids()
         safe = request.method.upper() in SAFE_METHODS
         envelope = ErrorEnvelope(code="DATABASE_UNAVAILABLE", category=ErrorCategory.DEPENDENCY,
@@ -126,7 +129,8 @@ def install_operability(app: FastAPI, *, component: str) -> None:
     @app.middleware("http")
     async def operability_context(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         context = context_from_headers(request.headers.get(REQUEST_ID_HEADER),
-                                       request.headers.get(CORRELATION_ID_HEADER), component=component)
+                                       request.headers.get(CORRELATION_ID_HEADER), component=component,
+                                       traceparent=request.headers.get(TRACEPARENT_HEADER))
         started = time.perf_counter()
         deadline = deadline_from_header(request.headers.get(DEADLINE_HEADER))  # OP-004: optional parent budget
         with bind_context(context), deadline_scope(deadline):
@@ -143,10 +147,13 @@ def install_operability(app: FastAPI, *, component: str) -> None:
             response.headers[REQUEST_ID_HEADER] = context.request_id
             response.headers[CORRELATION_ID_HEADER] = context.correlation_id
             status = response.status_code
-            route = request.scope.get("route")
-            logger.info("http.request.finished", method=request.method,
-                        route=getattr(route, "path", "UNMATCHED"), status_code=status,
+            route_path = getattr(request.scope.get("route"), "path", "UNMATCHED")
+            error_code = getattr(request.state, "error_code", None)
+            duration = time.perf_counter() - started
+            logger.info("http.request.finished", method=request.method, route=route_path, status_code=status,
                         outcome="completed" if status < 400 else "rejected" if status < 500 else "failed",
-                        error_code=getattr(request.state, "error_code", None),
-                        duration_ms=round((time.perf_counter() - started) * 1000, 3))
+                        error_code=error_code, duration_ms=round(duration * 1000, 3))
+            # OP-008: labelled by route template and stable code only, never by raw path, id or query.
+            record_http_request(method=request.method, route=route_path, status=status, duration_s=duration,
+                                error_code=error_code)
             return response

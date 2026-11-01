@@ -23,6 +23,7 @@ from typing import TypeVar
 from pados.logging_config import get_logger
 from pados.operability.context import error_code_of
 from pados.operability.errors import NEVER_RETRYABLE, ErrorCategory, PadosError, WriteOutcome
+from pados.operability.metrics import METRICS
 
 DEADLINE_HEADER = "X-Request-Deadline-Ms"
 MAX_DEADLINE_MS = 600_000
@@ -128,8 +129,10 @@ def retry_call(fn: Callable[[], T], *, operation: str, policy: RetryPolicy = Ret
             if attempt >= policy.max_attempts or out_of_budget:
                 _LOG.warning("retry.exhausted", operation=operation, attempts=attempt, error_code=code,
                              reason="DEADLINE" if out_of_budget else "ATTEMPTS")
+                METRICS.inc("pados_retry_attempts_total", {"operation": operation, "result": "exhausted"})
                 raise
             _LOG.info("retry.attempt", operation=operation, attempt=attempt, error_code=code,
                       delay_ms=round(delay * 1000, 1))
+            METRICS.inc("pados_retry_attempts_total", {"operation": operation, "result": "retried"})
             sleep(delay)
             attempt += 1
