@@ -98,8 +98,29 @@ function installPlatformRuntime(ctx, minFree) {
   return { runtime: runtimeAt(result.dir, pkg.version), installed: result.installed, bytes: pkg.manifest.files.bytes };
 }
 
+// Flags that only take effect when the configuration is written (INST-2: never silently ignore them).
+const CONFIG_FLAGS = ['dbHost', 'dbPort', 'dbUser', 'dbName', 'dbPasswordRef', 'dbPassfile', 'apiPort'];
+
+function ignoredConfigFlags(flags, existing) {
+  if (!existing || flags.reconfigure) return [];
+  return CONFIG_FLAGS.filter((name) => flags[name] !== undefined);
+}
+
+// One line per lane, so a partly applied migration shows which lanes moved and where each one is (INST-4).
+function laneLines(database) {
+  const lanes = ((database.applied && (database.applied.after || database.applied.before))
+    || database.check || {}).lanes || [];
+  return lanes.map((lane) => `  ${lane.lane}: ${lane.state}${lane.current_revision ? ` at ${lane.current_revision}` : ''}`
+    + `${lane.target_revision && lane.state !== 'CURRENT' ? ` (target ${lane.target_revision})` : ''}`);
+}
+
 function writeConfiguration(ctx, existing) {
   const paths = layout(ctx.home);
+  const ignored = ignoredConfigFlags(ctx.flags, existing);
+  if (ignored.length) {
+    throw new PadosError('CONFIG_EXISTS', { details: { ignored_flags: ignored },
+      cause: `These options only apply when the configuration is written: ${ignored.join(', ')}.` });
+  }
   if (existing && !ctx.flags.reconfigure) return { written: false, file: paths.configFile };
   const entries = buildConfig(ctx.home, {
     dbHost: ctx.flags.dbHost, dbPort: ctx.flags.dbPort, dbUser: ctx.flags.dbUser, dbName: ctx.flags.dbName,
@@ -172,6 +193,9 @@ async function run(ctx) {
     write(`Configuration: ${report.config.file}${report.config.written ? '' : ' (kept)'}`);
     write(`Storage mode: ${storage}`);
     write(`Database: ${report.database.status}${report.database.code ? ` (${report.database.code})` : ''}`);
+    if (report.database.status !== 'CURRENT' && report.database.status !== 'SKIPPED') {
+      for (const line of laneLines(report.database)) write(line);
+    }
     write('');
     write(renderDoctor(doctor));
     write('');
@@ -182,4 +206,4 @@ async function run(ctx) {
   return 0;
 }
 
-module.exports = { SPEC, run, STORAGE_MODES, freeBytes, ask };
+module.exports = { SPEC, run, STORAGE_MODES, freeBytes, ask, ignoredConfigFlags, laneLines };

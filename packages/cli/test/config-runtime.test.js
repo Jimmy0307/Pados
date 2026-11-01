@@ -84,3 +84,20 @@ test('a tampered runtime package is refused and leaves no partial install', () =
   assert.throws(() => installRuntime(dir, pkg), (e) => e.code === 'RUNTIME_PACKAGE_INVALID');
   assert.deepEqual(fs.readdirSync(path.join(dir, 'runtime')), []);
 });
+
+test('init refuses configuration options it would otherwise silently ignore (INST-2)', () => {
+  const { ignoredConfigFlags } = require('../lib/commands/init');
+  assert.deepEqual(ignoredConfigFlags({ dbHost: '127.0.0.1', apiPort: '8089' }, true), ['dbHost', 'apiPort']);
+  assert.deepEqual(ignoredConfigFlags({ dbHost: '127.0.0.1', reconfigure: true }, true), []);
+  assert.deepEqual(ignoredConfigFlags({ dbHost: '127.0.0.1' }, false), []);
+  assert.deepEqual(ignoredConfigFlags({ json: true, storage: 'STANDARD' }, true), []);
+});
+
+test('a partly applied migration lists every lane and where it is (INST-4)', () => {
+  const { laneLines } = require('../lib/commands/init');
+  const database = { status: 'FAILED', applied: { status: 'FAILED', partial: true, after: { lanes: [
+    { lane: 'operational', state: 'CURRENT', current_revision: '20261101_0020', target_revision: '20261101_0020' },
+    { lane: 'corpus', state: 'UNINITIALIZED', current_revision: null, target_revision: '20260730_0011' }] } } };
+  assert.deepEqual(laneLines(database), ['  operational: CURRENT at 20261101_0020',
+    '  corpus: UNINITIALIZED (target 20260730_0011)']);
+});
