@@ -17,7 +17,7 @@ const STORAGE_MODES = ['LIGHTWEIGHT', 'STANDARD', 'FULL_LOCAL'];
 const LARGE_DISK_BYTES = 1024 ** 3;
 
 const SPEC = {
-  booleans: ['reconfigure', 'create-databases', 'skip-database', 'rotate-control-token', 'migrate'],
+  booleans: ['reconfigure', 'create-databases', 'skip-database', 'rotate-control-token', 'migrate', 'adopt-runtime'],
   values: ['storage', 'min-free-bytes', 'db-host', 'db-port', 'db-user', 'db-name', 'db-password-ref',
     'db-passfile', 'db-password', 'api-port'],
 };
@@ -100,8 +100,15 @@ function installPlatformRuntime(ctx, minFree) {
 
 // RC2 INST-1: init installs; it never upgrades. On an existing installation a different runtime version is activated
 // (and its data migrated) only by `pados update`, which checks compatibility first and asks before migrating.
-function assertNoUnconsentedUpgrade(existing, previous, version) {
-  if (!existing || !previous || !previous.version || !version || previous.version === version) return;
+// A configuration with no readable runtime record (deleted or corrupt) is not a fresh install: activating this CLI's
+// runtime there needs the explicit --adopt-runtime consent.
+function assertNoUnconsentedUpgrade(existing, previous, version, flags = {}) {
+  if (!existing || !version) return;
+  if (!previous || !previous.version) {
+    if (flags.adoptRuntime) return;
+    throw new PadosError('RUNTIME_RECORD_MISSING', { details: { cli: version } });
+  }
+  if (previous.version === version) return;
   throw new PadosError('UPDATE_REQUIRED', { details: { installed: previous.version, cli: version } });
 }
 
@@ -184,7 +191,7 @@ async function run(ctx) {
   const plan = { storage, reason: storage === 'FULL_LOCAL' ? 'FULL_LOCAL keeps artifacts locally' : 'runtime size', runtimeBytes: 0 };
   if (!(ctx.env.PADOS_CLI_DEV_PYTHON && ctx.env.PADOS_CLI_DEV_APP)) {
     const pkg = resolveRuntimePackage({ env: ctx.env });
-    assertNoUnconsentedUpgrade(existing || Boolean(previous), previous, pkg.version);
+    assertNoUnconsentedUpgrade(existing || Boolean(previous), previous, pkg.version, ctx.flags);
     plan.runtimeBytes = pkg.manifest.files.bytes;
   }
   await confirmDisk(ctx, plan);

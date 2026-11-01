@@ -52,3 +52,26 @@ test('init migrates existing data forward only with the dedicated --migrate cons
     { lane: 'corpus', state: 'DATABASE_MISSING' }] };
   assert.equal(unconsentedMigration(fresh, {}), null, 'empty databases hold no data to migrate');
 });
+
+for (const record of ['missing', 'corrupt']) {
+  test(`init refuses to adopt a runtime when the configuration exists but the runtime record is ${record}`, () => {
+    const { home, pkg } = existingInstallation();
+    if (record === 'missing') fs.rmSync(layout(home).current);
+    else fs.writeFileSync(layout(home).current, '{"version":');
+    const result = runCli(['init', '--non-interactive', '--json', '--yes'],
+      { PADOS_HOME: home, PADOS_RUNTIME_PACKAGE_DIR: pkg.dir });
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stdout}${result.stderr}`, /RUNTIME_RECORD_MISSING/);
+    assert.equal(fs.existsSync(versionDir(home, CLI_VERSION)), false, 'nothing is installed or activated');
+    assert.equal(fs.readFileSync(layout(home).configFile, 'utf8'), 'PADOS_DB_NAME=pados_existing\n');
+  });
+}
+
+test('--adopt-runtime is the explicit consent to activate a runtime for an existing configuration', () => {
+  const { home, pkg } = existingInstallation();
+  fs.rmSync(layout(home).current);
+  const result = runCli(['init', '--non-interactive', '--json', '--adopt-runtime'],
+    { PADOS_HOME: home, PADOS_RUNTIME_PACKAGE_DIR: pkg.dir });
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, /RUNTIME_RECORD_MISSING|UPDATE_REQUIRED/);
+  assert.equal(readCurrent(home).version, CLI_VERSION, 'the consented runtime is recorded as active');
+});

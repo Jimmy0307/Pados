@@ -21,6 +21,7 @@ const CATALOG = Object.freeze({
   DATABASE_AUTHENTICATION_FAILED: ['PostgreSQL rejected the credentials.', 'set the variable named by PADOS_DB_PASSWORD_REF, then: pados doctor'],
   DATABASE_MISSING: ['A PADOS database does not exist yet.', 'create it, or run: pados init --create-databases'],
   MIGRATIONS_PENDING: ['Database migrations are pending.', 'pados init (applies them through the PADOS migration graph)'],
+  RUNTIME_RECORD_MISSING: ['A PADOS configuration exists but no active runtime is recorded (the runtime record is missing or unreadable); nothing was installed or activated.', 'restore the runtime record from a backup, or confirm activating the runtime this CLI ships: pados init --adopt-runtime (existing data still migrates only with --migrate)'],
   UPDATE_REQUIRED: ['This PADOS installation runs a different runtime version than this CLI ships. pados init never activates another runtime version; nothing was changed.', 'pados update (checks migration compatibility first and asks before migrating)'],
   MIGRATION_CONSENT_REQUIRED: ['This update must migrate the database forward; that needs explicit confirmation (afterwards rollback is no longer possible). Nothing was migrated and the previous runtime stays active.', 'back up both PADOS databases (pg_dump), then run: pados update --migrate (or --yes)'],
   MIGRATIONS_INCOMPATIBLE: ['The database schema does not match this PADOS version.', 'pados doctor; use the matching version (pados update --rollback) or restore a backup'],
