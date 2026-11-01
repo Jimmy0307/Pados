@@ -67,6 +67,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default=None)
     parser.add_argument("--skip-integrity", action="store_true")
     parser.add_argument("--rehearsal", action="store_true", help="Linux development rehearsal with test fakes")
+    # A re-measurement of the same pinned artifact on another runtime release (M2 -> M3) names its own M3 report and
+    # the profile id it must contain; the id check itself is never skipped.
+    parser.add_argument("--m3-report", type=Path, default=M3_REPORT)
+    parser.add_argument("--expected-profile-id", default=EXPECTED_PROFILE_ID)
     args = parser.parse_args(argv)
 
     if str(ROOT).lower().startswith(str(PROTECTED).lower()):
@@ -125,10 +129,10 @@ def run(args: argparse.Namespace, out: Path, result: dict[str, Any], record: Cal
     if args.rehearsal:  # the fakes' own profile; the tracked M3.1 report is internal evidence (not exported)
         profile, description, fakes = _rehearsal_profile()
     else:
-        report = json.loads(M3_REPORT.read_text(encoding="utf-8"))
+        report = json.loads(Path(args.m3_report).read_text(encoding="utf-8"))
         profile = ModelCapabilityProfile.model_validate(report["profile"])
         description = ModelRuntimeProfile.model_validate(report["catalog_description"])
-        if profile.profile_id != EXPECTED_PROFILE_ID:
+        if profile.profile_id != args.expected_profile_id:
             raise RuntimeError("M3_PROFILE_ID_UNEXPECTED")
     store = ModelCatalogStore(out / "state" / "model-catalog.json")
     digest = store.save(ModelCatalog([description]).register_capability_profile(profile))
