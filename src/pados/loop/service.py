@@ -253,6 +253,9 @@ def create_task_goal(session: Session, payload: TaskGoalCreate) -> dict[str, Any
             "idempotency_key": payload.idempotency_key,
         },
     ).mappings().one()
+    # OP-004: a reused key is a replay only for the same content; different content is a conflict, never the old row.
+    if str(row["content_hash"]) != _hash(content):
+        raise ValueError("TASK_GOAL_IDEMPOTENCY_CONTENT_CONFLICT")
     return dict(row)
 
 
@@ -457,6 +460,11 @@ def create_loop(session: Session, payload: LoopCreate) -> dict[str, Any]:
             "idempotency_key": payload.idempotency_key,
         },
     ).mappings().one()
+    # OP-004: a reused key is a replay only for the same loop; checked before anything is bound or consumed.
+    bound = ("active_plan_id", "approval_id", "max_iterations", "max_replans", "max_worker_failures",
+             "max_execution_seconds", "no_progress_limit", "context_token_budget")
+    if any(str(row[field]) != str(getattr(payload, field)) for field in bound):
+        raise ValueError("LOOP_IDEMPOTENCY_CONTENT_CONFLICT")
     conflicting_bindings: Any = session.execute(
         text(
             """
@@ -526,29 +534,27 @@ LOOP_LEASE_HELD = "LOOP_LEASE_HELD"
 
 
 def _hold_lease(session: Session, loop: dict[str, Any], owner_instance: str | None) -> None:
-    """OP-004: renew the loop's lease on every iteration (heartbeat and expiry), observably.
+    """OP-004: an owner's lease is renewed on every iteration it runs; another owner is fenced out.
 
-    Without an owner the current holder's lease is renewed, which keeps every existing caller working. With an explicit
-    owner the lease is taken when it is free, lapsed or already that owner's; while another owner holds a live lease
-    the iteration is refused before anything is selected, routed or published (fencing).
+    With an explicit owner the lease is taken when it is free, lapsed or already that owner's, and renewed (heartbeat
+    and expiry). While another owner holds a live lease the iteration is refused before anything is selected, routed
+    or published (fencing).
+
+    Without an owner (an operator-invoked step from the API, or the CLI without ``--owner``) the lease is only
+    observed: it is neither renewed nor revived. Renewing it would heartbeat on behalf of whichever instance holds it,
+    and reviving a lapsed lease would keep a crashed owner's claim alive and block a takeover. Every lease carries a
+    nominal owner from ``start_loop``, so an owner-less step cannot tell a live instance from an earlier start; it is
+    therefore not refused, which keeps single-operator use working. Fencing is for callers that name themselves.
     """
     loop_id = str(loop["id"])
     if owner_instance is None:
         row = session.execute(text(
-            """
-            WITH previous AS (
-              SELECT loop_id, lease_expires_at < now() AS lapsed FROM task_loop_leases
-              WHERE loop_id = CAST(:id AS uuid) FOR UPDATE
-            )
-            UPDATE task_loop_leases AS lease
-            SET heartbeat_at = now(), lease_expires_at = now() + interval '5 minutes'
-            FROM previous WHERE lease.loop_id = previous.loop_id
-            RETURNING lease.owner_instance, previous.lapsed
-            """), {"id": loop_id}).mappings().first()
+            "SELECT owner_instance, lease_expires_at < now() AS lapsed FROM task_loop_leases "
+            "WHERE loop_id = CAST(:id AS uuid)"), {"id": loop_id}).mappings().first()
         if row is None:
             _LOG.warning("task_loop.lease.missing", loop_id=loop_id)
             return
-        _LOG.info("task_loop.lease.renewed", owner=row["owner_instance"], recovered_after_lapse=bool(row["lapsed"]))
+        _LOG.info("task_loop.lease.observed", holder=row["owner_instance"], lapsed=bool(row["lapsed"]))
         return
     row = session.execute(text(
         """

@@ -47,13 +47,17 @@ The one retried boundary today is the compute-node job-status read (`NodeClient.
 
 ## TaskLoop lease
 
-- `start_loop` takes the 5-minute lease, and now every iteration renews it (`task_loop.lease.renewed`, with
-  `recovered_after_lapse` when it had expired).
-- A caller can name an owner (`run_step(..., owner_instance=...)`). The lease is then taken when it is free, lapsed or
-  already that owner's. While another owner holds a live lease, the iteration is refused with `LOOP_LEASE_HELD` before
-  any step is selected, routed or published (`task_loop.lease.refused`, naming the holder).
+- `start_loop` takes the 5-minute lease under a nominal owner (`control-api`, `graph-api`, or the CLI's `--owner`).
+- A caller that names an owner (`run_step(..., owner_instance=...)`, `pados loop step --owner NAME`) holds the lease:
+  it is taken when free, lapsed or already that owner's, and renewed on every iteration (`task_loop.lease.held`).
+  While another owner holds a live lease, the iteration is refused with `LOOP_LEASE_HELD` before any step is
+  selected, routed or published (`task_loop.lease.refused`, naming the holder).
 - After a crash the lease lapses within five minutes and another owner resumes the loop from its persisted iterations.
-- The existing surfaces pass no owner, so in single-operator use they keep stepping one loop from the API or the CLI.
+- An owner-less step (the API step route, or the CLI without `--owner`) only observes the lease
+  (`task_loop.lease.observed`). It never renews another instance's lease and never revives a lapsed one, so it cannot
+  block a takeover. It is not refused either: every lease has a nominal owner from `start_loop`, so an owner-less
+  step cannot tell a live instance from an earlier start. Fencing therefore protects callers that name themselves; a
+  multi-instance scheduler must pass its instance id.
 
 ## Recovery
 

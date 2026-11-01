@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # ruff: noqa: F811 - the residual fixture is imported by name and requested as a parameter
-"""OP-004: the TaskLoop lease is renewed on every iteration, fences other owners, and can be resumed after a lapse.
+"""OP-004: an owner's lease is renewed on each iteration, other owners are fenced, a lapse can be taken over, and
+an owner-less (operator) step never renews or revives anyone's lease.
 
 Uses the residual amendment database (PADOS_RESIDUAL_AMENDMENT_TEST_DATABASE_URL) and its deterministic router.
 """
@@ -50,16 +51,42 @@ def _iterations(session: Session, loop_id: str) -> int:
                                {"l": loop_id}).scalar_one())
 
 
-def test_every_iteration_renews_the_lease(seeded: tuple[Session, str], tmp_path: Path) -> None:
+def test_every_iteration_renews_the_owners_lease(seeded: tuple[Session, str], tmp_path: Path) -> None:
     session, loop_id = seeded
     session.execute(text("UPDATE task_loop_leases SET lease_expires_at = now() + interval '30 seconds', "
                          "heartbeat_at = now() - interval '1 hour' WHERE loop_id = CAST(:l AS uuid)"), {"l": loop_id})
     before = _lease(session, loop_id)
-    _iterate(session, loop_id, tmp_path)
+    _iterate(session, loop_id, tmp_path, owner=str(before["owner_instance"]))
     after = _lease(session, loop_id)
     assert after["owner_instance"] == before["owner_instance"]
     assert after["heartbeat_at"] > before["heartbeat_at"]
     assert after["remaining"].total_seconds() > 240  # renewed to five minutes
+
+
+def test_an_owner_less_step_never_heartbeats_for_another_instance(seeded: tuple[Session, str],
+                                                                  tmp_path: Path) -> None:
+    session, loop_id = seeded
+    session.execute(text("UPDATE task_loop_leases SET owner_instance = 'replacement-worker', "
+                         "lease_expires_at = now() + interval '30 seconds', heartbeat_at = now() - interval '1 hour' "
+                         "WHERE loop_id = CAST(:l AS uuid)"), {"l": loop_id})
+    before = _lease(session, loop_id)
+    _iterate(session, loop_id, tmp_path)
+    after = _lease(session, loop_id)
+    assert (after["owner_instance"], after["heartbeat_at"], after["lease_expires_at"]) == (
+        "replacement-worker", before["heartbeat_at"], before["lease_expires_at"])
+
+
+def test_an_owner_less_step_never_revives_a_crashed_owners_lease(seeded: tuple[Session, str],
+                                                                 tmp_path: Path) -> None:
+    session, loop_id = seeded
+    session.execute(text("UPDATE task_loop_leases SET owner_instance = 'crashed-owner', "
+                         "lease_acquired_at = now() - interval '10 minutes', heartbeat_at = now() - interval '10 minutes', "
+                         "lease_expires_at = now() - interval '1 second' WHERE loop_id = CAST(:l AS uuid)"), {"l": loop_id})
+    _iterate(session, loop_id, tmp_path)
+    assert _lease(session, loop_id)["remaining"].total_seconds() < 0  # still lapsed
+    resumed = _iterate(session, loop_id, tmp_path, owner="replacement-worker")  # so the takeover is not blocked
+    assert _lease(session, loop_id)["owner_instance"] == "replacement-worker"
+    assert resumed["status"] in {"RUNNING", "COMPLETED"}
 
 
 def test_another_owner_is_refused_while_the_lease_is_live_and_nothing_runs(seeded: tuple[Session, str],

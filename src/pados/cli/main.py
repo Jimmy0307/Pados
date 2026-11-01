@@ -961,6 +961,8 @@ def loop_start(
 def loop_step(
     loop_id: Annotated[UUID, typer.Option("--loop-id", help="Loop UUID.")],
     idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
+    owner: Annotated[str | None, typer.Option(
+        "--owner", help="Hold the loop's lease as this owner; refused while another owner holds it.")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     # A local-model call runs after the routing transaction commits (RC2 SEC-9).
@@ -969,6 +971,7 @@ def loop_step(
         loop_id=str(loop_id),
         artifact_root=artifact_root(get_settings()),
         idempotency_key=idempotency_key,
+        owner_instance=owner,
     )
     _echo_json({"status": "ok", **result}, json_output)
 

@@ -40,10 +40,13 @@ MUTATIONS: dict[tuple[str, str], MutationKind] = {
     ("POST", "/control/work-requests"): _KEY,
     ("POST", "/control/work-requests/{request_id}/route"): _KEY,
     ("POST", "/control/approvals"): _KEY,
-    ("POST", "/control/approvals/{approval_id}/approve"): _KEY,
-    ("POST", "/control/approvals/{approval_id}/reject"): _KEY,
-    ("POST", "/control/approvals/{approval_id}/revise"): _KEY,
-    ("POST", "/control/approvals/{approval_id}/revoke"): _KEY,
+    # A decision applies once: a decided approval refuses every later decision ("approval is not pending",
+    # APPROVAL_NOT_REVOCABLE, or a stale version). The key only lets an exact replay return the current record; a
+    # different decision under the same key is not reported as a content conflict, so these are not IDEMPOTENCY_KEY.
+    ("POST", "/control/approvals/{approval_id}/approve"): _STATE,
+    ("POST", "/control/approvals/{approval_id}/reject"): _STATE,
+    ("POST", "/control/approvals/{approval_id}/revise"): _STATE,
+    ("POST", "/control/approvals/{approval_id}/revoke"): _STATE,
     ("POST", "/control/projections/render"): _RECONCILE,
     ("POST", "/control/jobs/{job_id}/cancel"): _STATE,
     ("POST", "/control/task-goals"): _KEY,
