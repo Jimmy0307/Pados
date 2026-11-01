@@ -1,5 +1,7 @@
 # Clean-room reimplementation: process
 
+<!-- doc-lint: names-absent-paths -->
+
 **Scope.** Eight files are identified by the consolidation provenance record as adapted from internal repositories:
 
 - `src/pados/execution/{context,handoff,receipts}.py`

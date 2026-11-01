@@ -135,6 +135,9 @@ jobs:
       # resolve in the tree. Explicit gaps stay INCOMPLETE; a dangling reference fails the job.
       - name: Operability contract gate
         run: python scripts/release/operability_gate.py gates/operability-gate.json
+      # OP-010: every relative link and backticked repository path in docs/ and the root runbooks must resolve.
+      - name: Documentation reference lint
+        run: python scripts/release/doc_lint.py gates/doc-lint.json
       # OP-002: per-lane runtime status for the production target, bound to evidence. Report mode records and never
       # claims; CI has no runtime evidence, so every required lane reads NOT_VALIDATED and readiness stays NOT_READY.
       - name: Runtime lane report (records, never claims)
