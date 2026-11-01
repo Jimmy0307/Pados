@@ -119,3 +119,17 @@ def test_approval_revoked_during_the_attempt_stops_the_cas(p6_19b_product_servic
     assert report.status.value == "AUTHORITY_BLOCK"
     assert report.semantic_state == "NOT_COMMITTED"
     assert _audit(engine, scope_id) == []
+
+
+def test_gateway_reads_the_registered_project_classification(p6_19b_product_service) -> None:
+    """RC2 SEC-2: the cloud Maker's floor is the project's recorded classification; unknown ids read as None."""
+    service, engine = p6_19b_product_service
+    scope_id = _registered_scope(Path(service.maker.approved_root))
+    gateway = service.state_gateway
+    assert gateway.project_classification(scope_id) == "internal"  # the PADOS default for a registered project
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE projects SET classification = 'confidential' WHERE id = CAST(:p AS uuid)"),
+                           {"p": scope_id})
+    assert gateway.project_classification(scope_id) == "confidential"
+    assert gateway.project_classification(str(uuid4())) is None
+    assert gateway.project_classification("not-a-uuid") is None

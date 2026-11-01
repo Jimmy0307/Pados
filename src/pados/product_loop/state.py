@@ -184,6 +184,19 @@ class P6_19BStateGateway:
             ).mappings().first()
         check_product_approval(None if row is None else dict(row), scope_id=scope_id, proposal_hash=proposal_hash)
 
+    def project_classification(self, project_id: str) -> str | None:
+        """The registered project's recorded classification (RC2 SEC-2), or None when it cannot be read."""
+        try:
+            UUID(str(project_id))
+        except ValueError:
+            return None
+        with self._operational_session() as session:
+            value = session.execute(
+                text("SELECT classification FROM projects WHERE id = CAST(:project_id AS uuid)"),
+                {"project_id": str(project_id)},
+            ).scalar_one_or_none()
+        return None if value is None else str(value)
+
     async def persist_run_context(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         ref = self.proof_service.object_store.put_json(dict(payload), object_kind="OTHER")
         with self.proof_service._session() as session:

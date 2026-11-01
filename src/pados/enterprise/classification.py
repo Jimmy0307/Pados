@@ -9,7 +9,9 @@ existing lowercase PADOS value compatibly.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
+from typing import Any
 
 
 class DataClassification(StrEnum):
@@ -45,6 +47,19 @@ def parse_classification(value: object) -> DataClassification:
         return DataClassification(value.strip().upper())
     except ValueError as exc:
         raise ValueError("CLASSIFICATION_UNKNOWN") from exc
+
+
+def evidence_classification(context_snapshot: Mapping[str, Any] | None,
+                            floor: DataClassification) -> DataClassification:
+    """Highest classification among a contract's bounded enterprise evidence, never below ``floor``.
+
+    Every evidence item is parsed fail-closed, so one unknown or missing level refuses the whole contract.
+    """
+    levels = [floor]
+    extension = ((context_snapshot or {}).get("extensions") or {}).get("enterprise_evidence") or {}
+    for item in (extension.get("package") or {}).get("evidence") or []:
+        levels.append(parse_classification(item.get("classification")))
+    return max(levels, key=lambda level: level.rank)
 
 
 def lowest(*values: DataClassification) -> DataClassification:

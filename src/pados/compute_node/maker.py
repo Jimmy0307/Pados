@@ -23,7 +23,7 @@ from pados.compute_node.provider import (
 )
 from pados.compute_node.receipts import ReceiptLedger, node_execution_receipt
 from pados.enterprise import observability
-from pados.enterprise.classification import DataClassification, parse_classification
+from pados.enterprise.classification import DataClassification, evidence_classification
 from pados.execution.handoff import task_envelope
 from pados.execution.receipts import execution_receipt
 from pados.execution.safe_fs import workspace_fs
@@ -59,11 +59,7 @@ def batch_spec(contract: WorkContract) -> tuple[NodeCapability, list[dict[str, A
 
 def contract_classification(contract: WorkContract, floor: DataClassification) -> DataClassification:
     """Highest classification among the contract's bounded enterprise evidence (fail-closed parse)."""
-    levels = [floor]
-    extension = ((contract.context_snapshot or {}).get("extensions") or {}).get("enterprise_evidence") or {}
-    for item in (extension.get("package") or {}).get("evidence") or []:
-        levels.append(parse_classification(item.get("classification")))
-    return max(levels, key=lambda level: level.rank)
+    return evidence_classification(contract.context_snapshot, floor)
 
 
 def contract_prompt(contract: WorkContract) -> list[dict[str, str]]:

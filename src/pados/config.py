@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     # A proof DB for P6.10 acceptance must not implicitly enable the separate Product Loop runtime.
     product_loop_enabled: bool = Field(default=False, alias="PADOS_PRODUCT_LOOP_ENABLED")
     product_loop_provider: str = Field(default="AUTO", alias="PADOS_PRODUCT_LOOP_PROVIDER")
+    # RC2 SEC-2: the most sensitive project data the Product Loop may send to a cloud worker. Parsed fail-closed at
+    # dispatch; RESTRICTED is never released, whatever is configured.
+    product_loop_cloud_max_classification: str = Field(
+        default="INTERNAL", alias="PADOS_PRODUCT_LOOP_CLOUD_MAX_CLASSIFICATION"
+    )
     # Optional Enterprise Capability Pack manifest file; unset never affects Core readiness.
     enterprise_config: str = Field(default="", alias="PADOS_ENTERPRISE_CONFIG")
     # Optional Local Compute Node registry; unset never affects Core readiness.

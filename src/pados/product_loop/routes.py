@@ -200,10 +200,13 @@ def build_product_loop_service(settings: Settings) -> ProductLoopService:
     proof_service = StateProofService(proof_engine, ObjectStore(object_root))
     from pados.connectivity.provider_gate import gate_product_loop_maker
 
+    gateway = P6_19BStateGateway(proof_service, operational_engine)
+    # RC2 SEC-2: the cloud Maker reads each project's recorded classification before anything leaves the host.
+    maker = CodexCliMaker(workspace_root, settings=settings, classification_source=gateway.project_classification)
     return ProductLoopService(
         # Requirement-aware connectivity gate only when PADOS_CONNECTIVITY_CONFIG is set.
-        maker=gate_product_loop_maker(CodexCliMaker(workspace_root, settings=settings), settings),
+        maker=gate_product_loop_maker(maker, settings),
         validator=FileValidator(),
-        state_gateway=P6_19BStateGateway(proof_service, operational_engine),
+        state_gateway=gateway,
         approved_workspace_root=workspace_root,
     )

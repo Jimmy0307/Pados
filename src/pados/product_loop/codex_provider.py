@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from pados.enterprise.classification import DataClassification, evidence_classification, parse_classification
 from pados.execution.context import redact
 from pados.execution.handoff import task_envelope
 from pados.execution.receipts import execution_receipt
@@ -39,6 +40,7 @@ _SAFE_WINDOWS_PROVIDER_ENV = {
     "PROGRAMFILES", "PROGRAMFILES(X86)", "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE", "WINDIR",
 }
 _SECRET_REFERENCE = re.compile(r"secretref://[^\s\"']+")
+_DEFAULT_CLOUD_CEILING = "INTERNAL"
 
 
 class CodexCliMaker:
@@ -57,12 +59,14 @@ class CodexCliMaker:
         runner: Callable[..., Any] = subprocess.run,
         worker_discovery: Callable[[Any], Mapping[str, WorkerSpec]] = discover_workers,
         executable_resolver: Callable[[], str | None] = lambda: shutil.which("codex"),
+        classification_source: Callable[[str], object] | None = None,
     ) -> None:
         self.approved_root = approved_root.resolve()
         self.settings = settings
         self.runner = runner
         self.worker_discovery = worker_discovery
         self.executable_resolver = executable_resolver
+        self.classification_source = classification_source
 
     async def make(self, contract: WorkContract, *, run_id: str, attempt: int) -> RuntimeResult:
         started = _now()
@@ -76,6 +80,7 @@ class CodexCliMaker:
             allowed = set(contract.scope.allowed_paths)
             if not expected or expected != allowed:
                 raise PermissionError("WORK_PACKAGE_PATH_SCOPE_MISMATCH")
+            self._assert_cloud_egress_permitted(contract)
 
             workers = self.worker_discovery(self.settings)
             selection = select_product_loop_provider(
@@ -186,6 +191,27 @@ class CodexCliMaker:
                 failure=FailureClass.RUNTIME_FAILURE,
                 retryable=True,
             )
+
+    def _assert_cloud_egress_permitted(self, contract: WorkContract) -> None:
+        """RC2 SEC-2: refuse before anything reaches the cloud unless the data is classified within the ceiling.
+
+        The floor is the project's recorded classification; bundled enterprise evidence can only raise it. Missing
+        or unknown levels fail closed, and RESTRICTED never leaves the host.
+        """
+        if self.classification_source is None:
+            raise PermissionError("CLOUD_EGRESS_CLASSIFICATION_UNAVAILABLE")
+        try:
+            ceiling = parse_classification(
+                getattr(self.settings, "product_loop_cloud_max_classification", None) or _DEFAULT_CLOUD_CEILING
+            )
+            project = parse_classification(self.classification_source(contract.intent.scope_id))
+            level = evidence_classification(contract.context_snapshot, project)
+        except ValueError as exc:
+            raise PermissionError(f"CLOUD_EGRESS_CLASSIFICATION_REFUSED {exc}") from exc
+        if ceiling is DataClassification.RESTRICTED:
+            raise PermissionError("CLOUD_EGRESS_CEILING_INVALID")
+        if not ceiling.permits(level):
+            raise PermissionError(f"CLOUD_EGRESS_CLASSIFICATION_REFUSED {level.value}")
 
     def _argv(self, workspace: Path) -> list[str]:
         executable = self.executable_resolver()
