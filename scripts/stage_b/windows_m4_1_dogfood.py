@@ -86,6 +86,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--m3-report", type=Path, default=None)
     parser.add_argument("--expected-profile-id", default=None)
     args = parser.parse_args(argv)
+    # stdout carries only the machine-readable summary; structured diagnostics (including the in-process node's
+    # per-request log lines) go to stderr.
+    import structlog
+
+    structlog.configure(logger_factory=structlog.PrintLoggerFactory(sys.stderr))
     if args.m3_report is not None and args.expected_profile_id is None:
         print("REFUSED: --m3-report needs --expected-profile-id (the id the named report must contain)")
         return 2

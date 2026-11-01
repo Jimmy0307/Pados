@@ -30,6 +30,7 @@ from pados.compute_node.identity_providers import (
 )
 from pados.compute_node.manifest import ModelAvailability, NodeCapability, NodeDescriptor, NodeState
 from pados.enterprise import observability
+from pados.operability.context import downstream_headers
 from pados.enterprise.classification import DataClassification
 from pados.enterprise.secrets import (
     EnvironmentSecretResolver,
@@ -188,8 +189,10 @@ class NodeClient:
     def _request(self, method: str, path: str, *, json_body: dict[str, Any] | None = None,
                  params: dict[str, str] | None = None, raw: bool = False, timeout: float | None = None) -> Any:
         try:
+            # OP-001: the caller's request context travels with the call; it never replaces the credential.
             response = self._http.request(method, path, json=json_body, params=params,
-                                          headers={"authorization": f"Bearer {self._credential}"},
+                                          headers={**downstream_headers(),
+                                                   "authorization": f"Bearer {self._credential}"},
                                           timeout=timeout or self._timeout)
         except httpx.TimeoutException:
             raise NodeClientError("NODE_TIMEOUT") from None

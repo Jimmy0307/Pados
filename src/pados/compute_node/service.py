@@ -250,4 +250,7 @@ def create_node_app(runtime: NodeRuntime) -> FastAPI:
         return Response(content=payload, media_type="application/octet-stream",
                         headers={"X-PADOS-Artifact-SHA256": artifact_id.removeprefix("sha256:")})
 
+    from pados.operability.http import install_operability
+
+    install_operability(app, component="compute_node")
     return app

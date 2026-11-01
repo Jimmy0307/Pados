@@ -35,6 +35,7 @@ from pados.memory.retrieval import RetrievalRequest, search_memory
 from pados.operations.routes import register_operations_routes
 from pados.operations.service import system_health
 from pados.product_loop.routes import register_product_loop_routes
+from pados.operability.http import install_operability
 from pados.remote.app import mount_remote
 from pados.web import service as web_service
 from pados.web.routes import register_web_routes
@@ -672,6 +673,8 @@ def create_app() -> FastAPI:
     register_graph_routes(app, settings)
     register_product_loop_routes(app, settings)
     mount_remote(app, settings)
+    # OP-001: outermost layer, so the request context and error envelope also cover every route above.
+    install_operability(app, component="api")
     return app
 
 
