@@ -69,6 +69,12 @@ def context_summary(session: Session, project_id: str) -> dict[str, object]:
     return {"project_id": project_id, "memory_counts": [dict(row) for row in rows]}
 
 
+def _same_content(row: Any, values: Mapping[str, Any], fields: tuple[str, ...], code: str) -> None:
+    """OP-004: a reused idempotency key is a replay only when the content is the same; otherwise a conflict."""
+    if any(str(row.get(field)) != str(values.get(field)) for field in fields):
+        raise ValueError(code)
+
+
 def add_message(session: Session, payload: Mapping[str, object]) -> dict[str, object]:
     row = session.execute(
         text(
@@ -81,6 +87,7 @@ def add_message(session: Session, payload: Mapping[str, object]) -> dict[str, ob
         ),
         dict(payload),
     ).mappings().one()
+    _same_content(row, payload, ("body", "author"), "MESSAGE_IDEMPOTENCY_CONTENT_CONFLICT")
     append_sync_event(session, str(row["project_id"]), "CONTROL_MESSAGE_CAPTURED", {"message_id": str(row["id"])})
     return dict(row)
 
@@ -114,6 +121,7 @@ def create_work_request(session: Session, payload: Mapping[str, object]) -> dict
         ),
         values,
     ).mappings().one()
+    _same_content(row, values, ("title", "body"), "WORK_REQUEST_IDEMPOTENCY_CONTENT_CONFLICT")
     append_sync_event(session, str(row["project_id"]), "WORK_REQUEST_CAPTURED", {"request_id": str(row["id"])})
     return dict(row)
 
@@ -199,11 +207,11 @@ def create_approval(session: Session, payload: Mapping[str, object]) -> dict[str
     raw_subject = payload.get("subject")
     if raw_subject is None:
         row = session.execute(text(_INSERT_UNBOUND_APPROVAL), values).mappings().one()
+        _same_content(row, values, ("proposal_hash", "proposal_summary"), "APPROVAL_IDEMPOTENCY_CONTENT_CONFLICT")
     else:
         values = _bound_subject_values(session, values, raw_subject)
         row = session.execute(text(_INSERT_BOUND_APPROVAL), values).mappings().one()
-        if str(row["proposal_hash"]) != values["proposal_hash"]:
-            raise ValueError("APPROVAL_IDEMPOTENCY_CONTENT_CONFLICT")
+        _same_content(row, values, ("proposal_hash", "proposal_summary"), "APPROVAL_IDEMPOTENCY_CONTENT_CONFLICT")
     append_sync_event(session, str(row["project_id"]), "APPROVAL_CREATED", {"approval_id": str(row["id"])})
     return dict(row)
 

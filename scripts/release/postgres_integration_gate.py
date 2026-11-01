@@ -33,7 +33,7 @@ PROOF = "pados_ci_rc2_proof"
 MIGRATION = "pados_fc_migration_ci"   # migration suites require a pados_fc_migration_* database
 DATABASES = (OPS, D4, RESIDUAL, PROOF, MIGRATION)
 # Minimum passing tests per suite (the RC2 acceptance counts), so a silently shrunken suite fails the gate.
-MIN_TESTS = {"d1-binding": 27, "d4-handoff": 14, "residual": 8, "proof-lane": 17, "p6-11": 7, "migration": 5}
+MIN_TESTS = {"d1-binding": 30, "d4-handoff": 14, "residual": 11, "proof-lane": 17, "p6-11": 7, "migration": 5}
 
 
 def _connection() -> dict[str, str]:
@@ -103,7 +103,8 @@ def main(argv: list[str] | None = None) -> int:
         # The approval-binding database also carries SEC-4 (approval lifecycle) and EXEC-1 (no-executor refusal).
         "d1-binding": (["tests/integration/test_rc2_approval_binding_postgres.py",
                         "tests/integration/test_sec4_approval_lifecycle_postgres.py",
-                        "tests/integration/test_rc2_exec1_no_executor_route_postgres.py"],
+                        "tests/integration/test_rc2_exec1_no_executor_route_postgres.py",
+                        "tests/integration/test_op004_idempotency_postgres.py"],
                        {"PADOS_RC2_APPROVAL_BINDING_TEST_DATABASE_URL": _url(connection, OPS)}),
         # SEC-9 (model call outside the routing transaction) uses the D4 handoff database.
         "d4-handoff": (["tests/integration/test_rc2_loop_model_handoff_postgres.py",
@@ -111,7 +112,8 @@ def main(argv: list[str] | None = None) -> int:
                        {"PADOS_RC2_D4_TEST_DATABASE_URL": _url(connection, D4)}),
         # The residual database also carries the OP-001 trace continuity suite (API -> TaskLoop -> job -> receipt).
         "residual": (["tests/integration/test_residual_plan_amendment_postgres.py",
-                      "tests/integration/test_op001_trace_continuity_postgres.py"],
+                      "tests/integration/test_op001_trace_continuity_postgres.py",
+                      "tests/integration/test_op004_lease_postgres.py"],
                      {"PADOS_RESIDUAL_AMENDMENT_TEST_DATABASE_URL": _url(connection, RESIDUAL)}),
         "proof-lane": (["tests/integration/test_final_convergence_product_loop_postgres.py",
                         "tests/integration/test_final_closure_approval_binding.py",

@@ -33,6 +33,7 @@ from pados.operability.context import (
     current_context,
     new_id,
 )
+from pados.operability.resilience import DEADLINE_HEADER, deadline_from_header, deadline_scope
 from pados.operability.errors import (
     GENERIC_CODE_BY_STATUS,
     SAFE_MESSAGE_BY_CATEGORY,
@@ -111,7 +112,8 @@ def install_operability(app: FastAPI, *, component: str) -> None:
         context = context_from_headers(request.headers.get(REQUEST_ID_HEADER),
                                        request.headers.get(CORRELATION_ID_HEADER), component=component)
         started = time.perf_counter()
-        with bind_context(context):
+        deadline = deadline_from_header(request.headers.get(DEADLINE_HEADER))  # OP-004: optional parent budget
+        with bind_context(context), deadline_scope(deadline):
             try:
                 response = await call_next(request)
             except Exception as exc:  # noqa: BLE001 - every failure leaves as a safe envelope, never a bare 500

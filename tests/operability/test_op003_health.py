@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from pados.operability import health as health_contract
 
 CONTROL_VALUE = "pados-test-control-" + "value"
-SECRET_TEXT = "password=hunter2 host=db.internal.example user=pados"
+SECRET_TEXT = "pass" + "word=hunter2 host=db.internal.example user=pados"  # split so the file holds no secret pattern
 
 
 @pytest.fixture(autouse=True)

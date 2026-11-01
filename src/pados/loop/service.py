@@ -522,6 +522,56 @@ def start_loop(session: Session, loop_id: str, *, owner_instance: str = "pados-c
     return dict(row)
 
 
+LOOP_LEASE_HELD = "LOOP_LEASE_HELD"
+
+
+def _hold_lease(session: Session, loop: dict[str, Any], owner_instance: str | None) -> None:
+    """OP-004: renew the loop's lease on every iteration (heartbeat and expiry), observably.
+
+    Without an owner the current holder's lease is renewed, which keeps every existing caller working. With an explicit
+    owner the lease is taken when it is free, lapsed or already that owner's; while another owner holds a live lease
+    the iteration is refused before anything is selected, routed or published (fencing).
+    """
+    loop_id = str(loop["id"])
+    if owner_instance is None:
+        row = session.execute(text(
+            """
+            WITH previous AS (
+              SELECT loop_id, lease_expires_at < now() AS lapsed FROM task_loop_leases
+              WHERE loop_id = CAST(:id AS uuid) FOR UPDATE
+            )
+            UPDATE task_loop_leases AS lease
+            SET heartbeat_at = now(), lease_expires_at = now() + interval '5 minutes'
+            FROM previous WHERE lease.loop_id = previous.loop_id
+            RETURNING lease.owner_instance, previous.lapsed
+            """), {"id": loop_id}).mappings().first()
+        if row is None:
+            _LOG.warning("task_loop.lease.missing", loop_id=loop_id)
+            return
+        _LOG.info("task_loop.lease.renewed", owner=row["owner_instance"], recovered_after_lapse=bool(row["lapsed"]))
+        return
+    row = session.execute(text(
+        """
+        INSERT INTO task_loop_leases(loop_id, owner_instance, lease_expires_at)
+        VALUES (CAST(:id AS uuid), :owner, now() + interval '5 minutes')
+        ON CONFLICT (loop_id) DO UPDATE
+        SET owner_instance = EXCLUDED.owner_instance,
+            lease_acquired_at = CASE WHEN task_loop_leases.owner_instance = EXCLUDED.owner_instance
+                                     THEN task_loop_leases.lease_acquired_at ELSE now() END,
+            lease_expires_at = now() + interval '5 minutes',
+            heartbeat_at = now()
+        WHERE task_loop_leases.lease_expires_at < now() OR task_loop_leases.owner_instance = EXCLUDED.owner_instance
+        RETURNING owner_instance
+        """), {"id": loop_id, "owner": owner_instance}).mappings().first()
+    if row is None:
+        holder = session.execute(text("SELECT owner_instance FROM task_loop_leases WHERE loop_id = CAST(:id AS uuid)"),
+                                 {"id": loop_id}).scalar()
+        _LOG.warning("task_loop.lease.refused", outcome="rejected", error_code=LOOP_LEASE_HELD, owner=owner_instance,
+                     holder=holder)
+        raise PermissionError(LOOP_LEASE_HELD)
+    _LOG.info("task_loop.lease.held", owner=owner_instance)
+
+
 def run_one_iteration(
     session: Session,
     *,
@@ -530,13 +580,14 @@ def run_one_iteration(
     artifact_root: Path,
     idempotency_key: str,
     defer_model_execution: bool = False,
+    owner_instance: str | None = None,
 ) -> dict[str, Any]:
-    """One TaskLoop iteration, traced under the caller's operation (OP-001); behaviour is unchanged."""
+    """One TaskLoop iteration, traced under the caller's operation (OP-001) and holding the loop lease (OP-004)."""
     with operation_scope("task_loop", run_id=loop_id):
         try:
             result = _run_one_iteration(session, loop_id=loop_id, settings=settings, artifact_root=artifact_root,
                                         idempotency_key=idempotency_key,
-                                        defer_model_execution=defer_model_execution)
+                                        defer_model_execution=defer_model_execution, owner_instance=owner_instance)
         except Exception as exc:
             _LOG.warning("task_loop.iteration.refused", outcome="rejected", error_code=error_code_of(exc))
             raise
@@ -553,8 +604,11 @@ def _run_one_iteration(
     artifact_root: Path,
     idempotency_key: str,
     defer_model_execution: bool = False,
+    owner_instance: str | None = None,
 ) -> dict[str, Any]:
     loop = get_loop_for_update(session, loop_id)
+    if loop["status"] == "RUNNING":
+        _hold_lease(session, loop, owner_instance)
     if loop["status"] != "RUNNING":
         previous = session.execute(
             text(
@@ -763,16 +817,18 @@ def _deferred_model_job(session: Session, loop_id: str) -> str | None:
 
 
 def run_step(
-    settings: Any, *, loop_id: str, artifact_root: Path, idempotency_key: str, session_factory: Any = None
+    settings: Any, *, loop_id: str, artifact_root: Path, idempotency_key: str, session_factory: Any = None,
+    owner_instance: str | None = None,
 ) -> dict[str, Any]:
     """``_run_step`` under the caller's operation, so the deferred model call is traced with it (OP-001)."""
     with operation_scope("task_loop", run_id=loop_id):
         return _run_step(settings, loop_id=loop_id, artifact_root=artifact_root, idempotency_key=idempotency_key,
-                         session_factory=session_factory)
+                         session_factory=session_factory, owner_instance=owner_instance)
 
 
 def _run_step(
-    settings: Any, *, loop_id: str, artifact_root: Path, idempotency_key: str, session_factory: Any = None
+    settings: Any, *, loop_id: str, artifact_root: Path, idempotency_key: str, session_factory: Any = None,
+    owner_instance: str | None = None,
 ) -> dict[str, Any]:
     """One TaskLoop step for an operator surface (RC2 SEC-9).
 
@@ -784,7 +840,8 @@ def _run_step(
     scope = session_factory or session_scope
     with scope(settings) as session:
         result = run_one_iteration(session, loop_id=loop_id, settings=settings, artifact_root=artifact_root,
-                                   idempotency_key=idempotency_key, defer_model_execution=True)
+                                   idempotency_key=idempotency_key, defer_model_execution=True,
+                                   owner_instance=owner_instance)
         deferred = _deferred_model_job(session, loop_id)
     if deferred is None:
         return result

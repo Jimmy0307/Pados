@@ -42,6 +42,7 @@ from pados.memory import packet as context_packet
 from pados.memory.retrieval import RetrievalRequest
 from pados.memory.security import assert_no_secret
 from pados.operability.context import operation_scope, trace_fields
+from pados.operability.resilience import DeadlineExceeded, capped_timeout
 from pados.providers.execution_binding import ExecutionBindingRefused, ExecutionIntent
 from pados.providers.factory import build_chat_provider
 from pados.providers.ollama import MeasuredChatProvider
@@ -940,8 +941,18 @@ def _call_model(call: _ModelCall, *, job: Mapping[str, Any], handoff_path: Path,
     """Make the one bounded model call; touches no database. Returns the terminal result to persist."""
     provider = call.provider
     try:
+        # OP-004: the job keeps its own timeout; a caller's remaining budget can only shorten it. The provider takes
+        # whole seconds, so less than one second left is refused rather than rounded past the budget.
+        timeout = int(capped_timeout(call.timeout))
+        if timeout < 1:
+            raise DeadlineExceeded()
+    except DeadlineExceeded:
+        return {"status": "TIMED_OUT", "error_code": "PARENT_DEADLINE_EXCEEDED", "validation_status": "FAILED",
+                "usage_metadata": {"measured_execution": None},
+                "result_summary": "The caller's deadline had passed; the model was not called."}
+    try:
         prompt = _model_prompt(handoff_path, job)
-        model_text = _run_model_chat(provider, prompt, call.timeout)
+        model_text = _run_model_chat(provider, prompt, timeout)
         evidence = {"measured_execution": getattr(provider, "last_evidence", None)}
         stdout_path = artifact_dir / "stdout.txt"
         stdout_path.write_text(stable_json(_model_stdout_contract(str(model_text))), encoding="utf-8")
