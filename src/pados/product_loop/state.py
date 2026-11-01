@@ -182,7 +182,17 @@ class P6_19BStateGateway:
                 ),
                 {"approval_id": str(approval_ref)},
             ).mappings().first()
-        check_product_approval(None if row is None else dict(row), scope_id=scope_id, proposal_hash=proposal_hash)
+        with self.proof_service._session() as proof_session:
+            consumed = proof_session.execute(
+                text(
+                    "SELECT 1 FROM state_proof_semantic_audit "
+                    "WHERE approval_ref = :approval_ref AND outcome = 'COMMITTED' LIMIT 1"
+                ),
+                {"approval_ref": str(approval_ref)},
+            ).first() is not None
+        check_product_approval(
+            None if row is None else dict(row), scope_id=scope_id, proposal_hash=proposal_hash, consumed=consumed
+        )
 
     def project_classification(self, project_id: str) -> str | None:
         """The registered project's recorded classification (RC2 SEC-2), or None when it cannot be read."""
@@ -334,6 +344,7 @@ class InMemoryP6_19BStateGateway:
         self.projections: dict[str, dict[str, Any]] = {}
         self.read_index: dict[str, dict[str, Any]] = {}
         self.approvals: dict[str, dict[str, str]] = {}
+        self.committed_approvals: set[str] = set()
 
     def semantic_context(self, scope_id: str) -> dict[str, Any]:
         return {"scope_version": self.versions.get(scope_id, 0)}
@@ -349,7 +360,8 @@ class InMemoryP6_19BStateGateway:
 
     def verify_approval(self, approval_ref: str, scope_id: str, proposal_hash: str) -> None:
         row = self.approvals.get(approval_ref)
-        check_product_approval(None if row is None else dict(row), scope_id=scope_id, proposal_hash=proposal_hash)
+        check_product_approval(None if row is None else dict(row), scope_id=scope_id, proposal_hash=proposal_hash,
+                               consumed=approval_ref in self.committed_approvals)
 
     async def persist_run_context(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         ref = self.object_store.put_json(dict(payload), object_kind="OTHER")
@@ -420,6 +432,8 @@ class InMemoryP6_19BStateGateway:
         current = self.versions.get(scope_id, 0)
         if current == receipt.input_scope_version:
             self.versions[scope_id] = current + 1
+            if contract.approval_ref is not None:
+                self.committed_approvals.add(contract.approval_ref)
             result: dict[str, Any] = {
                 "status": "COMMITTED",
                 "result_id": receipt.receipt_id,

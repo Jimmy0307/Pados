@@ -133,3 +133,27 @@ def test_gateway_reads_the_registered_project_classification(p6_19b_product_serv
     assert gateway.project_classification(scope_id) == "confidential"
     assert gateway.project_classification(str(uuid4())) is None
     assert gateway.project_classification("not-a-uuid") is None
+
+
+def test_a_committed_approval_cannot_dispatch_again_after_a_restart(p6_19b_product_service, tmp_path: Path) -> None:
+    """Review F1: after a restart the in-process idempotency cache is empty; the committed approval is not reusable."""
+    service, engine = p6_19b_product_service
+    workspace = Path(service.maker.approved_root)
+    scope_id = _registered_scope(workspace)
+    request = _request(workspace, scope_id=scope_id, content="def result():\n    return 'good'\n")
+    approved = _with_approval(request, _approval(scope_id, request))
+    assert asyncio.run(service.execute(approved)).status.value == "COMMITTED"
+    calls: list[int] = []
+    inner = service.maker.make
+
+    async def counting(contract, *, run_id, attempt):
+        calls.append(attempt)
+        return await inner(contract, run_id=run_id, attempt=attempt)
+
+    restarted = ProductLoopService(maker=service.maker, validator=FileValidator(), state_gateway=P6_19BStateGateway(
+        StateProofService(engine, ObjectStore(tmp_path / "objects-restarted"))))
+    restarted.maker.make = counting
+    with pytest.raises(ProductAuthorizationError, match="APPROVAL_CONSUMED"):
+        asyncio.run(restarted.execute(approved))
+    assert calls == []
+    assert len(_audit(engine, scope_id)) == 1

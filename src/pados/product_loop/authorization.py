@@ -40,9 +40,11 @@ APPROVAL_REF_INVALID = "APPROVAL_REF_INVALID"
 APPROVAL_REF_NOT_BOUND_TO_SCOPE = "APPROVAL_REF_NOT_BOUND_TO_SCOPE"
 APPROVAL_REF_NOT_APPROVED = "APPROVAL_REF_NOT_APPROVED"
 APPROVAL_SUBJECT_MISMATCH = "APPROVAL_SUBJECT_MISMATCH"
+APPROVAL_CONSUMED = "APPROVAL_CONSUMED"
 PRODUCT_DISPATCH_KIND = "pados.product-loop-dispatch.v1"
-# Server-filled or request-only fields that do not define the operation an approval names.
-_NOT_OPERATION_FIELDS = frozenset({"authorized", "approval_ref", "context"})
+# Request-only fields that do not define the operation an approval names. A caller-supplied ``context`` is part of
+# the operation (the service replaces it with its own bounded context only when an approved workspace is configured).
+_NOT_OPERATION_FIELDS = frozenset({"authorized", "approval_ref"})
 
 MAX_SCOPE_ID_LENGTH = 160
 
@@ -91,14 +93,16 @@ def product_dispatch_hash(request: GoalRequest) -> str:
     """Canonical SHA-256 of the operation a Product Loop approval authorizes; it is the approval's proposal_hash.
 
     It covers everything the caller chose (goal, scope, workspace, file changes, acceptance criteria, revisions,
-    attempt budget, human gate and idempotency key), so an approval can neither be reused for a different operation
+    attempt budget, human gate, idempotency key and any supplied context), so an approval can neither be reused for a different operation
     nor replayed under a new idempotency key. The kind marker keeps it distinct from every other proposal hash.
     """
     operation = request.model_dump(mode="json", exclude=set(_NOT_OPERATION_FIELDS))
     return canonical_hash({"kind": PRODUCT_DISPATCH_KIND, "operation": operation})
 
 
-def check_product_approval(row: Mapping[str, Any] | None, *, scope_id: str, proposal_hash: str) -> None:
+def check_product_approval(
+    row: Mapping[str, Any] | None, *, scope_id: str, proposal_hash: str, consumed: bool = False
+) -> None:
     """Refuse unless ``row`` is an APPROVED approval in this scope that names exactly this operation.
 
     The hash is domain-separated (``PRODUCT_DISPATCH_KIND``), so an approval of anything else (a WORK_ROUTE subject,
@@ -110,6 +114,8 @@ def check_product_approval(row: Mapping[str, Any] | None, *, scope_id: str, prop
         raise ProductAuthorizationError(APPROVAL_SUBJECT_MISMATCH)
     if row.get("status") != "APPROVED":
         raise ProductAuthorizationError(APPROVAL_REF_NOT_APPROVED)
+    if consumed:  # one approval, one committed operation: a replay after a restart dispatches nothing
+        raise ProductAuthorizationError(APPROVAL_CONSUMED)
 
 
 def resolve_approved_workspace_root(requested: str, approved_root: Path | str) -> Path:

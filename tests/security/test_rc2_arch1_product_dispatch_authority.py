@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from pados.product_loop.authorization import (
+    APPROVAL_CONSUMED,
     APPROVAL_REF_NOT_APPROVED,
     APPROVAL_SUBJECT_MISMATCH,
     ProductAuthorizationError,
@@ -117,10 +118,26 @@ def test_an_approval_bound_to_this_exact_operation_dispatches_and_commits(tmp_pa
     assert report.contracts[0].approval_ref == ref
 
 
-def test_the_dispatch_hash_names_the_operation_not_the_server_context_or_flag(tmp_path: Path) -> None:
+def test_the_dispatch_hash_names_the_whole_operation_but_not_the_request_flags(tmp_path: Path) -> None:
     request = _request(tmp_path)
     assert product_dispatch_hash(request) == product_dispatch_hash(
-        request.model_copy(update={"context": {"server": "filled"}, "approval_ref": "x", "authorized": False}))
+        request.model_copy(update={"approval_ref": "x", "authorized": False}))
     for change in ({"goal": "another goal"}, {"scope_id": "scope-other"}, {"max_attempts": 2},
-                   {"human_gate": True}, {"idempotency_key": "another-key"}):
+                   {"human_gate": True}, {"idempotency_key": "another-key"},
+                   # A caller-supplied context reaches the contract when no approved workspace is configured.
+                   {"context": {"caller": "supplied"}}):
         assert product_dispatch_hash(request.model_copy(update=change)) != product_dispatch_hash(request)
+
+
+def test_a_committed_approval_cannot_dispatch_again_after_a_restart(tmp_path: Path) -> None:
+    """Review F1: the in-process idempotency cache is gone after a restart; the committed approval is not reusable."""
+    service, gateway, maker = _service(tmp_path)
+    request = _request(tmp_path)
+    approved = request.model_copy(update={"approval_ref": gateway.grant_approval(
+        request.scope_id, product_dispatch_hash(request))})
+    assert asyncio.run(service.execute(approved)).status == ProductLoopStatus.COMMITTED
+    restarted = ProductLoopService(maker=maker, validator=FileValidator(), state_gateway=gateway)
+    with pytest.raises(ProductAuthorizationError) as refused:
+        asyncio.run(restarted.execute(approved))
+    assert refused.value.code == APPROVAL_CONSUMED
+    assert maker.calls == 1 and gateway.versions[request.scope_id] == 1

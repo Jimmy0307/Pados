@@ -88,9 +88,10 @@ class Settings(BaseSettings):
     product_loop_enabled: bool = Field(default=False, alias="PADOS_PRODUCT_LOOP_ENABLED")
     product_loop_provider: str = Field(default="AUTO", alias="PADOS_PRODUCT_LOOP_PROVIDER")
     # RC2 SEC-2: the most sensitive project data the Product Loop may send to a cloud worker. Parsed fail-closed at
-    # dispatch; RESTRICTED is never released, whatever is configured.
+    # dispatch; RESTRICTED is never released, whatever is configured. Projects default to ``internal``, so by default
+    # only a project explicitly classified PUBLIC is released; raising the ceiling is an operator decision.
     product_loop_cloud_max_classification: str = Field(
-        default="INTERNAL", alias="PADOS_PRODUCT_LOOP_CLOUD_MAX_CLASSIFICATION"
+        default="PUBLIC", alias="PADOS_PRODUCT_LOOP_CLOUD_MAX_CLASSIFICATION"
     )
     # Optional Enterprise Capability Pack manifest file; unset never affects Core readiness.
     enterprise_config: str = Field(default="", alias="PADOS_ENTERPRISE_CONFIG")

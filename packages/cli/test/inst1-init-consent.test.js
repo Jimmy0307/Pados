@@ -38,17 +38,17 @@ for (const extra of [[], ['--yes']]) {
   });
 }
 
-test('init migrates an existing installation forward only with explicit consent', () => {
+test('init migrates existing data forward only with the dedicated --migrate consent', () => {
   const { unconsentedMigration } = require('../lib/commands/init');
   const upgrade = { status: 'UPGRADE_AVAILABLE', lanes: [
     { lane: 'operational', database: 'pados', state: 'UPGRADE_AVAILABLE', revisions: ['20261010_0018'],
       target_revision: '20261101_0020' },
     { lane: 'corpus', database: 'pados_corpus', state: 'CURRENT' }] };
-  assert.deepEqual(unconsentedMigration(upgrade, { existing: true, flags: {} }),
-    ['operational (pados): 20261010_0018 -> 20261101_0020']);
-  assert.equal(unconsentedMigration(upgrade, { existing: true, flags: { yes: true } }), null);
-  assert.equal(unconsentedMigration(upgrade, { existing: false, flags: {} }), null, 'a fresh install has no data');
+  assert.deepEqual(unconsentedMigration(upgrade, {}), ['operational (pados): 20261010_0018 -> 20261101_0020']);
+  assert.deepEqual(unconsentedMigration(upgrade, { yes: true }), ['operational (pados): 20261010_0018 -> 20261101_0020'],
+    '--yes confirms disk use only and never migrates data');
+  assert.equal(unconsentedMigration(upgrade, { migrate: true }), null);
   const fresh = { status: 'UNINITIALIZED', lanes: [{ lane: 'operational', state: 'UNINITIALIZED' },
     { lane: 'corpus', state: 'DATABASE_MISSING' }] };
-  assert.equal(unconsentedMigration(fresh, { existing: true, flags: {} }), null, 'empty databases hold no data to migrate');
+  assert.equal(unconsentedMigration(fresh, {}), null, 'empty databases hold no data to migrate');
 });

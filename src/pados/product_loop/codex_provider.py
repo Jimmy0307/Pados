@@ -40,7 +40,7 @@ _SAFE_WINDOWS_PROVIDER_ENV = {
     "PROGRAMFILES", "PROGRAMFILES(X86)", "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE", "WINDIR",
 }
 _SECRET_REFERENCE = re.compile(r"secretref://[^\s\"']+")
-_DEFAULT_CLOUD_CEILING = "INTERNAL"
+_DEFAULT_CLOUD_CEILING = "PUBLIC"  # unlabelled projects default to internal
 
 
 class CodexCliMaker:

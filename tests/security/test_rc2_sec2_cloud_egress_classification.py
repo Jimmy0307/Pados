@@ -2,8 +2,9 @@
 
 The Codex CLI Maker sends the governed contract (with its bounded project context) to a cloud provider. Before the
 provider starts, the project's recorded classification and any bundled enterprise evidence must be known and within
-the configured cloud ceiling (``PADOS_PRODUCT_LOOP_CLOUD_MAX_CLASSIFICATION``, default INTERNAL). Unknown, missing,
-or over-ceiling data fails closed; RESTRICTED never leaves the host, whatever is configured.
+the configured cloud ceiling (``PADOS_PRODUCT_LOOP_CLOUD_MAX_CLASSIFICATION``, default PUBLIC: projects default to
+``internal``, so an unlabelled project is not released). Unknown, missing, or over-ceiling data fails closed;
+RESTRICTED never leaves the host, whatever is configured.
 """
 from __future__ import annotations
 
@@ -77,7 +78,7 @@ def test_a_ceiling_that_would_release_restricted_or_is_unknown_refuses_everythin
 def test_the_classification_is_read_for_the_contract_project(tmp_path: Path) -> None:
     calls: list[Any] = []
     asked: list[str] = []
-    result = _run(_maker(tmp_path, calls, source=lambda project: asked.append(project) or "internal"), tmp_path)
+    result = _run(_maker(tmp_path, calls, source=lambda project: asked.append(project) or "public"), tmp_path)
     assert asked == ["project-1"]
     assert result.status.value == "COMPLETED" and len(calls) == 1
 
@@ -85,7 +86,26 @@ def test_the_classification_is_read_for_the_contract_project(tmp_path: Path) -> 
 def test_data_within_the_default_ceiling_still_runs(tmp_path: Path) -> None:
     calls: list[Any] = []
     result = _run(_maker(tmp_path, calls, source=lambda _project: "public"), tmp_path,
-                  context_snapshot=_evidence("INTERNAL"))
+                  context_snapshot=_evidence("PUBLIC"))
+    assert result.status.value == "COMPLETED" and len(calls) == 1
+
+
+def test_an_unlabelled_project_is_not_released_by_default(tmp_path: Path) -> None:
+    """Review F2: PADOS records ``internal`` for a project nobody classified; the default ceiling is PUBLIC."""
+    calls: list[Any] = []
+    from pados.config import Settings
+
+    assert Settings(_env_file=None).product_loop_cloud_max_classification == "PUBLIC"
+    unlabelled = _run(_maker(tmp_path, calls, source=lambda _project: "internal"), tmp_path)
+    internal_evidence = _run(_maker(tmp_path, calls, source=lambda _project: "public"), tmp_path,
+                             context_snapshot=_evidence("INTERNAL"))
+    assert unlabelled.status.value == internal_evidence.status.value == "BLOCKED"
+    assert calls == []
+
+
+def test_an_operator_can_raise_the_ceiling_to_internal(tmp_path: Path) -> None:
+    calls: list[Any] = []
+    result = _run(_maker(tmp_path, calls, source=lambda _project: "internal", ceiling="INTERNAL"), tmp_path)
     assert result.status.value == "COMPLETED" and len(calls) == 1
 
 
