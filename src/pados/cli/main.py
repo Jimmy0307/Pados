@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -26,6 +27,7 @@ from pados.config import (
 )
 from pados.db import check_database, get_engine, session_scope
 from pados.logging_config import configure_logging, get_logger
+from pados.operability.context import bind_context, context_from_headers
 from pados.loop import service as loop_service
 from pados.loop.schemas import LoopCreate, TaskGoalCreate, TaskPlanCreate
 from pados.memory import packet as context_packet
@@ -166,6 +168,12 @@ def main(
 
     context.ensure_object(dict)
     context.obj["debug"] = debug
+    # OP-001: one operation context per command, from PADOS_REQUEST_ID / PADOS_CORRELATION_ID when they are safe
+    # identifiers, otherwise generated. It only traces (events, logs); it never authorizes or changes a command.
+    operation = context_from_headers(os.environ.get("PADOS_REQUEST_ID"), os.environ.get("PADOS_CORRELATION_ID"),
+                                     component="cli")
+    context.obj["request_id"] = operation.request_id
+    context.with_resource(bind_context(operation))
 
 
 def _run(command: list[str]) -> tuple[int, str]:

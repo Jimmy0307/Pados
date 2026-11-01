@@ -139,12 +139,15 @@ from pados.capability.seams import (
 )
 from pados.capability.task import QualityRequirement, TaskContract, validated_task
 from pados.capability.verification import VerificationEngine, VerificationResult
+from pados.logging_config import get_logger
+from pados.operability.context import error_code_of, operation_scope
 
 _CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
 _RUN_ID = re.compile(r"^[a-z0-9]{8,32}$")
 _DECISION_REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 _GENESIS = "0" * 64  # placeholder; ``chain`` links every receipt from the plan genesis
 NOT_EXECUTED = "NOT_EXECUTED_UPSTREAM_FAILED"
+_LOG = get_logger("pados.capability")
 
 
 class ExecutionStatus(StrEnum):
@@ -252,6 +255,27 @@ class CapabilityExecutor:
 
     def execute(self, plan: ExecutionPlan, task: TaskContract, *,
                 human_decision: Mapping[str, Any] | None = None) -> ExecutionResult:
+        """``_execute`` traced under the caller's operation (OP-001); behaviour, receipts and ledger are unchanged.
+
+        The trace is only logged, beside the plan and envelope hashes that identify the sealed ledger entry; it never
+        enters a receipt, the ledger, a grant or a policy decision.
+        """
+        with operation_scope("capability", run_id=getattr(task, "task_id", None)):
+            try:
+                result = self._execute(plan, task, human_decision=human_decision)
+            except Exception as exc:
+                _LOG.warning("capability.execution.refused", outcome="rejected", error_code=error_code_of(exc),
+                             plan_id=getattr(plan, "plan_id", None))
+                raise
+            failure = result.failure_code
+            _LOG.info("capability.execution.finished", outcome="completed" if failure is None else "failed",
+                      status=result.status.value, plan_id=result.plan_receipt.plan_id,
+                      envelope_hash=result.plan_receipt.envelope_hash,
+                      error_code=None if failure is None else failure.rsplit(":", 1)[-1])
+            return result
+
+    def _execute(self, plan: ExecutionPlan, task: TaskContract, *,
+                 human_decision: Mapping[str, Any] | None = None) -> ExecutionResult:
         task = validated_task(task)
         if plan_hash_of(plan) != plan.plan_hash or plan.plan_id != f"plan-{plan.plan_hash[:24]}":
             raise ExecutionRefused("PLAN_HASH_MISMATCH")

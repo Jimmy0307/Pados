@@ -25,8 +25,11 @@ keeps one receipt identity. Proof: `tests/integration/test_op001_trace_continuit
 TaskLoop → job → receipt chain, a retry under one correlation, a generated CLI trace, a traced refusal and an unhandled
 failure whose text never leaks.
 
-Not yet covered: the P7 capability executor's execution ledger (`src/pados/capability/executor.py`), CLI and
-healthcheck output (the CLI path persists a generated trace but does not print it), and the browser client (OP-007).
+| P7 capability executor (`CapabilityExecutor.execute`) | `component="capability"`. `capability.execution.finished` / `.refused` log the request id beside `plan_id` and `envelope_hash`, which identify the sealed execution-ledger entry. The ledger entry keeps exactly its sealed key set, with no request id inside. |
+| CLI (`pados …`) | Each command runs under one operation (`component="cli"`). It takes `PADOS_REQUEST_ID` / `PADOS_CORRELATION_ID` when they are safe identifiers, otherwise it generates them; the TaskLoop and job events of `pados loop step` carry it. Command output is unchanged. |
+| `scripts/healthcheck.ps1` | Sends `X-Request-ID: pados-healthcheck-<guid>`, records `request_id=…` in its log, and passes the same id to `pados doctor`. |
+
+Not yet covered: the browser client (OP-007).
 
 To find everything one request did: `SELECT event_type FROM task_loop_events WHERE payload_json->'trace'->>'request_id'
 = '<id>'`. Do the same for `worker_job_events`, and for `control_sync_events` refusals.

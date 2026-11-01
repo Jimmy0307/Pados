@@ -12,6 +12,25 @@ frozen as imported (byte-identical to commit `9220e5d`). This file only adds tra
   `runtime/artifacts/reports/pados-architecture-explorer-20261031/`. They are machine-local report artifacts, not
   product documentation. The audit's closing reference to that `index.html` points to the operator's local copy.
 
+## OP numbering: audit backlog vs remediation plan
+
+The audit backlog and the plan number two items differently. This round uses the **plan's** numbers for OP-001 to
+OP-007, because the plan is the implementation contract, and the **audit's** numbers for OP-008 to OP-010, which exist
+only in the audit.
+
+| This round | Plan item | Audit backlog item |
+|---|---|---|
+| OP-001 | Cross-boundary context and error contract | OP-001 |
+| OP-002 | Runtime validation gate | OP-002 |
+| OP-003 | Health semantic convergence | OP-003 |
+| OP-004 | Deadline, retry, idempotency and lease propagation | OP-004 |
+| OP-005 | Failure injection and recovery runbooks | **OP-006** (recovery path) |
+| OP-006 | CI operability gate | **OP-005** (CI proves no operability) |
+| OP-007 | Browser request deadline and stale action | OP-007 |
+| OP-008 | (not in plan) | OP-008 metrics and trace spans |
+| OP-009 | (not in plan) | OP-009 pack/adapter operability contract |
+| OP-010 | (not in plan) | OP-010 naming and documentation consistency |
+
 ## Residuals carried from PR #19 (still OPEN; merging PR #19 did not resolve them)
 
 | ID | Residual | Status | Why it stays open | Tracked with |

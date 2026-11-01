@@ -226,3 +226,43 @@ def test_outside_a_request_no_context_is_invented_for_downstream_calls() -> None
     with bind_context(OperationContext(request_id="r1", correlation_id="c1", component="task_loop")):
         assert downstream_headers() == {REQUEST_ID_HEADER: "r1", CORRELATION_ID_HEADER: "c1"}
     assert current_context() is None
+
+
+# --- CLI ----------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize(("env_id", "expected"), [("cli-req-1", "cli-req-1"), ("unsafe id\n", None)])
+def test_a_cli_command_runs_under_one_traced_operation(monkeypatch: pytest.MonkeyPatch, env_id: str,
+                                                       expected: str | None) -> None:
+    from typer.testing import CliRunner
+
+    from pados.cli.main import app
+
+    seen: dict[str, Any] = {}
+
+    @app.command("op001-context-probe", hidden=True)
+    def probe() -> None:
+        context = current_context()
+        seen["context"] = context
+
+    monkeypatch.setenv("PADOS_REQUEST_ID", env_id)
+    monkeypatch.setenv("PADOS_CORRELATION_ID", "cli-corr-1")
+    try:
+        result = CliRunner().invoke(app, ["op001-context-probe"])
+    finally:
+        app.registered_commands[:] = [c for c in app.registered_commands if c.name != "op001-context-probe"]
+    assert result.exit_code == 0, result.output
+    context = seen["context"]
+    assert context is not None and context.component == "cli" and context.correlation_id == "cli-corr-1"
+    if expected is None:
+        assert GENERATED.match(context.request_id)  # an unsafe value is replaced, never trusted
+    else:
+        assert context.request_id == expected
+    assert current_context() is None  # released when the command ends
+
+
+def test_the_healthcheck_sends_and_records_its_request_id() -> None:
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parents[2] / "scripts" / "healthcheck.ps1").read_text(encoding="utf-8")
+    assert '"X-Request-ID" = $RequestId' in script and '"request_id=$RequestId"' in script
+    assert "$env:PADOS_REQUEST_ID = $RequestId" in script
