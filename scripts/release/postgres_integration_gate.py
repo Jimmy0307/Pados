@@ -33,7 +33,7 @@ PROOF = "pados_ci_rc2_proof"
 MIGRATION = "pados_fc_migration_ci"   # migration suites require a pados_fc_migration_* database
 DATABASES = (OPS, D4, RESIDUAL, PROOF, MIGRATION)
 # Minimum passing tests per suite (the RC2 acceptance counts), so a silently shrunken suite fails the gate.
-MIN_TESTS = {"d1-binding": 16, "d4-handoff": 6, "residual": 3, "proof-lane": 17, "p6-11": 7, "migration": 5}
+MIN_TESTS = {"d1-binding": 27, "d4-handoff": 14, "residual": 3, "proof-lane": 17, "p6-11": 7, "migration": 5}
 
 
 def _connection() -> dict[str, str]:
@@ -100,9 +100,14 @@ def main(argv: list[str] | None = None) -> int:
     proof_lane = {"PADOS_TEST_OPERATIONAL_DATABASE": OPS, "PADOS_DB_NAME": PROOF, "PADOS_PRODUCT_DATABASE_NAME": PROOF}
     ops_lane = {"PADOS_TEST_OPERATIONAL_DATABASE": OPS, "PADOS_DB_NAME": OPS, "PADOS_PRODUCT_DATABASE_NAME": PROOF}
     suites: dict[str, tuple[list[str], dict[str, str]]] = {
-        "d1-binding": (["tests/integration/test_rc2_approval_binding_postgres.py"],
+        # The approval-binding database also carries SEC-4 (approval lifecycle) and EXEC-1 (no-executor refusal).
+        "d1-binding": (["tests/integration/test_rc2_approval_binding_postgres.py",
+                        "tests/integration/test_sec4_approval_lifecycle_postgres.py",
+                        "tests/integration/test_rc2_exec1_no_executor_route_postgres.py"],
                        {"PADOS_RC2_APPROVAL_BINDING_TEST_DATABASE_URL": _url(connection, OPS)}),
-        "d4-handoff": (["tests/integration/test_rc2_loop_model_handoff_postgres.py"],
+        # SEC-9 (model call outside the routing transaction) uses the D4 handoff database.
+        "d4-handoff": (["tests/integration/test_rc2_loop_model_handoff_postgres.py",
+                        "tests/integration/test_sec9_model_call_outside_transaction_postgres.py"],
                        {"PADOS_RC2_D4_TEST_DATABASE_URL": _url(connection, D4)}),
         "residual": (["tests/integration/test_residual_plan_amendment_postgres.py"],
                      {"PADOS_RESIDUAL_AMENDMENT_TEST_DATABASE_URL": _url(connection, RESIDUAL)}),
