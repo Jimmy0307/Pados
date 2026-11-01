@@ -125,7 +125,7 @@ def create_app() -> FastAPI:
         return {"status": "ready", **body}
 
     @app.get("/memory/search")
-    def memory_search(project_id: str, query: str) -> dict[str, object]:
+    def memory_search(project_id: str, query: str, _: ControlAuth) -> dict[str, object]:
         with session_scope(settings) as session:
             rows = search_memory(
                 session,
@@ -139,7 +139,7 @@ def create_app() -> FastAPI:
         return {"status": "ok", "results": [row.__dict__ for row in rows]}
 
     @app.post("/memory/facts")
-    def fact_add(payload: dict[str, object]) -> object:
+    def fact_add(payload: dict[str, object], _: ControlAuth) -> object:
         def _add() -> dict[str, Any]:
             requested_authority = payload.get("authority_state")
             if requested_authority is not None and str(requested_authority) != "CANDIDATE":
@@ -211,7 +211,7 @@ def create_app() -> FastAPI:
         return guarded(_promote)
 
     @app.post("/context/assemble")
-    def assemble(payload: dict[str, object]) -> dict[str, object]:
+    def assemble(payload: dict[str, object], _: ControlAuth) -> dict[str, object]:
         with session_scope(settings) as session:
             packet_payload = context_packet.assemble_context_packet(
                 session,
