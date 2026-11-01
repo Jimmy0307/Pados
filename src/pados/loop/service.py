@@ -43,6 +43,7 @@ from pados.work_protocol.models import TaskEnvelope
 from pados.worker.schemas import RISK_ORDER, RouteRequest
 from pados.worker.service import (
     NON_TERMINAL_JOB_STATUSES,
+    execute_routed_model_job,
     expire_overdue_jobs,
     record_job_event,
     route_work_request,
@@ -521,6 +522,7 @@ def run_one_iteration(
     settings: Any,
     artifact_root: Path,
     idempotency_key: str,
+    defer_model_execution: bool = False,
 ) -> dict[str, Any]:
     loop = get_loop_for_update(session, loop_id)
     if loop["status"] != "RUNNING":
@@ -679,6 +681,7 @@ def run_one_iteration(
         route=route,
         settings=settings,
         artifact_root=artifact_root,
+        defer_model_execution=defer_model_execution,
     )
     job = routed["job"]
     job_status = str(job["status"])
@@ -711,6 +714,45 @@ def run_one_iteration(
         settings=settings,
         artifact_root=artifact_root,
     )
+
+
+def _deferred_model_job(session: Session, loop_id: str) -> str | None:
+    """The active iteration's local-model job that is routed but not yet executed, if any."""
+    job_id = session.execute(
+        text(
+            """
+            SELECT j.id::text FROM task_loop_iterations i JOIN worker_jobs j ON j.id = i.job_id
+            WHERE i.loop_id = CAST(:loop_id AS uuid) AND i.status = 'RUNNING'
+              AND j.status = 'ROUTED' AND j.worker_type = 'OLLAMA'
+            ORDER BY i.iteration_number DESC LIMIT 1
+            """
+        ),
+        {"loop_id": loop_id},
+    ).scalar_one_or_none()
+    return None if job_id is None else str(job_id)
+
+
+def run_step(
+    settings: Any, *, loop_id: str, artifact_root: Path, idempotency_key: str, session_factory: Any = None
+) -> dict[str, Any]:
+    """One TaskLoop step for an operator surface (RC2 SEC-9).
+
+    Routing commits first. A local-model job then runs with no transaction or lock held, and the same iteration is
+    resumed in a new transaction. A model job left ROUTED by an interrupted step is picked up here as well.
+    """
+    from pados.db import session_scope
+
+    scope = session_factory or session_scope
+    with scope(settings) as session:
+        result = run_one_iteration(session, loop_id=loop_id, settings=settings, artifact_root=artifact_root,
+                                   idempotency_key=idempotency_key, defer_model_execution=True)
+        deferred = _deferred_model_job(session, loop_id)
+    if deferred is None:
+        return result
+    execute_routed_model_job(settings, deferred, session_factory=scope)
+    with scope(settings) as session:
+        return run_one_iteration(session, loop_id=loop_id, settings=settings, artifact_root=artifact_root,
+                                 idempotency_key=f"{idempotency_key}:model-result", defer_model_execution=True)
 
 
 def _waiting_for_job(

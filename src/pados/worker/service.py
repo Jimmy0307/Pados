@@ -380,7 +380,10 @@ def route_work_request(
     route: RouteRequest,
     settings: Any,
     artifact_root: Path,
+    defer_model_execution: bool = False,
 ) -> dict[str, Any]:
+    """Route one approved request. With ``defer_model_execution`` a local-model job is left ROUTED for
+    ``execute_routed_model_job`` after the caller commits, so no lock is held during the model call (RC2 SEC-9)."""
     existing = _idempotent_job(session, request_id, route)
     if existing is not None:
         return {"job": existing, "routing": {"status": "idempotent"}}
@@ -511,7 +514,7 @@ def route_work_request(
         artifact_dir=handoff_dir,
         timeout_seconds=timeout,
     )
-    if worker.worker_type == WorkerType.OLLAMA:
+    if worker.worker_type == WorkerType.OLLAMA and not defer_model_execution:
         final_job = _execute_model_if_requested(
             session,
             job=final_job,
@@ -728,9 +731,34 @@ def _finish_model_job(
     usage_metadata: dict[str, Any],
     result_summary: str,
     stdout_path: Path | None = None,
+    require_running: bool = False,
 ) -> dict[str, Any]:
+    """Persist a terminal model result. With ``require_running`` (the deferred path) a job that expired or was
+    cancelled while the model ran keeps its state, and the late result is not recorded."""
     job_id = str(job["id"])
     project_id = str(job["project_id"])
+    row = session.execute(
+        text(
+            """
+            UPDATE worker_jobs
+            SET status = :status, error_code = :error_code, validation_status = :validation_status,
+                result_summary = :summary, usage_metadata = CAST(:usage_metadata AS jsonb), completed_at = now()
+            WHERE id = CAST(:job_id AS uuid) AND (NOT :require_running OR status = 'RUNNING')
+            RETURNING *
+            """
+        ),
+        {
+            "job_id": job_id,
+            "status": status,
+            "error_code": error_code,
+            "validation_status": validation_status,
+            "summary": result_summary[:8000],
+            "usage_metadata": json.dumps(usage_metadata, sort_keys=True),
+            "require_running": require_running,
+        },
+    ).mappings().first()
+    if row is None:
+        return get_job(session, job_id)
     if stdout_path is not None:
         session.execute(
             text(
@@ -747,25 +775,6 @@ def _finish_model_job(
             },
         )
         _event(session, job_id, project_id, "OUTPUT_CAPTURED", {"stdout": stdout_path.as_posix()})
-    row = session.execute(
-        text(
-            """
-            UPDATE worker_jobs
-            SET status = :status, error_code = :error_code, validation_status = :validation_status,
-                result_summary = :summary, usage_metadata = CAST(:usage_metadata AS jsonb), completed_at = now()
-            WHERE id = CAST(:job_id AS uuid)
-            RETURNING *
-            """
-        ),
-        {
-            "job_id": job_id,
-            "status": status,
-            "error_code": error_code,
-            "validation_status": validation_status,
-            "summary": result_summary[:8000],
-            "usage_metadata": json.dumps(usage_metadata, sort_keys=True),
-        },
-    ).mappings().one()
     event_type = {
         "SUCCEEDED": "JOB_SUCCEEDED",
         "TIMED_OUT": "JOB_TIMED_OUT",
@@ -834,6 +843,83 @@ def _execute_model_if_requested(
         return failed
 
 
+@dataclass(frozen=True)
+class _ModelCall:
+    provider: Any
+    intent: ExecutionIntent
+    timeout: int
+
+
+def _plan_model_call(
+    job: Mapping[str, Any], *, settings: Any, timeout_seconds: int
+) -> _ModelCall | dict[str, Any]:
+    """Resolve the measured provider for a model job: a call to make, or the terminal result to persist."""
+    intent = _execution_intent_for_capability(str(job["capability_id"]))
+    if intent is None:
+        return {
+            "status": "BLOCKED",
+            "error_code": "MODEL_CAPABILITY_NOT_EXECUTABLE",
+            "validation_status": "FAILED",
+            "usage_metadata": {
+                "measured_execution_refusal": {"code": "MODEL_CAPABILITY_NOT_EXECUTABLE", "reasons": []}
+            },
+            "result_summary": "Model capability is not executable.",
+        }
+    timeout = min(int(job["timeout_seconds"]), int(settings.local_inference_timeout_seconds), timeout_seconds)
+    try:
+        provider = build_chat_provider(settings, intent=intent, project_id=str(job["project_id"]))
+    except ExecutionBindingRefused as exc:
+        return {
+            "status": "BLOCKED",
+            "error_code": exc.refusal.code,
+            "validation_status": "FAILED",
+            "usage_metadata": {"measured_execution_refusal": {"code": exc.refusal.code,
+                                                              "reasons": list(exc.refusal.reasons)}},
+            "result_summary": "Measured execution binding refused.",
+        }
+    except Exception as exc:  # noqa: BLE001 - model execution never aborts the loop transaction
+        return {
+            "status": "FAILED",
+            "error_code": str(getattr(exc, "code", "MODEL_PROVIDER_INITIALIZATION_FAILED")),
+            "validation_status": "FAILED",
+            "usage_metadata": {"measured_execution": None},
+            "result_summary": "Measured provider initialization failed.",
+        }
+    if isinstance(provider, MeasuredChatProvider):
+        provider.bound = replace(provider.bound, timeout_seconds=timeout)
+    return _ModelCall(provider=provider, intent=intent, timeout=timeout)
+
+
+def _call_model(call: _ModelCall, *, job: Mapping[str, Any], handoff_path: Path, artifact_dir: Path) -> dict[str, Any]:
+    """Make the one bounded model call; touches no database. Returns the terminal result to persist."""
+    provider = call.provider
+    try:
+        prompt = _model_prompt(handoff_path, job)
+        model_text = _run_model_chat(provider, prompt, call.timeout)
+        evidence = {"measured_execution": getattr(provider, "last_evidence", None)}
+        stdout_path = artifact_dir / "stdout.txt"
+        stdout_path.write_text(stable_json(_model_stdout_contract(str(model_text))), encoding="utf-8")
+        if not str(model_text).strip():
+            return {"status": "FAILED", "error_code": "OUTPUT_CONTRACT_FAILED", "validation_status": "FAILED",
+                    "usage_metadata": evidence, "result_summary": "Model returned empty text.",
+                    "stdout_path": stdout_path}
+        return {"status": "SUCCEEDED", "error_code": None, "validation_status": "PASSED",
+                "usage_metadata": evidence, "result_summary": str(model_text), "stdout_path": stdout_path}
+    except (TimeoutError, asyncio.TimeoutError, FutureTimeout):
+        return {"status": "TIMED_OUT", "error_code": "TIMED_OUT", "validation_status": "FAILED",
+                "usage_metadata": {"measured_execution": getattr(provider, "last_evidence", None)},
+                "result_summary": "Measured model call timed out."}
+    except ExecutionBindingRefused as exc:
+        return {"status": "FAILED", "error_code": exc.refusal.code, "validation_status": "FAILED",
+                "usage_metadata": {"measured_execution": getattr(provider, "last_evidence", None)},
+                "result_summary": "Measured model call refused during execution."}
+    except Exception as exc:  # noqa: BLE001 - provider errors become terminal job evidence
+        return {"status": "FAILED", "error_code": str(getattr(exc, "code", "MODEL_PROVIDER_FAILED")),
+                "validation_status": "FAILED",
+                "usage_metadata": {"measured_execution": getattr(provider, "last_evidence", None)},
+                "result_summary": "Measured model call failed."}
+
+
 def _execute_model_once(
     session: Session,
     *,
@@ -843,115 +929,59 @@ def _execute_model_once(
     settings: Any,
     timeout_seconds: int,
 ) -> dict[str, Any]:
-    """Run one measured local-model call and persist its bounded result without raising."""
+    """Run one measured local-model call inside the caller's transaction and persist its bounded result."""
     if job.get("worker_type") != WorkerType.OLLAMA.value:
         return job
-    job_id = str(job["id"])
-    project_id = str(job["project_id"])
-    intent = _execution_intent_for_capability(str(job["capability_id"]))
-    if intent is None:
-        return _finish_model_job(
-            session,
-            job=job,
-            status="BLOCKED",
-            error_code="MODEL_CAPABILITY_NOT_EXECUTABLE",
-            validation_status="FAILED",
-            usage_metadata={
-                "measured_execution_refusal": {
-                    "code": "MODEL_CAPABILITY_NOT_EXECUTABLE",
-                    "reasons": [],
-                }
-            },
-            result_summary="Model capability is not executable.",
-        )
-    timeout = min(int(job["timeout_seconds"]), int(settings.local_inference_timeout_seconds), timeout_seconds)
-    try:
-        provider = build_chat_provider(settings, intent=intent, project_id=project_id)
-    except ExecutionBindingRefused as exc:
-        refusal = {"code": exc.refusal.code, "reasons": list(exc.refusal.reasons)}
-        return _finish_model_job(
-            session,
-            job=job,
-            status="BLOCKED",
-            error_code=exc.refusal.code,
-            validation_status="FAILED",
-            usage_metadata={"measured_execution_refusal": refusal},
-            result_summary="Measured execution binding refused.",
-        )
-    except Exception as exc:  # noqa: BLE001 - model execution never aborts the loop transaction
-        return _finish_model_job(
-            session,
-            job=job,
-            status="FAILED",
-            error_code=str(getattr(exc, "code", "MODEL_PROVIDER_INITIALIZATION_FAILED")),
-            validation_status="FAILED",
-            usage_metadata={"measured_execution": None},
-            result_summary="Measured provider initialization failed.",
-        )
-    if isinstance(provider, MeasuredChatProvider):
-        provider.bound = replace(provider.bound, timeout_seconds=timeout)
-
-    _event(session, job_id, project_id, "JOB_STARTED", {"intent": intent.value})
+    planned = _plan_model_call(job, settings=settings, timeout_seconds=timeout_seconds)
+    if isinstance(planned, dict):
+        return _finish_model_job(session, job=job, **planned)
+    _event(session, str(job["id"]), str(job["project_id"]), "JOB_STARTED", {"intent": planned.intent.value})
     session.execute(
         text("UPDATE worker_jobs SET status = 'RUNNING', started_at = now() WHERE id = CAST(:id AS uuid)"),
-        {"id": job_id},
+        {"id": str(job["id"])},
     )
-    evidence: dict[str, Any] = {"measured_execution": getattr(provider, "last_evidence", None)}
-    try:
-        prompt = _model_prompt(handoff_path, job)
-        model_text = _run_model_chat(provider, prompt, timeout)
-        evidence = {"measured_execution": getattr(provider, "last_evidence", None)}
-        contract = _model_stdout_contract(str(model_text))
-        stdout_path = artifact_dir / "stdout.txt"
-        stdout_path.write_text(stable_json(contract), encoding="utf-8")
-        if not str(model_text).strip():
-            return _finish_model_job(
-                session,
-                job=job,
-                status="FAILED",
-                error_code="OUTPUT_CONTRACT_FAILED",
-                validation_status="FAILED",
-                usage_metadata=evidence,
-                result_summary="Model returned empty text.",
-                stdout_path=stdout_path,
-            )
-        return _finish_model_job(
-            session,
-            job=job,
-            status="SUCCEEDED",
-            error_code=None,
-            validation_status="PASSED",
-            usage_metadata=evidence,
-            result_summary=str(model_text),
-            stdout_path=stdout_path,
-        )
-    except (TimeoutError, asyncio.TimeoutError, FutureTimeout):
-        return _finish_model_job(
-            session,
-            job=job,
-            status="TIMED_OUT",
-            error_code="TIMED_OUT",
-            validation_status="FAILED",
-            usage_metadata={"measured_execution": getattr(provider, "last_evidence", None)},
-            result_summary="Measured model call timed out.",
-        )
-    except ExecutionBindingRefused as exc:
-        return _finish_model_job(
-            session,
-            job=job,
-            status="FAILED",
-            error_code=exc.refusal.code,
-            validation_status="FAILED",
-            usage_metadata={"measured_execution": getattr(provider, "last_evidence", None)},
-            result_summary="Measured model call refused during execution.",
-        )
-    except Exception as exc:  # noqa: BLE001 - provider errors become terminal job evidence
-        return _finish_model_job(
-            session,
-            job=job,
-            status="FAILED",
-            error_code=str(getattr(exc, "code", "MODEL_PROVIDER_FAILED")),
-            validation_status="FAILED",
-            usage_metadata={"measured_execution": getattr(provider, "last_evidence", None)},
-            result_summary="Measured model call failed.",
-        )
+    outcome = _call_model(planned, job=job, handoff_path=handoff_path, artifact_dir=artifact_dir)
+    return _finish_model_job(session, job=job, **outcome)
+
+
+def execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any = None) -> dict[str, Any]:
+    """Run one ROUTED local-model job with no database transaction or row lock held during the call (RC2 SEC-9).
+
+    1. A short transaction claims the job (ROUTED -> RUNNING); only one caller can win the claim.
+    2. The provider is resolved and the model is called with no session open.
+    3. A short transaction records the result only if the job is still RUNNING. A job that expired or was cancelled
+       meanwhile keeps its state.
+    A crash between the steps leaves a RUNNING job that ``expire_overdue_jobs`` times out; a repeated call is a no-op.
+    """
+    from pados.db import session_scope
+
+    scope = session_factory or session_scope
+    with scope(settings) as session:
+        claimed = session.execute(
+            text(
+                """
+                UPDATE worker_jobs SET status = 'RUNNING', started_at = now()
+                WHERE id = CAST(:id AS uuid) AND status = 'ROUTED' AND worker_type = :worker_type
+                RETURNING *
+                """
+            ),
+            {"id": job_id, "worker_type": WorkerType.OLLAMA.value},
+        ).mappings().first()
+        if claimed is None:
+            return get_job(session, job_id)
+        job = dict(claimed)
+        handoff = session.execute(
+            text(
+                "SELECT path FROM worker_job_artifacts WHERE job_id = CAST(:id AS uuid) "
+                "AND artifact_type = 'handoff_json' ORDER BY created_at LIMIT 1"
+            ),
+            {"id": job_id},
+        ).scalar_one()
+        _event(session, job_id, str(job["project_id"]), "JOB_STARTED", {"deferred": True})
+    handoff_path = Path(str(handoff))
+    planned = _plan_model_call(job, settings=settings, timeout_seconds=int(job["timeout_seconds"]))
+    outcome = planned if isinstance(planned, dict) else _call_model(
+        planned, job=job, handoff_path=handoff_path, artifact_dir=handoff_path.parent
+    )
+    with scope(settings) as session:
+        return _finish_model_job(session, job=job, require_running=True, **outcome)

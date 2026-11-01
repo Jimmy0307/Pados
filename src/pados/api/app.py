@@ -306,13 +306,20 @@ def create_app() -> FastAPI:
 
         def _route() -> dict[str, Any]:
             with session_scope(settings) as session:
-                return worker_service.route_work_request(
+                routed = worker_service.route_work_request(
                     session,
                     request_id=request_id,
                     route=route,
                     settings=settings,
                     artifact_root=__import__("pathlib").Path("runtime/artifacts"),
+                    defer_model_execution=True,
                 )
+            job = routed["job"]
+            if job.get("worker_type") == "OLLAMA" and job.get("status") == "ROUTED":
+                # The model runs after the routing transaction commits (RC2 SEC-9).
+                routed = {**routed, "job": worker_service.execute_routed_model_job(
+                    settings, str(job["id"]), session_factory=session_scope)}
+            return routed
 
         return guarded(lambda: {"status": "ok", **_route()})
 
@@ -541,14 +548,14 @@ def create_app() -> FastAPI:
         control_security.assert_request_safe(payload, max_bytes=settings.control_request_max_bytes)
 
         def _step() -> dict[str, Any]:
-            with session_scope(settings) as session:
-                return loop_service.run_one_iteration(
-                    session,
-                    loop_id=loop_id,
-                    settings=settings,
-                    artifact_root=__import__("pathlib").Path("runtime/artifacts"),
-                    idempotency_key=payload["idempotency_key"],
-                )
+            # A local-model call runs after the routing transaction commits (RC2 SEC-9).
+            return loop_service.run_step(
+                settings,
+                loop_id=loop_id,
+                artifact_root=__import__("pathlib").Path("runtime/artifacts"),
+                idempotency_key=payload["idempotency_key"],
+                session_factory=session_scope,
+            )
 
         return guarded(lambda: {"status": "ok", **_step()})
 

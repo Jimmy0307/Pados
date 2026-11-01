@@ -46,7 +46,8 @@ class Settings(BaseSettings):
     api_host: str = Field(default="127.0.0.1", alias="PADOS_API_HOST")
     api_port: int = Field(default=8088, alias="PADOS_API_PORT")
     ollama_base_url: str = Field(default="http://127.0.0.1:11434", alias="OLLAMA_BASE_URL")
-    chat_provider: str = Field(default="mock", alias="PADOS_CHAT_PROVIDER")
+    # Unset means no chat model is configured (RC2 MODEL-1); "mock" must be chosen explicitly and is contract-test only.
+    chat_provider: str = Field(default="", alias="PADOS_CHAT_PROVIDER")
     chat_model: str = Field(default="", alias="PADOS_CHAT_MODEL")
     # Measured execution binding of the consumer inference path: the operator ModelCatalog document holding the
     # REGISTERED measured profiles (empty = not configured; local model calls are then refused, never run unbound).

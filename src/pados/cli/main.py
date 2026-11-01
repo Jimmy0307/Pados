@@ -262,6 +262,12 @@ def _system_health(settings: Settings) -> dict[str, Any]:
         return {"ready": False, "error": type(exc).__name__}
 
 
+def chat_provider_mode(settings: Settings) -> str:
+    from pados.providers.factory import chat_provider_mode as mode
+
+    return mode(settings)
+
+
 @app.command()
 def doctor(
     json_output: Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")] = False,
@@ -282,6 +288,7 @@ def doctor(
             "runtime_mode": runtime_mode,
             "database_url": settings.safe_database_url,
             "chat_provider": settings.chat_provider,
+            "chat_provider_mode": chat_provider_mode(settings),
             "embed_provider": settings.embed_provider,
             "local_llm_concurrency": settings.local_llm_concurrency,
         },
@@ -936,14 +943,13 @@ def loop_step(
     idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    with session_scope() as session:
-        result = loop_service.run_one_iteration(
-            session,
-            loop_id=str(loop_id),
-            settings=get_settings(),
-            artifact_root=Path("runtime/artifacts"),
-            idempotency_key=idempotency_key,
-        )
+    # A local-model call runs after the routing transaction commits (RC2 SEC-9).
+    result = loop_service.run_step(
+        get_settings(),
+        loop_id=str(loop_id),
+        artifact_root=Path("runtime/artifacts"),
+        idempotency_key=idempotency_key,
+    )
     _echo_json({"status": "ok", **result}, json_output)
 
 

@@ -32,6 +32,12 @@ is interrupted, retry it with `pados project initialize-proof-scope --project-id
 refuses remote or shared operational databases. This creates the initial scope only; it does not accept work or commit
 semantic state.
 
+No chat model is configured by default (`PADOS_CHAT_PROVIDER` unset). Cognitive actions then report
+`COGNITIVE_PROVIDER_NOT_CONFIGURED` instead of silently using a stand-in. `PADOS_CHAT_PROVIDER=mock` is for contract
+tests only. Its output is labeled `MOCK_CONTRACT_TEST_ONLY`, and `pados doctor` warns while it is selected. A local
+Ollama model runs only under a measured execution binding. The model call runs after the routing transaction commits,
+so no database lock is held while the model thinks.
+
 **Verify the whole local path end to end (synthetic data, loopback, no provider credentials).**
 
 ```bash
