@@ -34,6 +34,7 @@ from pados.control.approval_subject import (
     load_bound_subject,
     match_route,
     scope_version_is_current,
+    subject_hash,
 )
 from pados.loop import scope_authority
 from pados.memory import packet as context_packet
@@ -58,6 +59,8 @@ from pados.worker.schemas import (
 
 LOGGER = logging.getLogger("pados.worker.service")
 NON_TERMINAL_JOB_STATUSES = frozenset({"ROUTED", "QUEUED", "RUNNING", "VALIDATING"})
+# RC2 EXEC-1: a selected worker this process cannot execute for the route is refused, never left ROUTED.
+ROUTE_HAS_NO_EXECUTOR = "ROUTE_HAS_NO_EXECUTOR"
 
 
 def _event(session: Session, job_id: str, project_id: str, event_type: str, payload: dict[str, Any]) -> None:
@@ -409,6 +412,10 @@ def route_work_request(
     worker = workers[decision.selected_worker_id]
     if worker.availability != WorkerAvailability.AVAILABLE:
         raise PermissionError(ErrorCode.WORKER_UNAVAILABLE.value)
+    if not _has_executor(worker.worker_type, route):
+        # Nothing would ever run the job: refuse before any job, context packet or handoff exists.
+        _refuse(session, ROUTE_HAS_NO_EXECUTOR, request_id=request_id, route=route, project_id=project_id,
+                subject_hash=subject_hash(authorization.subject))
 
     context = context_packet.assemble_context_packet(
         session,
@@ -545,6 +552,17 @@ def route_work_request(
         },
     )
     return {"job": final_job, "routing": decision.__dict__, "handoff_path": handoff_json.as_posix()}
+
+
+def _has_executor(worker_type: WorkerType, route: RouteRequest) -> bool:
+    """Whether this process runs a job of ``worker_type`` for ``route`` (RC2 EXEC-1).
+
+    A deterministic tool runs only a registered command; a local Ollama model runs through the model executor.
+    Codex and Claude Code runtimes have no executor here.
+    """
+    if worker_type == WorkerType.DETERMINISTIC_TOOL:
+        return route.command_id is not None
+    return worker_type == WorkerType.OLLAMA
 
 
 def _execute_deterministic_if_requested(
