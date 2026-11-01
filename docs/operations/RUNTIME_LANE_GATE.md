@@ -53,29 +53,40 @@ they are not committed.
 
 ## Building the index
 
-Do not write an evidence index by hand. Write a spec (`pados.runtime-lane-spec.v1`) that says what ran, and let
-`runtime_lane_index.py build` derive the rest:
+Do not write an evidence index by hand. Write a spec (`pados.runtime-lane-spec.v1`) that says what ran and where
+the runner's own record is, and let `runtime_lane_index.py build` read the rest from that record:
 
 ```json
 {"schema_version": "pados.runtime-lane-spec.v1", "commit": "<40-hex>", "lanes": [
-  {"lane_id": "windows-ci-gates", "platform": "windows", "command": "run_gates.ps1", "exit_code": 0,
-   "evidence_path": "windows-<sha>/gates/summary.txt"},
+  {"lane_id": "windows-ci-gates", "platform": "windows", "command": "run_gates.ps1",
+   "source": "gate-summary", "gates": ["ci_policy", "ruff", "mypy"], "evidence_path": "windows-<sha>/gate-summary.json"},
+  {"lane_id": "vmware-linux-e2e", "platform": "linux", "command": "vm_online_chain.sh <sha> <branch>",
+   "source": "vm-summary", "gates": ["e2e"], "evidence_path": "vmware-<sha>/summary.json"},
+  {"lane_id": "windows-native-e2e", "platform": "windows", "command": "local_dogfood_e2e.py",
+   "source": "e2e-result", "evidence_path": "e2e-windows-<sha>/E2E_RESULT.json"},
   {"lane_id": "windows-full-suite", "platform": "windows", "command": "pytest -q tests", "exit_code": 1,
    "evidence_path": "windows-<sha>/full_pytest.log", "declare": "NOT_VALIDATED",
    "notes": "126 failures, identical to the recorded Windows baseline"},
-  {"lane_id": "github-ci", "platform": "github", "command": "ci.yml", "exit_code": null,
-   "notes": "no CI run for this commit"}]}
+  {"lane_id": "github-ci", "platform": "github", "command": "ci.yml", "notes": "no CI run for this commit"}]}
 ```
 
-- The status is derived from the exit code: `0` gives PASS, anything else gives FAIL, and no exit code gives
-  NOT_VALIDATED. A spec may only downgrade a lane, to `SKIPPED` or `NOT_VALIDATED`, with a reason of at least ten
-  characters. A spec cannot declare `PASS`.
-- The tool computes the SHA-256 itself. `recorded_at` is the evidence file's modification time, so staleness counts
-  from when the evidence was produced.
+- **A PASS comes only from a machine-written runner record** (`source`):
+  - `gate-summary`: the Windows `run_gates.ps1` summary;
+  - `vm-summary`: the VMware chain summary, which must say `virt: vmware`;
+  - `e2e-result`: the dogfood `E2E_RESULT.json`, whose platform must match.
+- The builder reads the commit, the named gates' exit codes and the finish time from that record. It refuses a record
+  for another commit, a missing gate, or a platform mismatch.
+- Any non-zero gate makes the lane FAIL. A spec-typed `exit_code: 0` is refused (`RUNTIME_LANE_PASS_NEEDS_MACHINE_SOURCE`).
+  A non-zero typed exit code gives FAIL, and no exit code gives NOT_VALIDATED.
+- A spec may only downgrade a lane, to `SKIPPED` or `NOT_VALIDATED`, with a reason of at least ten characters.
+- The tool computes the SHA-256 itself. `recorded_at` is the record's finish time (its modification time when it has
+  none), so staleness counts from when the evidence was produced and copying a file does not refresh it.
 - The build is refused (exit 2) if a ran lane's evidence file is missing, if a path escapes the root, if one file
   backs two lanes, or if a lane id is not in the registry.
 - `verify` re-hashes every referenced file and exits 1 on a mismatch or a missing file. Run it before reporting
   numbers from an index that has sat on disk.
+- A record can still be forged, or come from a runner that checks the wrong thing. See "What the gate does not
+  prove".
 
 ## How a lane is judged
 
