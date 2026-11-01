@@ -72,8 +72,11 @@ def create_app() -> FastAPI:
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except NoResultFound as exc:  # an unknown id is a 404, not a server error
+            logger.info("control_lookup_not_found", error=type(exc).__name__)
             raise HTTPException(status_code=404, detail="NOT_FOUND") from exc
         except DataError as exc:  # a malformed id (for example not a UUID) is rejected without detail
+            # Logged server-side, so a genuine data fault never disappears behind the client error.
+            logger.warning("control_request_data_error", error=str(exc.orig)[:200])
             raise HTTPException(status_code=422, detail="INVALID_IDENTIFIER") from exc
 
     def required_payload_value(payload: dict[str, object], key: str) -> str:

@@ -986,10 +986,17 @@ def execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any
     outcome = planned if isinstance(planned, dict) else _call_model(
         planned, job=job, handoff_path=handoff_path, artifact_dir=handoff_path.parent
     )
+    stdout_path = outcome.get("stdout_path")
     with scope(settings) as session:
         recorded = _finish_model_job(session, job=job, require_running=True, **outcome)
-    stdout_path = outcome.get("stdout_path")
-    if isinstance(stdout_path, Path) and recorded.get("status") != outcome["status"]:
+        kept = isinstance(stdout_path, Path) and session.execute(
+            text(
+                "SELECT 1 FROM worker_job_artifacts WHERE job_id = CAST(:id AS uuid) "
+                "AND artifact_type = 'stdout' AND path = :path"
+            ),
+            {"id": job_id, "path": stdout_path.as_posix()},
+        ).first() is not None
+    if isinstance(stdout_path, Path) and not kept:
         stdout_path.unlink(missing_ok=True)  # an unrecorded late result must not look like evidence later
     return recorded
 
@@ -1021,7 +1028,7 @@ def _deferred_claim_refusal(session: Session, job_id: str) -> dict[str, Any] | N
     ).mappings().first()
     status, code = "", ""
     if job["overdue"]:
-        status, code = "TIMED_OUT", "TIMED_OUT"
+        status, code = "TIMED_OUT", "JOB_DEADLINE_EXCEEDED"
     elif job["approval_status"] == "CANCELLED":
         status, code = "BLOCKED", APPROVAL_REVOKED
     elif job["approval_status"] != "APPROVED":

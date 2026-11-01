@@ -155,6 +155,11 @@ def test_a_job_that_expired_during_the_call_keeps_its_state(
             "SELECT count(*) FROM worker_job_artifacts WHERE job_id = CAST(:j AS uuid) AND artifact_type = 'stdout'"),
             {"j": str(job["id"])}).scalar_one()
     assert int(stdout_rows) == 0  # the late result is not recorded
+    with engine.connect() as connection:
+        handoff = connection.execute(text(
+            "SELECT path FROM worker_job_artifacts WHERE job_id = CAST(:j AS uuid) AND artifact_type = 'handoff_json'"),
+            {"j": str(job["id"])}).scalar_one()
+    assert not (Path(str(handoff)).parent / "stdout.txt").exists()  # nor left on disk to pass for evidence later
 
 
 def test_an_interrupted_step_is_resumed_and_the_model_runs_exactly_once(
@@ -223,4 +228,17 @@ def test_an_overdue_routed_job_is_not_claimed(engine: Engine, tmp_path: Path, mo
         connection.execute(text("UPDATE worker_jobs SET queued_at = now() - interval '1 hour' "
                                 "WHERE id = CAST(:j AS uuid)"), {"j": str(job["id"])})
     result = worker_service.execute_routed_model_job(SETTINGS, str(job["id"]), session_factory=scope)
-    assert probe.calls == 0 and result["status"] == "TIMED_OUT"
+    assert probe.calls == 0
+    assert (result["status"], result["error_code"]) == ("TIMED_OUT", "JOB_DEADLINE_EXCEEDED")
+
+
+def test_an_expired_approval_stops_a_routed_model_job_before_the_call(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, scope, probe, job = _interrupted_model_job(engine, tmp_path, monkeypatch)
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE control_approvals SET expires_at = now() - interval '1 second' "
+                                "WHERE id = CAST(:a AS uuid)"), {"a": str(job["approval_id"])})
+    result = worker_service.execute_routed_model_job(SETTINGS, str(job["id"]), session_factory=scope)
+    assert probe.calls == 0
+    assert (result["status"], result["error_code"]) == ("BLOCKED", "APPROVAL_EXPIRED")
