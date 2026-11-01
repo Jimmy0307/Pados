@@ -22,6 +22,7 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from sqlalchemy.exc import InterfaceError, OperationalError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from pados.logging_config import get_logger
@@ -98,6 +99,21 @@ def install_operability(app: FastAPI, *, component: str) -> None:
                                  request_id=request_id, correlation_id=correlation_id,
                                  write_occurred=_write_outcome(request.method))
         return _envelope_response(request, 422, exc.errors(), envelope)
+
+    @app.exception_handler(OperationalError)
+    @app.exception_handler(InterfaceError)
+    async def database_unavailable(request: Request, exc: Exception) -> Response:
+        # OP-005: a database disconnect is a dependency failure, not an internal defect. A safe method may be retried;
+        # for any other method the write outcome is unknown, so the client must read state before retrying.
+        logger.warning("http.request.dependency_failed", dependency="database", error_type=type(exc).__name__,
+                       error_code="DATABASE_UNAVAILABLE")
+        request_id, correlation_id = _ids()
+        safe = request.method.upper() in SAFE_METHODS
+        envelope = ErrorEnvelope(code="DATABASE_UNAVAILABLE", category=ErrorCategory.DEPENDENCY,
+                                 message=SAFE_MESSAGE_BY_CATEGORY[ErrorCategory.DEPENDENCY], retryable=safe,
+                                 request_id=request_id, correlation_id=correlation_id,
+                                 write_occurred=_write_outcome(request.method), details={"dependency": "database"})
+        return _envelope_response(request, 503, "DATABASE_UNAVAILABLE", envelope)
 
     @app.exception_handler(PadosError)
     async def declared_error(request: Request, exc: PadosError) -> Response:
