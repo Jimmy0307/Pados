@@ -16,7 +16,7 @@ import pados
 
 SRC = Path(pados.__file__).resolve().parent
 CONTRACT = SRC / "capability" / "pack.py"
-PACK_PACKAGES = ("reference", "problem_solving")
+PACK_PACKAGES = ("reference", "problem_solving", "research")
 
 AUTHORITY_AND_PROVIDERS = (
     "pados.state_proof", "pados.product_loop", "pados.memory", "pados.db", "pados.core", "pados.loop",
