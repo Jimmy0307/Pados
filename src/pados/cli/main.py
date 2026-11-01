@@ -16,7 +16,14 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from pados.config import PROOF_REVISION_HEAD, Settings, get_settings, lane_revisions_accepted, lane_settings
+from pados.config import (
+    PROOF_REVISION_HEAD,
+    Settings,
+    artifact_root,
+    get_settings,
+    lane_revisions_accepted,
+    lane_settings,
+)
 from pados.db import check_database, get_engine, session_scope
 from pados.logging_config import configure_logging, get_logger
 from pados.loop import service as loop_service
@@ -764,7 +771,7 @@ def init(
         typer.echo(f"exists: {env_path} (use --force to overwrite)")
         raise typer.Exit(1)
     local = root / "runtime" / "local"
-    for sub in ("workspace", "objects"):
+    for sub in ("workspace", "objects", "artifacts"):
         (local / sub).mkdir(parents=True, exist_ok=True)
     control_value = token_source.token_urlsafe(32)
     token_file = local / "control.token"
@@ -782,6 +789,7 @@ def init(
         "PADOS_PRODUCT_DATABASE_NAME=pados_dogfood_proof", "PADOS_CORPUS_DATABASE_NAME=pados_dogfood_corpus",
         "PADOS_PRODUCT_LOOP_ENABLED=false",
         f"PADOS_PRODUCT_WORKSPACE_ROOT={local / 'workspace'}", f"PADOS_PRODUCT_OBJECT_ROOT={local / 'objects'}",
+        f"PADOS_ARTIFACT_ROOT={local / 'artifacts'}",
         "PADOS_PRODUCT_LOOP_PROVIDER=AUTO",
         "PADOS_CONTROL_API_TOKEN_HASH=" + hashlib.sha256(control_value.encode("utf-8")).hexdigest().upper(),
         "# Optional extensions (unset = not configured; never affects Core readiness):",
@@ -947,7 +955,7 @@ def loop_step(
     result = loop_service.run_step(
         get_settings(),
         loop_id=str(loop_id),
-        artifact_root=Path("runtime/artifacts"),
+        artifact_root=artifact_root(get_settings()),
         idempotency_key=idempotency_key,
     )
     _echo_json({"status": "ok", **result}, json_output)

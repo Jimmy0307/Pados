@@ -13,6 +13,9 @@ web/coverage/
 build/
 web/build/
 runtime/cache/
+# `pados init` in a checkout: the control token and local runtime state; worker job handoffs and outputs.
+runtime/local/
+runtime/artifacts/worker_jobs/
 web/.vite/
 *.pid
 *.pid.lock

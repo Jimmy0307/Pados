@@ -190,6 +190,7 @@ def base_env(args: argparse.Namespace, root: Path, db_pass: str) -> dict[str, st
         # the directories `pados init --dir root` creates
         "PADOS_PRODUCT_WORKSPACE_ROOT": str(root / "runtime" / "local" / "workspace"),
         "PADOS_PRODUCT_OBJECT_ROOT": str(root / "runtime" / "local" / "objects"),
+        "PADOS_ARTIFACT_ROOT": str(root / "runtime" / "local" / "artifacts"),
     })
     return env
 
@@ -217,10 +218,10 @@ class Api:
                 return exc.code, raw.decode("utf-8", "replace")[:500]
 
 
-def start_server(run: Run, env: dict[str, str], port: int, name: str) -> subprocess.Popen[str]:
+def start_server(run: Run, env: dict[str, str], port: int, name: str, cwd: Path = REPO) -> subprocess.Popen[str]:
     log = open(run.out / f"{name}.log", "w", encoding="utf-8")  # noqa: SIM115 - lives as long as the server
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-    server = subprocess.Popen([sys.executable, "-m", "pados.cli.main", "serve"], cwd=REPO, env=env, stdout=log,
+    server = subprocess.Popen([sys.executable, "-m", "pados.cli.main", "serve"], cwd=cwd, env=env, stdout=log,
                               stderr=subprocess.STDOUT, text=True, creationflags=flags)
     for _ in range(120):
         try:
@@ -639,7 +640,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
                        "attestation_verified"), authenticator="software (tests/remote/presence_support.py)")
         stop_server(server)
         operator.write_config(enrolled["descriptor"])  # the operator edits the actor row; the API never does
-        server = start_server(run, env, args.api_port, "serve_with_enrolled_device")
+        # From another working directory: receipts must still resolve when acceptance re-verifies them.
+        server = start_server(run, env, args.api_port, "serve_with_enrolled_device", cwd=root)
 
         accepted = remote.accept(candidate.get("candidate_id"))
         (run.out / "governed_acceptance_live.json").write_text(json.dumps(accepted, indent=2, default=str),

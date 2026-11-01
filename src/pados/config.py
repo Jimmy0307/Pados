@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -9,6 +10,11 @@ CORPUS_DATABASE_DEFAULT = "pados_corpus_runtime"
 OPERATIONAL_REVISION_DEFAULT = "20261101_0020"
 CORPUS_REVISION_DEFAULT = "20260730_0011"
 EXCLUDED_REVISION_DEFAULT = "20260730_0012"
+
+
+def artifact_root(settings: "Settings") -> Path:
+    """The absolute execution-output root for operator surfaces."""
+    return Path(settings.artifact_root).expanduser().resolve()
 
 
 class Settings(BaseSettings):
@@ -74,6 +80,9 @@ class Settings(BaseSettings):
     approval_ttl_seconds: int = Field(default=86400, ge=300, le=604800, alias="PADOS_APPROVAL_TTL_SECONDS")
     product_workspace_root: str = Field(default="", alias="PADOS_PRODUCT_WORKSPACE_ROOT")
     product_object_root: str = Field(default="", alias="PADOS_PRODUCT_OBJECT_ROOT")
+    # Where worker jobs write handoffs and outputs. Receipts record these paths and verification re-reads them, so
+    # operator surfaces resolve it to an absolute path (never relative to whatever directory the server runs in).
+    artifact_root: str = Field(default="runtime/artifacts", alias="PADOS_ARTIFACT_ROOT")
     product_database_name: str = Field(default="", alias="PADOS_PRODUCT_DATABASE_NAME")
     # A proof DB for P6.10 acceptance must not implicitly enable the separate Product Loop runtime.
     product_loop_enabled: bool = Field(default=False, alias="PADOS_PRODUCT_LOOP_ENABLED")

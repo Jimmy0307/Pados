@@ -7,7 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from pados import __version__
-from pados.config import get_settings
+from pados.config import artifact_root, get_settings
 from pados.control import projections
 from pados.control import security as control_security
 from pados.control import service as control_service
@@ -311,7 +311,7 @@ def create_app() -> FastAPI:
                     request_id=request_id,
                     route=route,
                     settings=settings,
-                    artifact_root=__import__("pathlib").Path("runtime/artifacts"),
+                    artifact_root=artifact_root(settings),
                     defer_model_execution=True,
                 )
             job = routed["job"]
@@ -552,7 +552,7 @@ def create_app() -> FastAPI:
             return loop_service.run_step(
                 settings,
                 loop_id=loop_id,
-                artifact_root=__import__("pathlib").Path("runtime/artifacts"),
+                artifact_root=artifact_root(settings),
                 idempotency_key=payload["idempotency_key"],
                 session_factory=session_scope,
             )
