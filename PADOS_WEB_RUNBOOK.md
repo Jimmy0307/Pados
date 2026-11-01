@@ -56,12 +56,12 @@ npm run build
 
 ## Request deadlines and stale actions
 
-Every browser request goes through `web/src/http.ts` (OP-007). Each request carries an `X-Request-ID` (`web-…`) and an `X-Request-Deadline-Ms` (default 15 s); the server honours the deadline as a parent budget and returns the same request id in its `pados.error.v1` envelope. The operator alert shows the error code, a message and the request id; use the request id to find the matching server log lines and trace fields.
+Every browser request goes through `web/src/http.ts` (OP-007). Each request carries an `X-Request-ID` (`web-…`), and the server returns the same request id in its `pados.error.v1` envelope. A read has a 15 s deadline, covering the response body too; it is sent as `X-Request-Deadline-Ms`, and the server honours it as a parent budget. A write (upload, scan, ingest, loop step, approval) has no client deadline and sends no budget: aborting it in the browser would not stop the server, and a budget would cut short model calls and ingestion. The operator alert shows the error code, a message and the request id; use the request id to find the matching server log lines and trace fields.
 
 | Code shown | Meaning | What to do |
 | --- | --- | --- |
 | `REQUEST_TIMEOUT` | A read did not answer before its deadline. It was retried once. Nothing was written. | Check `/health/ready`; retry once the dependency is healthy. |
-| `WRITE_OUTCOME_UNKNOWN` | A write timed out or lost the network. It may or may not have been applied, and it is never retried automatically. | Refresh the view and check whether the change is there before acting again. Idempotent endpoints accept the same key again and refuse a different payload under the same key. |
+| `WRITE_OUTCOME_UNKNOWN` | A write lost the network (or exceeded a deadline a caller set explicitly). It may or may not have been applied, and it is never retried automatically. | Refresh the view and check whether the change is there before acting again. Idempotent endpoints accept the same key again and refuse a different payload under the same key. |
 | `SESSION_STALE` | The server refused the session (`REMOTE_AUTH_INVALID`, `SESSION_UNAUTHENTICATED`, step-up required, …). | Sign in again; no action was taken. |
 | `NETWORK_ERROR` | A read could not reach the server. | Check that the backend is running. |
 | any server code | The server's own `pados.error.v1` code, with its `retryable` and `write_occurred` fields preserved. | Follow `docs/operations/CONTEXT_AND_ERROR_RUNBOOK.md` for that code. |

@@ -51,6 +51,39 @@ describe("request deadline", () => {
     expect(describeFailure(error)).toContain("may or may not have been applied");
   });
 
+  it("gives a write no client deadline and no server budget by default, so long work is never cut short", async () => {
+    vi.useFakeTimers();
+    let resolve: (value: Response) => void = () => {};
+    const fetcher = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Promise<Response>((r) => { resolve = r; }));
+    const pending = requestJson("/control/loops/l/step", { method: "POST", body: "{}" }, { fetcher });
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    resolve(new Response(JSON.stringify({ status: "ok" }), { status: 200 }));
+    await expect(pending).resolves.toEqual({ status: "ok" });
+    const sent = (fetcher.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(sent[DEADLINE_HEADER]).toBeUndefined();
+    expect(sent[REQUEST_ID_HEADER]).toMatch(/^web-/);
+  });
+
+  it("keeps the read deadline running until the body has been read", async () => {
+    vi.useFakeTimers();
+    const stalledBody = (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          // Like a browser: aborting the request errors a body that is still streaming.
+          init?.signal?.addEventListener("abort", () => controller.error(new DOMException("aborted", "AbortError")));
+        },
+      });
+      return Promise.resolve(new Response(stream, { status: 200 }));
+    };
+    const fetcher = vi.fn(stalledBody);
+    const pending = rejection(requestJson("/control/approvals", {}, { timeoutMs: 50, fetcher }));
+    await vi.advanceTimersByTimeAsync(200);
+    const error = await pending;
+    expect(error.outcome).toBe("REQUEST_TIMEOUT");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("sends a request id and the deadline to the server", async () => {
     const fetcher = vi.fn(async () => new Response("{}", { status: 200 }));
     await requestJson("/health/ready", {}, { timeoutMs: 1234, fetcher });

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// OP-007: one request helper for the operator and remote clients. Every request has a deadline (AbortController) and a
-// request id, and the server's pados.error.v1 envelope is preserved. Outcomes stay distinct: a timed-out read
-// (REQUEST_TIMEOUT), a write whose outcome is unknown (WRITE_OUTCOME_UNKNOWN, never retried), a stale session
-// (SESSION_STALE) and a network failure. Only safe reads are retried, once. An identical write already in flight is
-// not sent twice.
+// OP-007: one request helper for the operator and remote clients. Every request carries a request id, and the
+// server's pados.error.v1 envelope is preserved. A safe read has a deadline (AbortController, covering the body too)
+// that is also sent to the server as its budget. A write has no client deadline by default: aborting it never stops the
+// server, it would only turn a known outcome into an unknown one, and its budget must not cap long server work (model
+// calls, ingestion). Outcomes stay distinct: a timed-out read (REQUEST_TIMEOUT), a write whose outcome is unknown
+// (WRITE_OUTCOME_UNKNOWN, never retried), a stale session (SESSION_STALE) and a network failure. Only safe reads are
+// retried, once. An identical write already in flight is not sent twice.
 
 export const REQUEST_ID_HEADER = "X-Request-ID";
 export const DEADLINE_HEADER = "X-Request-Deadline-Ms";
@@ -42,7 +44,8 @@ export function newRequestId(): string {
 }
 
 export type RequestOptions = {
-  timeoutMs?: number;
+  /** Client deadline in ms; ``null`` for none. Default: DEFAULT_TIMEOUT_MS for safe reads, none for writes. */
+  timeoutMs?: number | null;
   fetcher?: typeof fetch;
   retrySafeReads?: boolean;
 };
@@ -53,16 +56,25 @@ function isSafe(init: RequestInit): boolean {
   return SAFE_METHODS.has((init.method || "GET").toUpperCase());
 }
 
-async function once(url: string, init: RequestInit, timeoutMs: number, fetcher: typeof fetch): Promise<Response> {
+type Received = { response: Response; body: { detail?: unknown; error?: Envelope }; requestId: string };
+
+async function once(url: string, init: RequestInit, timeoutMs: number | null, fetcher: typeof fetch): Promise<Received> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = timeoutMs === null ? undefined : setTimeout(() => controller.abort(), timeoutMs);
   const requestId = newRequestId();
+  const budget: Record<string, string> = timeoutMs === null ? {} : { [DEADLINE_HEADER]: String(timeoutMs) };
   try {
-    return await fetcher(url, {
+    const response = await fetcher(url, {
       ...init,
       signal: controller.signal,
-      headers: { [REQUEST_ID_HEADER]: requestId, [DEADLINE_HEADER]: String(timeoutMs), ...(init.headers || {}) },
+      headers: { [REQUEST_ID_HEADER]: requestId, ...budget, ...(init.headers || {}) },
     });
+    // The deadline covers the body as well: a stalled body is aborted like a stalled response.
+    const body = (await response.json().catch((error: unknown) => {
+      if (controller.signal.aborted) throw error;
+      return {};
+    })) as Received["body"];
+    return { response, body, requestId };
   } catch {
     const safe = isSafe(init);
     const aborted = controller.signal.aborted;
@@ -71,29 +83,29 @@ async function once(url: string, init: RequestInit, timeoutMs: number, fetcher: 
     const outcome: RequestOutcome = !safe ? "WRITE_OUTCOME_UNKNOWN" : aborted ? "REQUEST_TIMEOUT" : "NETWORK_ERROR";
     throw new HttpError(outcome, 0, outcome, requestId, safe, safe ? "NO" : "UNKNOWN");
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
 /** Fetch JSON with a deadline; throws HttpError with the server envelope or a distinct client-side outcome. */
 export async function requestJson<T>(url: string, init: RequestInit = {}, options: RequestOptions = {}): Promise<T> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs !== undefined ? options.timeoutMs : isSafe(init) ? DEFAULT_TIMEOUT_MS : null;
   const fetcher = options.fetcher ?? ((input, requestInit) => fetch(input, requestInit));
   const attempts = isSafe(init) && options.retrySafeReads !== false ? 2 : 1;
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    let response: Response;
+    let received: Received;
     try {
-      response = await once(url, init, timeoutMs, fetcher);
+      received = await once(url, init, timeoutMs, fetcher);
     } catch (error) {
       lastError = error;
       if (error instanceof HttpError && error.retryable && attempt < attempts) continue;
       throw error;
     }
-    const body = (await response.json().catch(() => ({}))) as { detail?: unknown; error?: Envelope };
+    const { response, body } = received;
     if (response.ok) return body as T;
     const envelope = body.error || {};
-    const requestId = envelope.request_id || response.headers.get(REQUEST_ID_HEADER) || "";
+    const requestId = envelope.request_id || response.headers.get(REQUEST_ID_HEADER) || received.requestId;
     const code = envelope.code || (typeof body.detail === "string" ? body.detail : `HTTP_${response.status}`);
     const stale = (response.status === 401 || response.status === 403) && STALE_SESSION_CODES.has(code);
     const error = new HttpError(stale ? "SESSION_STALE" : "SERVER_ERROR", response.status, code, requestId,
