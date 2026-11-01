@@ -29,7 +29,9 @@ Rules:
   - `route` is the route template (`/control/approvals/{approval_id}`), never the raw path.
   - A label value outside `[A-Za-z0-9_.:/{}-]{1,96}` becomes `__invalid__`, so ids, file paths, secrets and free text
     never become series.
-  - Each metric keeps at most 256 series; further combinations collapse into one `__overflow__` series.
+  - `method` is one of the standard HTTP methods or `OTHER`, so made-up methods cannot add series.
+  - Each metric keeps at most 2048 series (about 120 route templates by status class and method); further
+    combinations collapse into one `__overflow__` series.
 - **Recording never raises.** An undeclared metric or a wrong label set is dropped and counted in
   `pados_metrics_rejected_total`. Treat a non-zero value there as a code defect.
 - **Observation only.** No authorization, approval, scheduling, idempotency, receipt or CAS code reads a metric.

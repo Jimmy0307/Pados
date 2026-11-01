@@ -140,10 +140,13 @@ def create_app() -> FastAPI:
         # OP-003 liveness: the process serves requests; no dependency is probed or claimed.
         return JSONResponse(health_contract.liveness("pados-api", __version__).model_dump(mode="json"))
 
+    ready_probe = health_contract.SharedProbe()
+
     @app.get("/health/ready")
     def health_ready() -> JSONResponse:
         # OP-003 readiness: bounded, non-mutating probes. Product Loop lanes are required only when it is enabled.
-        assessment, latency, error = health_contract.bounded(lambda: system_health(settings))
+        # One probe in flight per app, its result reused for two seconds (a hung database leaves one thread, not many).
+        assessment, latency, error = health_contract.bounded(lambda: system_health(settings), shared=ready_probe)
         report = health_contract.readiness(
             "pados-api", __version__,
             health_contract.checks_from_system_health(assessment, product_required=settings.product_loop_enabled,

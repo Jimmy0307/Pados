@@ -23,7 +23,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 
-MAX_SERIES = 256
+# Sized for about 120 route templates x status classes x methods; beyond it series collapse into __overflow__.
+MAX_SERIES = 2048
 INVALID = "__invalid__"
 OVERFLOW = "__overflow__"
 _SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.:/{}-]{1,96}$")
@@ -61,6 +62,15 @@ CATALOG: Mapping[str, MetricSpec] = {
     "pados_metrics_rejected_total": MetricSpec(
         Kind.COUNTER, "Metric recordings dropped because the name or label set is not declared.", ("reason",)),
 }
+
+
+# Request methods outside this set (any token a client can send) are one series, so they cannot fill the cap.
+HTTP_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+
+
+def _method(method: str) -> str:
+    upper = method.upper()
+    return upper if upper in HTTP_METHODS else "OTHER"
 
 
 def _status_class(status: int) -> str:
@@ -182,9 +192,10 @@ METRICS = Registry()
 
 def record_http_request(*, method: str, route: str, status: int, duration_s: float, error_code: str | None) -> None:
     outcome = "completed" if status < 400 else "rejected" if status < 500 else "failed"
-    METRICS.inc("pados_http_requests_total", {"method": method.upper(), "route": route,
+    verb = _method(method)
+    METRICS.inc("pados_http_requests_total", {"method": verb, "route": route,
                                               "status_class": _status_class(status), "outcome": outcome})
-    METRICS.observe("pados_http_request_duration_seconds", {"method": method.upper(), "route": route}, duration_s)
+    METRICS.observe("pados_http_request_duration_seconds", {"method": verb, "route": route}, duration_s)
     if error_code:
         METRICS.inc("pados_http_errors_total", {"route": route, "error_code": error_code})
 

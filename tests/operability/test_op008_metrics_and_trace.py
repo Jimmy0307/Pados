@@ -171,3 +171,13 @@ def test_the_http_adapter_accepts_traceparent_without_echoing_an_invalid_one() -
     client.get("/probe", headers={TRACEPARENT_HEADER: "00-evil\r\ninjected-01"})
     assert seen[0][TRACEPARENT_HEADER].startswith("00-4bf92f3577b34da6a3ce929d0e0e4736-")
     assert "evil" not in seen[1][TRACEPARENT_HEADER]
+
+
+def test_made_up_request_methods_share_one_series() -> None:
+    from pados.operability.metrics import record_http_request
+
+    for index in range(50):
+        record_http_request(method=f"XA{index}", route="UNMATCHED", status=405, duration_s=0.001, error_code=None)
+    labels = {"method": "OTHER", "route": "UNMATCHED", "status_class": "4xx", "outcome": "rejected"}
+    assert METRICS.counter_value("pados_http_requests_total", labels) == 50
+    assert METRICS.series_count("pados_http_requests_total") == 1

@@ -9,6 +9,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import threading
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -159,3 +160,31 @@ def test_ready_keeps_its_decision_and_reports_it_in_the_same_schema(monkeypatch:
     assert body["health"]["schema_version"] == "pados.health.v1"
     assert (body["health"]["status"] == "NOT_READY") is (not ready)
     assert "hunter2" not in json.dumps(body)
+
+
+def test_a_hung_probe_runs_once_however_often_readiness_is_asked() -> None:
+    release = threading.Event()
+    shared = health_contract.SharedProbe(cache_s=0.0)
+
+    def hung() -> dict[str, Any]:
+        release.wait(5)
+        return _assessment()
+
+    results = [health_contract.bounded(hung, timeout_s=0.05, shared=shared) for _ in range(5)]
+    assert {error for _, _, error in results} == {"PROBE_TIMEOUT"}
+    assert shared.started_runs == 1  # later callers joined the stuck run instead of starting threads
+    release.set()
+
+
+def test_a_finished_probe_result_is_reused_briefly_and_then_refreshed() -> None:
+    calls: list[int] = []
+    shared = health_contract.SharedProbe(cache_s=60.0)
+
+    def probe() -> int:
+        calls.append(1)
+        return len(calls)
+
+    first = health_contract.bounded(probe, timeout_s=1.0, shared=shared)
+    second = health_contract.bounded(probe, timeout_s=1.0, shared=shared)
+    assert first[0] == second[0] == 1 and len(calls) == 1
+    assert health_contract.bounded(probe, timeout_s=1.0)[0] == 2  # no shared state: a fresh run

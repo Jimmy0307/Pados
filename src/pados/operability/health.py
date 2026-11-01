@@ -12,7 +12,6 @@ Health reports observe; they never authorize, schedule or accept anything.
 """
 from __future__ import annotations
 
-import queue
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -78,28 +77,67 @@ def readiness(service: str, version: str, checks: tuple[DependencyCheck, ...]) -
     return HealthReport(kind="readiness", service=service, version=version, status=status, checks=checks)
 
 
-def bounded(probe: Callable[[], Any], timeout_s: float = DEFAULT_PROBE_TIMEOUT_S) -> tuple[Any, float, str | None]:
+ProbeResult = tuple[Any, float, str | None]
+
+
+class SharedProbe:
+    """Per-endpoint probe state: at most one probe thread in flight, and a finished result reused for ``cache_s``.
+
+    While a probe hangs (a database that accepts connections but never answers), later callers wait on the same run
+    instead of starting another thread, so polling or hammering an unauthenticated readiness endpoint leaves at most
+    one blocked thread behind. A joining caller's latency counts from the start of the shared run.
+    """
+
+    def __init__(self, cache_s: float = 2.0) -> None:
+        self.cache_s = cache_s
+        self._lock = threading.Lock()
+        self._pending: tuple[threading.Event, list[Any], float] | None = None
+        self._last: tuple[float, ProbeResult] | None = None
+        self.started_runs = 0
+
+    def run(self, probe: Callable[[], Any], timeout_s: float) -> ProbeResult:
+        with self._lock:
+            if self._last is not None and time.monotonic() - self._last[0] < self.cache_s:
+                return self._last[1]
+            if self._pending is None:
+                self._pending = self._start(probe)
+            done, box, started = self._pending
+        if not done.wait(timeout_s):
+            return None, round((time.perf_counter() - started) * 1000, 3), "PROBE_TIMEOUT"
+        (ok, value), latency = box[0], box[1]
+        result: ProbeResult = (value, latency, None) if ok else (None, latency, "PROBE_FAILED")
+        with self._lock:
+            self._last = (time.monotonic(), result)
+        return result
+
+    def _start(self, probe: Callable[[], Any]) -> tuple[threading.Event, list[Any], float]:
+        done, started = threading.Event(), time.perf_counter()
+        box: list[Any] = []  # [(ok, value), latency_ms] once the run finishes
+
+        def work() -> None:
+            try:
+                box.append((True, probe()))
+            except Exception:  # noqa: BLE001 - the probe's failure is reported as a code, never re-raised or echoed
+                box.append((False, None))
+            box.append(round((time.perf_counter() - started) * 1000, 3))
+            with self._lock:
+                self._pending = None
+            done.set()
+
+        self.started_runs += 1
+        threading.Thread(target=work, name="pados-health-probe", daemon=True).start()
+        return done, box, started
+
+
+def bounded(probe: Callable[[], Any], timeout_s: float = DEFAULT_PROBE_TIMEOUT_S,
+            shared: SharedProbe | None = None) -> ProbeResult:
     """Run ``probe`` in a daemon thread with a deadline: (value, latency_ms, error code or None).
 
     A probe that does not finish in time leaves its thread behind (daemon, it cannot block shutdown) and reports
-    ``PROBE_TIMEOUT``; a probe that raises reports ``PROBE_FAILED`` and never its message.
+    ``PROBE_TIMEOUT``; a probe that raises reports ``PROBE_FAILED`` and never its message. Pass the endpoint's
+    ``SharedProbe`` so concurrent callers share one run instead of each starting a thread.
     """
-    results: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
-
-    def run() -> None:
-        try:
-            results.put((True, probe()))
-        except Exception:  # noqa: BLE001 - the probe's failure is reported as a code, never re-raised or echoed
-            results.put((False, None))
-
-    started = time.perf_counter()
-    threading.Thread(target=run, name="pados-health-probe", daemon=True).start()
-    try:
-        ok, value = results.get(timeout=timeout_s)
-    except queue.Empty:
-        return None, round((time.perf_counter() - started) * 1000, 3), "PROBE_TIMEOUT"
-    latency = round((time.perf_counter() - started) * 1000, 3)
-    return (value, latency, None) if ok else (None, latency, "PROBE_FAILED")
+    return (shared or SharedProbe(cache_s=0.0)).run(probe, timeout_s)
 
 
 def checks_from_system_health(assessment: Mapping[str, Any] | None, *, product_required: bool,
