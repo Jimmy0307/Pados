@@ -146,6 +146,25 @@ _INSERT_BOUND_APPROVAL = """
 """
 
 
+_DECIDE_UNBOUND_APPROVAL = """
+    UPDATE control_approvals
+    SET status = :status, version = version + 1, decision_reason = :decision_reason,
+        decided_at = now(), updated_at = now()
+    WHERE id = :id AND version = :version AND status = 'PENDING'
+    RETURNING *
+"""
+
+_DECIDE_WORK_ROUTE_APPROVAL = """
+    UPDATE control_approvals
+    SET status = :status, version = version + 1, decision_reason = :decision_reason,
+        decided_at = now(),
+        expires_at = CASE WHEN :status = 'APPROVED' THEN now() + make_interval(secs => :ttl_seconds) END,
+        updated_at = now()
+    WHERE id = :id AND version = :version AND status = 'PENDING' AND subject_kind = 'WORK_ROUTE'
+    RETURNING *
+"""
+
+
 def _bound_subject_values(session: Session, values: dict[str, Any], raw_subject: object) -> dict[str, Any]:
     """Validate a WORK_ROUTE subject and derive proposal_hash from it (RC2 D1)."""
     subject = WorkRouteSubject.model_validate(raw_subject)
@@ -224,27 +243,17 @@ def decide_approval(
         current_version = int(str(current_version))
     if current_version != version:
         raise ValueError("stale approval version")
+    # Only a WORK_ROUTE approval has a lifecycle; a subject-less approval is decided with the columns every schema
+    # has, as D1 inserts it, so the proof lane (main heads 0011/0013) keeps working.
+    lifecycle = current.get("subject_kind") == "WORK_ROUTE"
     row = session.execute(
-        text(
-            """
-            UPDATE control_approvals
-            SET status = :status,
-                version = version + 1,
-                decision_reason = :decision_reason,
-                decided_at = now(),
-                expires_at = CASE WHEN :status = 'APPROVED' AND subject_kind = 'WORK_ROUTE'
-                                  THEN now() + make_interval(secs => :ttl_seconds) END,
-                updated_at = now()
-            WHERE id = :id AND version = :version AND status = 'PENDING'
-            RETURNING *
-            """
-        ),
+        text(_DECIDE_WORK_ROUTE_APPROVAL if lifecycle else _DECIDE_UNBOUND_APPROVAL),
         {
             "id": approval_id,
             "version": version,
-            "ttl_seconds": ttl_seconds,
             "status": status,
             "decision_reason": idempotency_key if not reason else f"{idempotency_key}: {reason}",
+            **({"ttl_seconds": ttl_seconds} if lifecycle else {}),
         },
     ).mappings().one()
     append_sync_event(session, str(row["project_id"]), f"APPROVAL_{status}", {"approval_id": approval_id})
