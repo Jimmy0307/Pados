@@ -8,16 +8,26 @@ Runs the documented operator path end to end as real processes and real HTTP, an
      no password exists) or an existing server (``--pg-host/--pg-port``; password from ``PADOS_DB_PASSWORD``)
   3. the documented lane migrations (docs/product/QUICKSTART.md) and ``pados doctor --json`` (must be ``ok``)
   4. ``pados serve`` on loopback; authentication checks (no token / default token / init token)
-  5. ``pados project create``, a work request, a WORK_ROUTE approval through the existing control approval path, a
-     task goal with success criteria, a one-step deterministic plan (RUN_STATIC_ANALYSIS / python_version), and the
-     existing TaskLoop driven through ``/control/loops``; the raw version output does not satisfy the declared
-     semantic outcome contract, so the loop must wait for human review and cannot be submitted as a ResultCandidate
-  6. governance negatives: a rejected approval cannot route; an unresolved result cannot enter semantic acceptance
-  7. restart: ``pados serve`` is stopped and started again; task, events and receipts are read back unchanged
-  8. governed acceptance: the existing ResultCandidate -> step-up approval -> single CAS suite
+  5. ``pados project create`` (initializes the local proof ScopeVersion), a work request carrying a hashed
+     TaskEnvelope, a WORK_ROUTE approval through the existing control approval path, a task goal, a one-step
+     deterministic plan (RUN_STATIC_ANALYSIS / markdown_reference_check, declared output contract
+     ``pados.capability-outcome.v1``) and the existing TaskLoop driven through ``/control/loops`` to COMPLETED;
+     execution receipts and artifact digests are read back
+  6. the completed loop is submitted through ``POST /control/loops/{id}/result-candidate``: verification passes and
+     the candidate waits for approval; nothing is committed
+  7. fail-closed negatives: a project with a broken reference ends WAITING_HUMAN and its candidate is refused; a step
+     outside the approval never runs; a finished loop cannot be paused or cancelled
+  8. restart with ``PADOS_REMOTE_CONFIG``: state, receipts and the pending candidate read back unchanged; a WebAuthn
+     device is enrolled through ``/remote/v1/presence/*`` (descriptor only; the operator adds it to the actor row)
+  9. governed acceptance over real HTTP: a standing session cannot decide; a fresh step-up proof approves; the
+     existing single CAS commits ScopeVersion 0 -> 1; the consumed proof cannot be replayed; after another restart
+     the lineage graph shows the accepted result
+ 10. the existing ResultCandidate -> step-up -> single CAS suite
      (tests/integration/test_final_convergence_product_loop_postgres.py) on dedicated lanes of the same server,
-     including rejection, stale scope version and candidate substitution
+     covering rejection, stale scope version and candidate substitution
 
+The WebAuthn device in steps 8-9 is the software authenticator in tests/remote/presence_support.py (a real P-256
+key and genuine ES256 assertions checked by the production verifier); it stands in for a phone or browser.
 ``--cluster-only`` starts the private cluster, prints the environment for integration tests and waits.
 Evidence: ``<out>/E2E_RESULT.json`` plus per-step logs. Exit 0 only when every step passed.
 """
@@ -28,6 +38,7 @@ import hashlib
 import json
 import os
 import platform
+import secrets
 import shutil
 import signal
 import subprocess
@@ -38,6 +49,7 @@ import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
+from types import EllipsisType
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[2]
@@ -49,8 +61,9 @@ MIGRATIONS = [("operational", "alembic.ini", "20261010_0019"), ("proof", "alembi
               ("proof", "alembic.ini", "20260808_0013"), ("proof", "alembic_p6_19b.ini", "head"),
               ("corpus", "alembic.ini", "20260730_0011")]
 SUBJECT_SCHEMA = "pados.approval-subject.v1"
-OPS = [{"step_sequence": 1, "capability_id": "RUN_STATIC_ANALYSIS", "command_id": "python_version",
-        "max_risk_level": "LOW"}]
+PROBE = "markdown_reference_check"  # emits pados.capability-outcome.v1 derived from what it checked
+OPS = [{"step_sequence": 1, "capability_id": "RUN_STATIC_ANALYSIS", "command_id": PROBE, "max_risk_level": "LOW"}]
+PRESENCE_ORIGIN = "http://localhost:5173"  # the software authenticator's origin; rp_id localhost
 TERMINAL = {"COMPLETED", "PAUSED", "BLOCKED", "WAITING_HUMAN", "FAILED_TERMINAL", "FAILED_RECOVERABLE", "CANCELLED"}
 
 
@@ -62,24 +75,25 @@ def dogfood_plan_step(tag: str) -> dict[str, Any]:
     return {
         "sequence": 1,
         "product_goal_id": dogfood_goal_id(tag),
-        "title": "Python version",
+        "title": "Check that every Markdown reference resolves",
         "step_type": "RUN_VALIDATION",
         "required_capability": "RUN_STATIC_ANALYSIS",
-        "command_id": "python_version",
+        "command_id": PROBE,
         "output_contract": {"pados_capability_outcome": "pados.capability-outcome.v1"},
     }
 
 
 def task_envelope_body(project_id: str, tag: str) -> str:
     """Build the synthetic task's canonical protocol body for the ResultCandidate path."""
-    from pados.work_protocol.models import Goal, TaskEnvelope
+    from pados.enterprise.classification import DataClassification
+    from pados.work_protocol.models import Goal, TaskEnvelope, TaskPriority
 
-    intent = "Synthetic dogfood task: report the Python version."
+    intent = "Synthetic dogfood task: check that every Markdown reference in the project resolves."
     goal = Goal(
         protocol_version="1.0",
         schema_version=Goal.SCHEMA,
         goal_id=dogfood_goal_id(tag),
-        title="Report the Python version",
+        title="Every Markdown reference resolves",
         objective=intent,
         required_capabilities=("RUN_STATIC_ANALYSIS",),
     )
@@ -90,8 +104,8 @@ def task_envelope_body(project_id: str, tag: str) -> str:
         original_intent=intent,
         normalized_goals=(goal,),
         project_ref=project_id,
-        classification="INTERNAL",
-        priority="NORMAL",
+        classification=DataClassification.INTERNAL,
+        priority=TaskPriority.NORMAL,
         deadline=None,
         scope_version_ref="scope:0",
         created_by="human:local-dogfood",
@@ -184,9 +198,10 @@ class Api:
     def __init__(self, port: int, control_value: str) -> None:
         self.base, self.control_value = f"http://127.0.0.1:{port}", control_value
 
-    def call(self, method: str, path: str, body: Any = None, *, control: str | None = ...) -> tuple[int, Any]:  # type: ignore[assignment]
-        headers = {"Content-Type": "application/json"}
-        presented = self.control_value if control is ... else control
+    def call(self, method: str, path: str, body: Any = None, *, control: str | None | EllipsisType = ...,
+             headers: dict[str, str] | None = None) -> tuple[int, Any]:
+        headers = {"Content-Type": "application/json", **(headers or {})}
+        presented = self.control_value if isinstance(control, EllipsisType) else control
         if presented is not None:
             headers["X-PADOS-Control-Token"] = presented
         data = None if body is None else json.dumps(body).encode("utf-8")
@@ -236,7 +251,7 @@ def route_refusal(api: Api, project: str, tag: str) -> dict[str, Any]:
                                                          "body": "Synthetic: a step the approval does not cover.",
                                                          "idempotency_key": f"{tag}-wr"})
     request = work["work_request"]["id"]
-    uncovered = [{**OPS[0], "step_sequence": 2}]  # the approval names step 2; the plan only has step 1
+    uncovered = [{**OPS[0], "step_sequence": 2, "command_id": "python_version"}]  # the approval names step 2; the plan only has step 1
     subject = {"kind": "WORK_ROUTE", "schema_version": SUBJECT_SCHEMA, "project_id": project, "request_id": request,
                "actor": {"surfaces": ["TASK_LOOP"], "worker_types": ["DETERMINISTIC_TOOL"]}, "operations": uncovered,
                "scope_version_ref": None, "task_envelope_hash": None}
@@ -279,7 +294,7 @@ def route_refusal(api: Api, project: str, tag: str) -> dict[str, Any]:
             "status": (after.get("loop") or after).get("status") if isinstance(after, dict) else None}
 
 
-def task_flow(run: Run, api: Api, project: str, tag: str) -> dict[str, Any]:
+def task_flow(api: Api, project: str, tag: str) -> dict[str, Any]:
     _, work = api.call("POST", "/control/work-requests", {"project_id": project, "title": f"Dogfood {tag}",
                                                          "body": task_envelope_body(project, tag),
                                                          "idempotency_key": f"{tag}-wr"})
@@ -288,7 +303,7 @@ def task_flow(run: Run, api: Api, project: str, tag: str) -> dict[str, Any]:
                "actor": {"surfaces": ["TASK_LOOP"], "worker_types": ["DETERMINISTIC_TOOL"]}, "operations": OPS,
                "scope_version_ref": None, "task_envelope_hash": None}
     _, created = api.call("POST", "/control/approvals", {"project_id": project, "idempotency_key": f"{tag}-ap",
-                                                         "proposal_summary": "Dogfood: python_version", "subject": subject})
+                                                         "proposal_summary": f"Dogfood: {PROBE}", "subject": subject})
     approval = created["approval"]
     pending_status, _ = api.call("POST", "/control/loops", {"task_goal_id": "00000000-0000-0000-0000-000000000000",
                                                           "approval_id": approval["id"], "idempotency_key": f"{tag}-early"})
@@ -296,8 +311,9 @@ def task_flow(run: Run, api: Api, project: str, tag: str) -> dict[str, Any]:
                                          {"version": approval["version"], "idempotency_key": f"{tag}-ok"})
     goal_status, goal = api.call("POST", "/control/task-goals", {
         "project_id": project, "request_id": request, "approval_id": approval["id"], "idempotency_key": f"{tag}-goal",
-        "objective": "Report the interpreter version deterministically",
-        "success_criteria": ["python_version step succeeds", "an execution receipt with an artifact digest exists"]})
+        "objective": "Check that every Markdown reference in the project resolves",
+        "success_criteria": ["the probe reports a declared COMPLETE outcome",
+                             "an execution receipt with artifact digests exists"]})
     goal_id = (goal.get("task_goal") or goal).get("id") if isinstance(goal, dict) else None
     plan_status, plan = api.call("POST", "/control/task-plans", {
         "task_goal_id": goal_id, "approval_id": approval["id"], "idempotency_key": f"{tag}-plan",
@@ -325,6 +341,107 @@ def task_flow(run: Run, api: Api, project: str, tag: str) -> dict[str, Any]:
             if isinstance(approved, dict) else None, "goal_http": goal_status, "plan_http": plan_status,
             "plan": plan_view, "loop_http": loop_status, "loop_id": loop_id, "final_status": final,
             "decisions": decisions, "events": events}
+
+
+def create_project(run: Run, api: Api, env: dict[str, str], root: Path, name: str, *, broken: bool) -> str:
+    """A synthetic, public-safe workspace; the broken one has a reference to a file that does not exist."""
+    workspace = root / "workspace" / name
+    (workspace / "docs").mkdir(parents=True, exist_ok=True)
+    (workspace / "README.md").write_text("Synthetic, public-safe dogfood project. See the [guide](docs/guide.md).\n",
+                                         encoding="utf-8")
+    target = "missing.md" if broken else "../README.md"
+    (workspace / "docs" / "guide.md").write_text(f"Back to the [overview]({target}).\n", encoding="utf-8")
+    run.command(f"project_create_{name}", [sys.executable, "-m", "pados.cli.main", "project", "create",
+                                           "--name", name, "--root-path", str(workspace)], env)
+    _, projects = api.call("GET", "/control/projects")
+    listing = projects.get("projects", projects) if isinstance(projects, dict) else projects
+    return str(next(p["id"] for p in listing if p.get("name") == name))
+
+
+class RemoteOperator:
+    """The operator's Remote Operations configuration: one approving actor on loopback, WebAuthn rp_id localhost."""
+
+    def __init__(self, root: Path, project: str) -> None:
+        sys.path.insert(0, str(REPO))
+        from tests.remote.presence_support import SoftwareAuthenticator
+
+        self.root, self.project = root / "remote", project
+        self.access = secrets.token_hex(32)  # lives only in this process; the config stores its SHA-256
+        self.device = SoftwareAuthenticator(origin=PRESENCE_ORIGIN)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def write_config(self, descriptor: dict[str, Any] | None = None) -> Path:
+        credentials = [] if descriptor is None else [{k: descriptor[k] for k in (
+            "credential_id", "algorithm", "public_key_cose")} | {"label": "dogfood-device"}]
+        path = self.root / "remote.json"
+        path.write_text(json.dumps({
+            "bind_host": "127.0.0.1", "staging_root": str(self.root / "staging"),
+            "ledger_path": str(self.root / "ledger" / "intents.jsonl"),
+            "actors": [{"actor_id": "owner", "credential_hash": hashlib.sha256(self.access.encode()).hexdigest(),
+                        "projects": [self.project], "may_approve": True, "presence_credentials": credentials}],
+            "presence": {"rp_id": "localhost", "origins": [PRESENCE_ORIGIN]}}, indent=2), encoding="utf-8")
+        return path
+
+
+class RemoteClient:
+    """Real HTTP against /remote/v1 on the loopback server, exactly as the PWA would call it."""
+
+    def __init__(self, port: int, operator: RemoteOperator) -> None:
+        self.api, self.operator = Api(port, ""), operator
+        self.headers = {"X-PADOS-Remote-Actor": "owner", "X-PADOS-Remote-Proof": operator.access}
+
+    def call(self, method: str, path: str, body: Any = None, extra: dict[str, str] | None = None) -> tuple[int, Any]:
+        return self.api.call(method, path, body, control=None, headers={**self.headers, **(extra or {})})
+
+    def waiting(self, candidate_id: str | None) -> str | None:
+        _, attention = self.call("GET", "/remote/v1/attention")
+        rows = (attention or {}).get("waiting_approval", []) if isinstance(attention, dict) else []
+        return next((r["approval_ref"] for r in rows if r.get("run_id") == candidate_id), None)
+
+    def enroll(self) -> dict[str, Any]:
+        _, options = self.call("POST", "/remote/v1/presence/enrollment-options", {})
+        public_key = (options or {}).get("public_key", {}) if isinstance(options, dict) else {}
+        status, body = self.call("POST", "/remote/v1/presence/enrollment-descriptor", {
+            "registration": self.operator.device.registration(public_key), "challenge": public_key.get("challenge")})
+        return {"http": status, "descriptor": body.get("descriptor") if isinstance(body, dict) else None}
+
+    def graph_status(self, candidate_id: str | None) -> dict[str, Any]:
+        _, graph = self.call("GET", f"/remote/v1/jobs/{candidate_id}/graph")
+        nodes = {n["node_id"]: n for n in (graph or {}).get("nodes", [])} if isinstance(graph, dict) else {}
+        semantic = [n for n in nodes.values() if str(n["node_id"]).startswith(f"semantic:{self.operator.project}:")]
+        return {"authority": (graph or {}).get("authority") if isinstance(graph, dict) else None,
+                "decision": (nodes.get(f"decision:{candidate_id}") or {}).get("status"),
+                "approval": (nodes.get(f"approval:{candidate_id}") or {}).get("status"),
+                "semantic": semantic[-1]["status"] if semantic else None,
+                "semantic_node": semantic[-1]["node_id"] if semantic else None}
+
+    def _decide(self, session: dict[str, str], ref: str, candidate_id: str, proof: str | None) -> tuple[int, Any]:
+        body: dict[str, Any] = {"intent_id": f"dogfood-approve-{secrets.token_hex(6)}", "project_id":
+                                self.operator.project, "target_run_id": candidate_id}
+        if proof is not None:
+            body["step_up_proof"] = proof
+        return self.call("POST", f"/remote/v1/approvals/{ref}/approve", body, session)
+
+    def accept(self, candidate_id: str | None) -> dict[str, Any]:
+        ref = self.waiting(candidate_id)
+        graph_before = self.graph_status(candidate_id)
+        _, plain = self.call("POST", "/remote/v1/sessions", {})
+        session = {"X-PADOS-Remote-Session": (plain or {}).get("session_handle", "")}
+        without_proof, _ = self._decide(session, str(ref), str(candidate_id), None)
+        _, challenge = self.call("POST", f"/remote/v1/approvals/{ref}/step-up", {"action": "APPROVE"}, session)
+        challenge = challenge if isinstance(challenge, dict) else {}
+        _, verified = self.call("POST", f"/remote/v1/approvals/{ref}/step-up/{challenge.get('challenge_id')}/verify",
+                                {"assertion": self.operator.device.assertion(challenge.get("public_key", {}))},
+                                session)
+        proof = (verified or {}).get("proof_ref") if isinstance(verified, dict) else None
+        decision_http, decision = self._decide(session, str(ref), str(candidate_id), proof)
+        replay_http, _ = self._decide(session, str(ref), str(candidate_id), proof)
+        decision = decision if isinstance(decision, dict) else {"raw": decision}
+        return {"approval_ref": ref, "without_proof_http": without_proof, "proof_issued": bool(proof),
+                "decision_http": decision_http, "outcome": decision.get("outcome"),
+                "presence_method": decision.get("presence_method"), "decision": decision,
+                "replay_http": replay_http, "graph_before": graph_before,
+                "graph_after": self.graph_status(candidate_id)}
 
 
 def evidence_of(api: Api, loop_id: str) -> list[dict[str, Any]]:
@@ -411,17 +528,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
         run.record("control_auth", no_token in (401, 403) and wrong in (401, 403) and ok == 200,
                    no_token=no_token, default_token=wrong, init_token=ok)
 
-        workspace = root / "workspace" / "dogfood-project"
-        workspace.mkdir(parents=True, exist_ok=True)
-        (workspace / "README.md").write_text("Synthetic, public-safe dogfood project.\n", encoding="utf-8")
-        created = run.command("project_create", [sys.executable, "-m", "pados.cli.main", "project", "create",
-                                                 "--name", "dogfood-synthetic", "--root-path", str(workspace)], env)
-        _, projects = api.call("GET", "/control/projects")
-        listing = projects.get("projects", projects) if isinstance(projects, dict) else projects
-        project = next(p["id"] for p in listing if p.get("name") == "dogfood-synthetic")
-        run.record("project_create", bool(project), project_id=project, cli_exit=created.returncode)
+        project = create_project(run, api, env, root, "dogfood-synthetic", broken=False)
+        broken_project = create_project(run, api, env, root, "dogfood-broken-reference", broken=True)
+        run.record("project_create", bool(project and broken_project), project_id=project,
+                   broken_project_id=broken_project)
 
-        flow = task_flow(run, api, project, f"dogfood-{int(started)}")
+        flow = task_flow(api, project, f"dogfood-{int(started)}")
         (run.out / "task_flow.json").write_text(json.dumps(flow, indent=2, default=str), encoding="utf-8")
         receipts = evidence_of(api, flow["loop_id"])
         run.record("approval_required_before_route", flow["approval_refused_before_approve"] >= 400,
@@ -429,51 +541,78 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
         run.record("human_approval", flow["approve_http"] == 200 and flow["approval_status"] == "APPROVED")
         run.record("plan_visible", flow["plan_http"] in (200, 201) and isinstance(flow["plan"], dict),
                    plan_http=flow["plan_http"])
-        waits_for_semantics = (
-            flow["final_status"] == "WAITING_HUMAN"
-            and bool(flow["decisions"])
-            and flow["decisions"][-1].get("decision") == "WAIT_FOR_HUMAN"
-        )
-        run.record("unstructured_result_waits_for_human", waits_for_semantics, final=flow["final_status"],
+        run.record("execution_completed", flow["final_status"] == "COMPLETED", final=flow["final_status"],
                    decisions=flow["decisions"])
         run.record("execution_receipt", bool(receipts) and all(r["status"] == "SUCCEEDED" and r["artifacts"]
                                                                 and all(len(d or "") == 64 for _, d in r["artifacts"])
                                                                 for r in receipts), receipts=receipts)
 
-        candidate_status, candidate_result = api.call(
-            "POST", f"/control/loops/{flow['loop_id']}/result-candidate", {}
-        )
-        candidate_refused = (
-            candidate_status >= 400
-            and isinstance(candidate_result, dict)
-            and candidate_result.get("detail") == "RESULT_CANDIDATE_REQUIRES_COMPLETED_TASKLOOP"
-        )
-        run.record("unresolved_loop_cannot_submit_result_candidate", candidate_refused,
-                   response_detail=candidate_result.get("detail") if isinstance(candidate_result, dict) else None)
+        submitted_http, submitted = api.call("POST", f"/control/loops/{flow['loop_id']}/result-candidate", {})
+        candidate = (submitted or {}).get("candidate", {}) if isinstance(submitted, dict) else {}
+        run.record("result_candidate_verified_waiting_approval", submitted_http == 200
+                   and candidate.get("verification_status") == "PASSED"
+                   and candidate.get("decision_status") == "WAITING_APPROVAL", http=submitted_http,
+                   candidate=candidate)
+
+        broken = task_flow(api, broken_project, f"dogfood-broken-{int(started)}")
+        broken_http, broken_result = api.call("POST", f"/control/loops/{broken['loop_id']}/result-candidate", {})
+        run.record("broken_reference_waits_for_human_and_is_refused", broken["final_status"] == "WAITING_HUMAN"
+                   and broken_http >= 400 and isinstance(broken_result, dict)
+                   and broken_result.get("detail") == "RESULT_CANDIDATE_REQUIRES_COMPLETED_TASKLOOP",
+                   final=broken["final_status"], decisions=broken["decisions"], http=broken_http,
+                   response_detail=broken_result.get("detail") if isinstance(broken_result, dict) else None)
 
         refusal = route_refusal(api, project, f"dogfood-uncovered-{int(started)}")
         run.record("uncovered_step_never_runs", refusal["status"] in ("BLOCKED", "REFUSED")
                    and refusal["jobs_for_request"] == 0, **refusal)
 
-        run.record("task_waits_for_human_after_unresolved_semantics", flow["final_status"] == "WAITING_HUMAN",
-                   status=flow["final_status"])
+        pause, _ = api.call("POST", f"/control/loops/{flow['loop_id']}/pause", {})
+        cancel, _ = api.call("POST", f"/control/loops/{flow['loop_id']}/cancel", {})
+        run.record("finished_loop_cannot_be_paused_or_cancelled", pause >= 400 and cancel >= 400,
+                   pause=pause, cancel=cancel)
 
         stop_server(server)
+        operator = RemoteOperator(root, project)
+        env["PADOS_REMOTE_CONFIG"] = str(operator.write_config())
         server = start_server(run, env, args.api_port, "serve_after_restart")
         _, loop_again = api.call("GET", f"/control/loops/{flow['loop_id']}")
         status_again = (loop_again.get("loop") or loop_again).get("status") if isinstance(loop_again, dict) else None
         receipts_again = evidence_of(api, flow["loop_id"])
-        run.record("restart_persistence", status_again == flow["final_status"] == "WAITING_HUMAN"
-                   and receipts_again == receipts,
-                   status_after_restart=status_again, evidence_unchanged=receipts_again == receipts)
-        candidate_status_again, candidate_result_again = api.call(
-            "POST", f"/control/loops/{flow['loop_id']}/result-candidate", {}
-        )
-        run.record("candidate_refusal_persists_after_restart", candidate_status_again >= 400
-                   and isinstance(candidate_result_again, dict)
-                   and candidate_result_again.get("detail") == "RESULT_CANDIDATE_REQUIRES_COMPLETED_TASKLOOP",
-                   response_detail=candidate_result_again.get("detail")
-                   if isinstance(candidate_result_again, dict) else None)
+        remote = RemoteClient(args.api_port, operator)
+        waiting = remote.waiting(candidate.get("candidate_id"))
+        run.record("restart_persistence", status_again == "COMPLETED" and receipts_again == receipts
+                   and waiting is not None, status_after_restart=status_again,
+                   evidence_unchanged=receipts_again == receipts, candidate_still_waiting=waiting is not None)
+
+        enrolled = remote.enroll()
+        run.record("presence_device_enrolled", enrolled["http"] == 200 and enrolled["descriptor"] is not None,
+                   http=enrolled["http"], attestation_verified=(enrolled["descriptor"] or {}).get(
+                       "attestation_verified"), authenticator="software (tests/remote/presence_support.py)")
+        stop_server(server)
+        operator.write_config(enrolled["descriptor"])  # the operator edits the actor row; the API never does
+        server = start_server(run, env, args.api_port, "serve_with_enrolled_device")
+
+        accepted = remote.accept(candidate.get("candidate_id"))
+        (run.out / "governed_acceptance_live.json").write_text(json.dumps(accepted, indent=2, default=str),
+                                                               encoding="utf-8")
+        run.record("standing_session_cannot_decide", accepted["without_proof_http"] in (403, 422),
+                   http=accepted["without_proof_http"])
+        run.record("governed_acceptance_live_cas", accepted["decision_http"] == 200
+                   and accepted["outcome"] == "COMMITTED"
+                   and accepted["presence_method"] == "WEBAUTHN_USER_VERIFICATION",
+                   http=accepted["decision_http"], outcome=accepted["outcome"],
+                   presence_method=accepted["presence_method"], graph_before=accepted["graph_before"],
+                   graph_after=accepted["graph_after"])
+        run.record("consumed_proof_cannot_be_replayed", accepted["replay_http"] in (403, 409, 422),
+                   http=accepted["replay_http"])
+
+        stop_server(server)
+        server = start_server(run, env, args.api_port, "serve_after_acceptance")
+        after = remote.graph_status(candidate.get("candidate_id"))
+        _, loop_final = api.call("GET", f"/control/loops/{flow['loop_id']}")
+        run.record("acceptance_persists_after_restart", after.get("decision") == "ACCEPTED"
+                   and after.get("semantic") == "ACCEPTED"
+                   and (loop_final.get("loop") or loop_final).get("status") == "COMPLETED", graph=after)
         stop_server(server)
         server = None
 
@@ -490,7 +629,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
                 sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "addopts=", "-rs",
                 "tests/integration/test_final_convergence_product_loop_postgres.py"], accept_env, check=False)
             tail = suite.stdout.strip().splitlines()[-1:] if suite.stdout else []
-            run.record("governed_acceptance_cas", suite.returncode == 0 and "skipped" not in " ".join(tail),
+            run.record("governed_acceptance_suite", suite.returncode == 0 and "skipped" not in " ".join(tail),
                        exit=suite.returncode, summary=tail)
     except Exception as exc:  # noqa: BLE001 - every failure is recorded as evidence, then the run fails
         run.record("unexpected_failure", False, error=f"{type(exc).__name__}: {exc}"[:800])

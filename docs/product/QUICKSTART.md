@@ -43,16 +43,25 @@ PADOS_DB_PASSWORD=... python scripts/dogfood/local_dogfood_e2e.py --pg-port 5544
 
 It runs `pados init`, the lane migrations above, `pados doctor`, and `pados serve`. Through the control API it then:
 - authenticates, and checks that a missing token and the public default token are refused;
-- creates a project;
-- takes a work request through human approval to a goal, a plan and a deterministic TaskLoop run; the Python-version
-  probe's plain text output does not satisfy the declared semantic outcome contract, so the task waits for human review
-  and cannot enter ResultCandidate approval;
-- checks that a step outside the approval is refused and that unresolved work is not reported as completed;
-- restarts the server and reads the same state back.
+- creates two synthetic projects (their proof ScopeVersion is initialized);
+- takes a work request with a hashed TaskEnvelope through human approval to a goal, a plan and a deterministic
+  TaskLoop run of `markdown_reference_check`, a read-only registered probe that checks that every relative Markdown
+  reference resolves inside the project and reports a declared `pados.capability-outcome.v1` outcome; the loop
+  reaches `COMPLETED` and the receipts carry SHA-256 digests;
+- submits the completed loop as a ResultCandidate: verification passes and an approval is pending, nothing commits;
+- in the second project a broken reference makes the outcome UNRESOLVED: the task waits for a human and its candidate
+  is refused; a step outside the approval never runs; a finished loop cannot be paused or cancelled;
+- restarts with `PADOS_REMOTE_CONFIG` (loopback, one approving actor, WebAuthn rp_id `localhost`), reads the same state
+  and the pending candidate back, and enrolls a device through `/remote/v1/presence/*`;
+- approves over real HTTP: a standing session is refused, a fresh WebAuthn step-up proof approves, the existing single
+  CAS commits ScopeVersion 0 → 1, the consumed proof cannot be replayed, and after another restart the lineage graph
+  shows the accepted result.
 
-It finishes with the existing deterministic ResultCandidate → step-up approval → single-CAS integration suite on
-dedicated lanes. That suite validates the governed acceptance path using synthetic fixture evidence; it is not live
-provider validation. Evidence is written to `<out>/E2E_RESULT.json`.
+The WebAuthn device in that run is the software authenticator from `tests/remote/presence_support.py` (a real P-256
+key; the production verifier checks it). It stands in for a phone or browser; it is not a hardware-key validation.
+The run finishes with the existing ResultCandidate → step-up → single-CAS integration suite on dedicated lanes
+(rejection, stale ScopeVersion, candidate substitution). No model provider is involved. Evidence is written to
+`<out>/E2E_RESULT.json`.
 
 After a TaskLoop reaches `COMPLETED`, submit its verified result for review:
 
@@ -65,7 +74,12 @@ submission does not accept the result; a human must inspect and approve it throu
 CAS flow. The loop must be `COMPLETED`, its task must carry a valid TaskEnvelope and matching product-goal bindings, and
 the capability output must satisfy its declared semantic contract. A successful process exit or a plain text command
 output is not sufficient. If any verification check fails or no current proof ScopeVersion can be read, no approval is
-created.
+created. The same submission is available as `POST /control/loops/{loop_id}/result-candidate`.
+
+To decide a pending candidate, configure Remote Operations (`docs/remote/REMOTE_OPERATIONS_V1.md`): `pados serve`
+mounts `/remote/v1` on loopback when `PADOS_REMOTE_CONFIG` is set. Enroll your device from the PWA, add the descriptor
+to your actor row, restart, then approve or reject from the PWA's approval view; each decision needs a fresh WebAuthn
+step-up. Approval commits through the existing single CAS; rejection keeps the evidence and commits nothing.
 
 **Optional: a local compute node.**
 
