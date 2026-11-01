@@ -101,6 +101,7 @@ def _consume_for_loop(session: Session, approval: dict[str, Any], loop_id: str) 
             """
             UPDATE control_approvals SET consumed_by_loop_id = CAST(:loop_id AS uuid), updated_at = now()
             WHERE id = CAST(:id AS uuid)
+              AND status = 'APPROVED' AND (expires_at IS NULL OR expires_at > now())
               AND (consumed_by_loop_id IS NULL OR consumed_by_loop_id = CAST(:loop_id AS uuid))
             RETURNING id
             """

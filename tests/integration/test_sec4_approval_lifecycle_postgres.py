@@ -158,3 +158,15 @@ def test_revoking_mid_loop_stops_before_routing_and_waits_for_a_human(
     assert after["status"] == "WAITING_HUMAN"
     assert "APPROVAL_REVOKED" in str(after["final_result"]) or "APPROVAL_REVOKED" in str(result)
     assert router.calls == [] and _jobs(session, request_id) == 0
+
+
+def test_the_consume_step_rechecks_the_approval_it_binds(session: Session, router: Router, tmp_path: Path) -> None:
+    project_id = _project(session, tmp_path / "ws")
+    request_id = _request(session, project_id)
+    approval_id = _approval(session, project_id, _subject(project_id, request_id, [_loop_op(1)]))
+    stale = _row(session, approval_id)  # read as APPROVED; revocation commits before the loop binds it
+    session.execute(text("UPDATE control_approvals SET status = 'CANCELLED' WHERE id = CAST(:id AS uuid)"),
+                    {"id": approval_id})
+    with pytest.raises(PermissionError, match="APPROVAL_CONSUMED"):
+        loop_service._consume_for_loop(session, dict(stale), str(uuid4()))
+    assert _row(session, approval_id)["consumed_by_loop_id"] is None

@@ -81,6 +81,14 @@ and again before every TaskLoop step:
 A running loop whose approval expires, is revoked or is bound elsewhere stops before its next route. It moves to
 `WAITING_HUMAN`, records the reason, and runs nothing.
 
+Further rules:
+- Revocation does not cancel a job that already finished.
+- A routed local-model job is checked again just before the model is called. Its deadline, its approval and the
+  SHA-256 of its handoff must still hold. Otherwise the job closes without a model call (`TIMED_OUT`,
+  `APPROVAL_REVOKED`/`APPROVAL_EXPIRED`, `HANDOFF_EVIDENCE_TAMPERED`).
+- A direct operation is one-shot even when its job fails; a retry needs a new approval.
+- Approvals decided before migration `20261101_0020` expire 24 h after their decision.
+
 `CONTROL_API` is a structural binding to the requesting surface, not a user identity: the control API
 has no authenticated user. `POST /control/work-requests/{id}/route` always routes as
 `CONTROL_API` with no step, whatever the client sends.

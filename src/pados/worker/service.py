@@ -957,6 +957,9 @@ def execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any
 
     scope = session_factory or session_scope
     with scope(settings) as session:
+        refused = _deferred_claim_refusal(session, job_id)
+        if refused is not None:
+            return refused
         claimed = session.execute(
             text(
                 """
@@ -984,4 +987,58 @@ def execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any
         planned, job=job, handoff_path=handoff_path, artifact_dir=handoff_path.parent
     )
     with scope(settings) as session:
-        return _finish_model_job(session, job=job, require_running=True, **outcome)
+        recorded = _finish_model_job(session, job=job, require_running=True, **outcome)
+    stdout_path = outcome.get("stdout_path")
+    if isinstance(stdout_path, Path) and recorded.get("status") != outcome["status"]:
+        stdout_path.unlink(missing_ok=True)  # an unrecorded late result must not look like evidence later
+    return recorded
+
+
+def _deferred_claim_refusal(session: Session, job_id: str) -> dict[str, Any] | None:
+    """Before a routed model job is claimed: it must still be within its deadline, its approval still valid, and its
+    handoff byte-identical to the recorded digest. Otherwise the job is closed and the model is never called."""
+    job = session.execute(
+        text(
+            """
+            SELECT j.*, (now() > j.queued_at + make_interval(secs => j.timeout_seconds)) AS overdue,
+                   a.status AS approval_status,
+                   (a.expires_at IS NOT NULL AND a.expires_at <= now()) AS approval_expired
+            FROM worker_jobs j LEFT JOIN control_approvals a ON a.id = j.approval_id
+            WHERE j.id = CAST(:id AS uuid) AND j.status = 'ROUTED' AND j.worker_type = :worker_type
+            FOR UPDATE OF j
+            """
+        ),
+        {"id": job_id, "worker_type": WorkerType.OLLAMA.value},
+    ).mappings().first()
+    if job is None:
+        return None
+    handoff = session.execute(
+        text(
+            "SELECT path, sha256 FROM worker_job_artifacts WHERE job_id = CAST(:id AS uuid) "
+            "AND artifact_type = 'handoff_json' ORDER BY created_at LIMIT 1"
+        ),
+        {"id": job_id},
+    ).mappings().first()
+    status, code = "", ""
+    if job["overdue"]:
+        status, code = "TIMED_OUT", "TIMED_OUT"
+    elif job["approval_status"] == "CANCELLED":
+        status, code = "BLOCKED", APPROVAL_REVOKED
+    elif job["approval_status"] != "APPROVED":
+        status, code = "BLOCKED", APPROVAL_NOT_APPROVED
+    elif job["approval_expired"]:
+        status, code = "BLOCKED", APPROVAL_EXPIRED
+    elif handoff is None or _file_sha256(Path(str(handoff["path"]))) != str(handoff["sha256"]):
+        status, code = "FAILED", "HANDOFF_EVIDENCE_TAMPERED"
+    if not status:
+        return None
+    return _finish_model_job(session, job=dict(job), status=status, error_code=code, validation_status="FAILED",
+                             usage_metadata={"measured_execution": None},
+                             result_summary=f"Routed model job closed before the call: {code}.")
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None

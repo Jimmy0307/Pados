@@ -174,3 +174,53 @@ def test_an_interrupted_step_is_resumed_and_the_model_runs_exactly_once(
     assert result["loop"]["status"] == "COMPLETED" and probe.calls == 1
     again = worker_service.execute_routed_model_job(SETTINGS, str(job["id"]), session_factory=scope)
     assert again["status"] == "SUCCEEDED" and probe.calls == 1  # a repeated execution is a no-op
+
+
+def _interrupted_model_job(engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+                           ) -> tuple[dict[str, str], Any, LockProbe, dict[str, Any]]:
+    runtime, scope = _seed(engine, tmp_path, monkeypatch)
+    probe = LockProbe(engine, {})
+    monkeypatch.setattr(worker_service, "build_chat_provider", lambda *_a, **_k: probe)
+    with scope() as session:
+        loop_service.run_one_iteration(session, loop_id=runtime["loop_id"], settings=SETTINGS,
+                                       artifact_root=tmp_path / "artifacts", idempotency_key=f"sec9-x-{uuid4()}",
+                                       defer_model_execution=True)
+    return runtime, scope, probe, _model_job(engine, runtime["request_id"])
+
+
+def test_a_revoked_approval_stops_a_routed_model_job_before_the_call(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pados.control import service as control_service
+
+    runtime, scope, probe, job = _interrupted_model_job(engine, tmp_path, monkeypatch)
+    with scope() as session:
+        approval = control_service.get_approval(session, str(job["approval_id"]))
+        control_service.revoke_approval(session, str(job["approval_id"]), version=int(str(approval["version"])),
+                                        reason="withdrawn", idempotency_key=f"sec9-rv-{uuid4()}")
+    result = worker_service.execute_routed_model_job(SETTINGS, str(job["id"]), session_factory=scope)
+    assert probe.calls == 0
+    assert (result["status"], result["error_code"]) == ("BLOCKED", "APPROVAL_REVOKED")
+
+
+def test_a_tampered_handoff_is_never_sent_to_the_model(
+    engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, scope, probe, job = _interrupted_model_job(engine, tmp_path, monkeypatch)
+    with engine.connect() as connection:
+        handoff = connection.execute(text(
+            "SELECT path FROM worker_job_artifacts WHERE job_id = CAST(:j AS uuid) AND artifact_type = 'handoff_json'"),
+            {"j": str(job["id"])}).scalar_one()
+    Path(str(handoff)).write_text('{"relevant_facts": ["injected"]}', encoding="utf-8")
+    result = worker_service.execute_routed_model_job(SETTINGS, str(job["id"]), session_factory=scope)
+    assert probe.calls == 0
+    assert (result["status"], result["error_code"]) == ("FAILED", "HANDOFF_EVIDENCE_TAMPERED")
+
+
+def test_an_overdue_routed_job_is_not_claimed(engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime, scope, probe, job = _interrupted_model_job(engine, tmp_path, monkeypatch)
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE worker_jobs SET queued_at = now() - interval '1 hour' "
+                                "WHERE id = CAST(:j AS uuid)"), {"j": str(job["id"])})
+    result = worker_service.execute_routed_model_job(SETTINGS, str(job["id"]), session_factory=scope)
+    assert probe.calls == 0 and result["status"] == "TIMED_OUT"

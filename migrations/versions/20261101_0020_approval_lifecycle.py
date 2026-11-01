@@ -4,9 +4,10 @@ Revision ID: 20261101_0020
 Revises: 20261010_0019
 Create Date: 2026-11-01
 
-``expires_at`` is set when a WORK_ROUTE approval is approved; NULL (approvals decided before this revision, and
-subject-less approvals) never expires here. ``consumed_by_loop_id`` binds a WORK_ROUTE approval to the one TaskLoop
-created from it and can never be moved to another loop. Revocation uses the existing ``CANCELLED`` status.
+``expires_at`` is set when a WORK_ROUTE approval is approved; approved WORK_ROUTE approvals decided before this
+revision get 24 hours from their decision. Subject-less approvals keep NULL (their own lifecycle).
+``consumed_by_loop_id`` binds a WORK_ROUTE approval to the one TaskLoop created from it and can never be moved to
+another loop. Revocation uses the existing ``CANCELLED`` status.
 """
 from collections.abc import Sequence
 
@@ -45,6 +46,14 @@ def upgrade() -> None:
         CREATE TRIGGER trg_control_approvals_consumption_write_once
         BEFORE UPDATE ON control_approvals
         FOR EACH ROW EXECUTE FUNCTION control_approvals_consumption_write_once()
+        """
+    )
+    # Approvals decided before this revision get the default lifetime from their decision, so none stays valid
+    # indefinitely; an old one is already expired and its loop waits for a human (fail closed).
+    op.execute(
+        """
+        UPDATE control_approvals SET expires_at = COALESCE(decided_at, updated_at, created_at) + interval '24 hours'
+        WHERE subject_kind = 'WORK_ROUTE' AND status = 'APPROVED' AND expires_at IS NULL
         """
     )
     # Bind existing WORK_ROUTE approvals to their loop when exactly one loop uses them; shared legacy approvals stay

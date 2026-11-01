@@ -83,3 +83,20 @@ def test_project_modules_cannot_hijack_the_probe(tmp_path: Path) -> None:
         shadow.write_text("raise SystemExit('project code ran')\n", encoding="utf-8")
     result, outcome = _run(root)
     assert result["status"] == "SUCCEEDED" and outcome is CoverageStatus.COMPLETE
+
+
+def test_markdown_without_any_checkable_reference_is_unresolved_not_vacuously_complete(tmp_path: Path) -> None:
+    root = tmp_path / "linkless"
+    root.mkdir()
+    (root / "README.md").write_text("No links. [external](https://example.org) and [anchor](#x) only.\n"
+                                    "```\n[fenced](missing.md)\n```\n", encoding="utf-8")
+    result, outcome = _run(root)
+    assert outcome is CoverageStatus.UNRESOLVED
+    assert json.loads(str(result["stderr"]))["references_checked"] == 0
+
+
+def test_a_malformed_target_is_reported_not_a_crash(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    (root / "docs" / "guide.md").write_text("Bad [x](a%00b.md).\n", encoding="utf-8")
+    result, outcome = _run(root)
+    assert result["status"] == "SUCCEEDED" and outcome is CoverageStatus.UNRESOLVED

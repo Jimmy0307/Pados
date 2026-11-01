@@ -66,6 +66,7 @@ def run(instance_id: str, home: Path | None = None) -> None:
     server = uvicorn.Server(uvicorn.Config(create_app(), host=settings.api_host, port=settings.api_port,
                                            log_level="info"))
     if home is not None:
+        (home / STOP_FILE).unlink(missing_ok=True)  # a request left by an interrupted `pados down` is not for us
         threading.Thread(target=watch_stop_file, args=(server, home / STOP_FILE, instance_id), daemon=True,
                          name="pados-stop-request").start()
     server.run()

@@ -4,7 +4,7 @@
 Run by the registered ``markdown_reference_check`` command as ``python -I <this file>`` with the project root as the
 working directory. Standard library only, so isolated mode never imports project code. Standard output is exactly a
 ``pados.capability-outcome.v1`` document; the evidence (counts and broken references) goes to standard error.
-COMPLETE only when at least one Markdown file was checked and nothing is broken; anything else is UNRESOLVED.
+COMPLETE only when at least one local reference was checked and nothing is broken; anything else is UNRESOLVED.
 """
 from __future__ import annotations
 
@@ -54,8 +54,25 @@ def _resolves(root: Path, source: Path, target: str) -> bool | None:
     if not path:
         return None
     candidate = (root / path.lstrip("/")) if path.startswith("/") else (source.parent / path)
-    resolved = candidate.resolve()
-    return (resolved == root or root in resolved.parents) and resolved.exists()
+    try:
+        resolved = candidate.resolve()
+        return (resolved == root or root in resolved.parents) and resolved.exists()
+    except (OSError, ValueError):  # a malformed target (for example an embedded NUL) is broken, never a crash
+        return False
+
+
+def _read_bounded(source: Path) -> str | None:
+    """Read at most MAX_FILE_BYTES of a regular file, never through a link; None when it cannot be read safely."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    if source.is_symlink():
+        return None
+    try:
+        descriptor = os.open(source, flags)
+    except OSError:
+        return None
+    with os.fdopen(descriptor, "rb") as handle:
+        data = handle.read(MAX_FILE_BYTES + 1)
+    return None if len(data) > MAX_FILE_BYTES else data.decode("utf-8", errors="replace")
 
 
 def check(root: Path) -> tuple[str, dict[str, object]]:
@@ -64,24 +81,26 @@ def check(root: Path) -> tuple[str, dict[str, object]]:
     broken: list[dict[str, str]] = []
     checked = 0
     for source in files:
-        if source.is_symlink() or source.stat().st_size > MAX_FILE_BYTES:
+        text = _read_bounded(source)
+        if text is None:
             broken.append({"file": source.relative_to(root).as_posix(), "target": "<unreadable>"})
             continue
-        for target in _targets(source.read_text(encoding="utf-8", errors="replace")):
+        for target in _targets(text):
             verdict = _resolves(root, source, target)
             if verdict is None:
                 continue
             checked += 1
             if not verdict:
                 broken.append({"file": source.relative_to(root).as_posix(), "target": target})
-    outcome = "COMPLETE" if files and not broken else "UNRESOLVED"
+    # Nothing checked is not evidence: COMPLETE needs at least one local reference and none broken.
+    outcome = "COMPLETE" if checked and not broken else "UNRESOLVED"
     return outcome, {"files_checked": len(files), "references_checked": checked, "broken": broken}
 
 
 def main() -> int:
     try:
         outcome, report = check(Path.cwd())
-    except (OSError, OverflowError) as exc:
+    except (OSError, OverflowError, ValueError) as exc:
         outcome, report = "UNRESOLVED", {"error": type(exc).__name__, "detail": str(exc)[:200]}
     sys.stdout.write(json.dumps({"schema_version": SCHEMA, "outcome": outcome}, sort_keys=True))
     sys.stderr.write(json.dumps(report, sort_keys=True))

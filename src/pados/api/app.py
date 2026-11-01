@@ -3,7 +3,7 @@ from collections.abc import Callable
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DataError, NoResultFound, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from pados import __version__
@@ -71,6 +71,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except NoResultFound as exc:  # an unknown id is a 404, not a server error
+            raise HTTPException(status_code=404, detail="NOT_FOUND") from exc
+        except DataError as exc:  # a malformed id (for example not a UUID) is rejected without detail
+            raise HTTPException(status_code=422, detail="INVALID_IDENTIFIER") from exc
 
     def required_payload_value(payload: dict[str, object], key: str) -> str:
         value = payload.get(key)

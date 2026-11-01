@@ -775,7 +775,9 @@ def init(
         (local / sub).mkdir(parents=True, exist_ok=True)
     control_value = token_source.token_urlsafe(32)
     token_file = local / "control.token"
-    fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if token_file.is_symlink() or env_path.is_symlink():
+        raise typer.BadParameter("refusing to write the control token or .env through a symbolic link")
+    fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         stream.write(control_value + "\n")
     lines = [
@@ -799,6 +801,8 @@ def init(
         "# PADOS_LOCAL_INFERENCE_TIMEOUT_SECONDS=30",
     ]
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for private in (token_file, env_path):  # both hold credentials or their hashes; owner-only where the OS allows
+        os.chmod(private, 0o600)
     typer.echo(json.dumps({"env": str(env_path), "control_token_file": str(token_file),
                            "next": ["pados doctor", "alembic upgrade (see docs/product/QUICKSTART.md)", "pados serve"]},
                           indent=2))
