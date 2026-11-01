@@ -38,6 +38,7 @@ MUTATIONS: dict[tuple[str, str], MutationKind] = {
     ("POST", "/context/assemble"): _RECONCILE,  # may store a context packet
     ("POST", "/control/projects/{project_id}/messages"): _KEY,
     ("POST", "/control/work-requests"): _KEY,
+    # A different route under a reused key is refused by the approval-binding check (audited), never replayed.
     ("POST", "/control/work-requests/{request_id}/route"): _KEY,
     ("POST", "/control/approvals"): _KEY,
     # A decision applies once: a decided approval refuses every later decision ("approval is not pending",

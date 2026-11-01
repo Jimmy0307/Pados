@@ -364,9 +364,10 @@ def _direct_operation_already_routed(session: Session, route: RouteRequest) -> b
 def _idempotent_job(session: Session, request_id: str, route: RouteRequest) -> dict[str, Any] | None:
     """Return an existing job only when it was routed under the same approval and operation.
 
-    The same key under a different approval, capability or command is a conflict (OP-004). It used to fall through to
-    the insert and fail on the (request_id, idempotency_key) unique constraint; it is now refused by name, before any
-    write.
+    The same key under a different approval, capability or command is never a replay. It falls through to the full
+    approval-binding check, which refuses it with its own code and an audited ROUTE_REFUSED record (RC2 D1); the
+    (request_id, idempotency_key) unique constraint backs that up. It is deliberately not short-circuited into a
+    generic conflict here, which would hide the authority's refusal and its audit trail.
     """
     existing = session.execute(
         text(
@@ -389,9 +390,7 @@ def _idempotent_job(session: Session, request_id: str, route: RouteRequest) -> d
         and isinstance(payload, dict)
         and payload.get("command_id") == route.command_id
     )
-    if not same_route:
-        raise ValueError("ROUTE_IDEMPOTENCY_CONTENT_CONFLICT")
-    return dict(existing)
+    return dict(existing) if same_route else None
 
 
 def route_work_request(
