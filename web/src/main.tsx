@@ -165,7 +165,7 @@ function App() {
         </aside>
 
         <section className="content">
-          {error && <div className="alert error" role="alert"><strong>{error.code || "Request failed"}</strong> {error.message}</div>}
+          {error && <div className="alert error" role="alert"><strong>{error.code || "Request failed"}</strong> {error.message}{error.request_id && <small> Request {error.request_id}</small>}</div>}
           {busy && <div className="alert progress" role="status">{busy}</div>}
           <section className="hero panel">
             <div>

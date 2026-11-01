@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** Remote Operations client. Sends intents, reads projections. Holds no context. */
 
+import { actionKey, HttpError, requestJson, singleFlight, type RequestOutcome } from "./http";
 export type Bucket = "WAITING_APPROVAL" | "FAILED" | "RUNNING" | "COMPLETED";
 
 export interface RemoteRun {
@@ -165,7 +166,12 @@ export const browserAuthenticator: PresenceAuthenticator = async (options) => {
 };
 
 export class RemoteApiError extends Error {
-  constructor(readonly status: number, readonly detail: string) {
+  constructor(
+    readonly status: number,
+    readonly detail: string,
+    readonly requestId = "",
+    readonly outcome: RequestOutcome = "SERVER_ERROR",
+  ) {
     super(`${status} ${detail}`);
   }
 }
@@ -204,7 +210,8 @@ export class RemoteClient {
   }
 
   private async call<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await this.fetcher(`${this.baseUrl}${PREFIX}${path}`, {
+    const url = `${this.baseUrl}${PREFIX}${path}`;
+    const send = () => requestJson<T>(url, {
       ...init,
       headers: {
         "Content-Type": "application/json",
@@ -212,18 +219,15 @@ export class RemoteClient {
         "X-PADOS-Remote-Proof": this.signIn.proof,
         ...(init.headers || {}),
       },
+    }, { fetcher: this.fetcher }).catch((error: unknown) => {
+      // OP-007: keep RemoteApiError for callers, with the request id and the distinct outcome.
+      if (!(error instanceof HttpError)) throw error;
+      const detail = typeof error.detail === "string" ? error.detail
+        : error.detail !== undefined ? JSON.stringify(error.detail) : error.code;
+      throw new RemoteApiError(error.status, detail, error.requestId, error.outcome);
     });
-    if (!response.ok) {
-      let detail = response.statusText;
-      try {
-        const body = (await response.json()) as { detail?: unknown };
-        detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
-      } catch {
-        /* keep status text */
-      }
-      throw new RemoteApiError(response.status, detail);
-    }
-    return (await response.json()) as T;
+    const method = (init.method || "GET").toUpperCase();
+    return method !== "GET" && typeof init.body === "string" ? singleFlight(actionKey(method, url, init.body), send) : send();
   }
 
   attention(): Promise<AttentionProjection> {
