@@ -7,7 +7,9 @@ Two checks, both mechanical, so a finding is always a real dangling reference an
 * ``CODE_PATH_MISSING``: a backticked repository path (``src/...``, ``tests/...``, ``scripts/...``, ``docs/...``,
   ``web/...``, ``packages/...``) names a file or directory that does not exist.
 
-Placeholders (``<sha>``, ``*``, ``…``) and paths under ``runtime/`` (machine-local evidence) are not checked. A doc
+Placeholders (``<sha>``, ``*``, ``…``), paths under ``runtime/`` (machine-local evidence) and build outputs that a clean
+checkout does not have (``web/dist``, ``web/node_modules``) are not checked, so the result is the same locally and in
+CI. A doc
 whose purpose is to name paths that are deliberately absent (an export exclusion list) carries the marker
 ``<!-- doc-lint: names-absent-paths -->``; that turns off only its ``CODE_PATH_MISSING`` check, visibly in the doc.
 """
@@ -22,6 +24,7 @@ _LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 _CODE = re.compile(r"`([^`\s]+)`")
 _REPO_PREFIXES = ("src/", "tests/", "scripts/", "docs/", "web/", "packages/", ".github/")
 _PLACEHOLDER = re.compile(r"[<>*…{}$]|\.\.\.")
+_GENERATED = ("web/dist", "web/node_modules")
 _FENCE = re.compile(r"^\s*(```|~~~)")
 ABSENT_PATHS_MARKER = "<!-- doc-lint: names-absent-paths -->"
 
@@ -78,7 +81,8 @@ def lint_file(root: Path, doc: Path) -> list[Finding]:
                 findings.append(Finding(relative, number, "LINK_TARGET_MISSING", raw))
         for raw in _CODE.findall(line) if check_code_paths else ():
             target = _clean(raw)
-            if not target.startswith(_REPO_PREFIXES) or _PLACEHOLDER.search(target):
+            if (not target.startswith(_REPO_PREFIXES) or target.startswith(_GENERATED)
+                    or _PLACEHOLDER.search(target)):
                 continue
             if not _repo_path_exists(root, target):
                 findings.append(Finding(relative, number, "CODE_PATH_MISSING", raw))

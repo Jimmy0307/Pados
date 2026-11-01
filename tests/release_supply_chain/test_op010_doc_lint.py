@@ -37,6 +37,11 @@ def test_dangling_links_and_paths_are_named_with_their_line(tmp_path: Path) -> N
                                      (3, "CODE_PATH_MISSING", "src/pados/absent.py")]
 
 
+def test_build_outputs_absent_from_a_clean_checkout_are_not_checked(tmp_path: Path) -> None:
+    # A clean CI checkout has no web/dist; the lint must give the same answer there as after a local build.
+    assert _rules(tmp_path, "The workflow uploads `web/dist` and installs `web/node_modules/vite`.\n") == []
+
+
 def test_fenced_examples_are_not_checked(tmp_path: Path) -> None:
     assert _rules(tmp_path, "```text\n`src/pados/future.py` [x](nope.md)\n```\n") == []
 

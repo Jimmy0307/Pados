@@ -118,7 +118,7 @@ def test_execution_side_never_imports_the_operator_issuer_or_its_entry_module() 
                                                   "inference.py", "adapter.py", "graph.py", "task.py",
                                                   "provenance.py", "human_decision.py", "decision_ledger.py",
                                                   "execution_ledger.py", "seams.py", "policy.py", "receipts.py", "artifacts.py", "model.py",
-                                                  "__init__.py")]
+                                                  "pack_operability.py", "__init__.py")]
     execution_side += sorted((SRC / "packs").rglob("*.py"))
     assert {path.name for path in FABRIC.glob("*.py")} - {path.name for path in execution_side} == {
         "operator_decisions.py", "operator_cli.py"}  # every other fabric module is checked
