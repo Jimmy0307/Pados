@@ -65,6 +65,27 @@ def test_static_frontend_cors_uses_exact_origin_allowlist(tmp_path: Path) -> Non
     assert "access-control-allow-origin" not in denied.headers
 
 
+def test_cross_origin_browser_requests_may_carry_request_id_and_deadline(tmp_path: Path) -> None:
+    # OP-007: web/src/http.ts sends both headers on every call; a preflight that refused them would break the
+    # cross-origin Remote console entirely.
+    s = build_slice(tmp_path, allowed_origins=("https://jimmy0307.github.io",))
+    preflight = s.client.options(
+        "/remote/v1/work-map",
+        headers={
+            "Origin": "https://jimmy0307.github.io",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers":
+                "x-pados-remote-actor,x-pados-remote-proof,content-type,x-request-id,x-request-deadline-ms",
+        },
+    )
+    assert preflight.status_code == 200
+    # The echoed id must be readable cross-origin (the echo itself is the operability middleware's, tested there).
+    response = s.client.get("/remote/v1/work-map", headers={**s.viewer_headers, "Origin": "https://jimmy0307.github.io",
+                                                          "X-Request-ID": "web-0123456789abcdef01234567"})
+    assert response.status_code == 200
+    assert "x-request-id" in response.headers["access-control-expose-headers"].lower()
+
+
 def test_client_supplied_context_is_rejected_over_http(tmp_path: Path) -> None:
     s = build_slice(tmp_path)
     body = {"intent_id": "i-2", "project_id": PROJECT, "intent_type": "START_TASK",

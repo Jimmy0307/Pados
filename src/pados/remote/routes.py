@@ -17,6 +17,8 @@ from starlette.middleware.cors import CORSMiddleware
 
 from pados import __version__
 from pados.config import Settings
+from pados.operability.context import REQUEST_ID_HEADER
+from pados.operability.resilience import DEADLINE_HEADER
 from pados.remote.auth import RemoteSession, authorize_project
 from pados.remote.deployment import RemoteDeploymentCheck, listener_attestation, listener_violation
 from pados.remote.intent import RemoteIntentError
@@ -311,6 +313,10 @@ def register_remote_routes(
             allow_origins=list(allowed_origins),
             allow_credentials=False,
             allow_methods=["GET", "POST"],
-            allow_headers=[ACTOR_HEADER, PROOF_HEADER, SESSION_HEADER, "Content-Type"],
+            # OP-007: the browser sends a request id and its deadline. Both are tracing and budget hints only (an
+            # id grants nothing; a deadline can only shorten server work), so allowing them widens no authority.
+            allow_headers=[ACTOR_HEADER, PROOF_HEADER, SESSION_HEADER, "Content-Type", REQUEST_ID_HEADER,
+                           DEADLINE_HEADER],
+            expose_headers=[REQUEST_ID_HEADER],
             max_age=300,
         )
