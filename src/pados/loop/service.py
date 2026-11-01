@@ -11,7 +11,10 @@ from sqlalchemy.orm import Session
 
 from pados.control.approval_subject import (
     APPROVAL_ACTOR_MISMATCH,
+    APPROVAL_CONSUMED,
+    APPROVAL_EXPIRED,
     APPROVAL_REQUEST_MISMATCH,
+    APPROVAL_REVOKED,
     APPROVAL_SCOPE_MISMATCH,
     WorkRouteSubject,
     find_operation,
@@ -69,16 +72,57 @@ def _event(session: Session, loop_id: str, project_id: str, event_type: str, pay
     )
 
 
+_APPROVAL_LIFECYCLE_SQL = (
+    "SELECT *, (expires_at IS NOT NULL AND expires_at <= now()) AS is_expired "
+    "FROM control_approvals WHERE id = CAST(:id AS uuid)"
+)
+
+
 def _approved_approval(session: Session, approval_id: str, project_id: str) -> dict[str, Any]:
-    row = session.execute(
-        text("SELECT * FROM control_approvals WHERE id = CAST(:id AS uuid)"),
-        {"id": approval_id},
-    ).mappings().one()
+    row = session.execute(text(_APPROVAL_LIFECYCLE_SQL), {"id": approval_id}).mappings().one()
     if str(row["project_id"]) != project_id:
         raise PermissionError("cross-project approval rejected")
+    if row["status"] == "CANCELLED":
+        raise PermissionError(APPROVAL_REVOKED)
     if row["status"] != "APPROVED":
         raise PermissionError("approval is not approved")
+    if row["is_expired"]:
+        raise PermissionError(APPROVAL_EXPIRED)
     return dict(row)
+
+
+def _consume_for_loop(session: Session, approval: dict[str, Any], loop_id: str) -> None:
+    """Bind a WORK_ROUTE approval to this one loop; an approval already bound to another loop is refused."""
+    if approval.get("subject_kind") != "WORK_ROUTE":
+        return
+    consumed = session.execute(
+        text(
+            """
+            UPDATE control_approvals SET consumed_by_loop_id = CAST(:loop_id AS uuid), updated_at = now()
+            WHERE id = CAST(:id AS uuid)
+              AND (consumed_by_loop_id IS NULL OR consumed_by_loop_id = CAST(:loop_id AS uuid))
+            RETURNING id
+            """
+        ),
+        {"id": str(approval["id"]), "loop_id": loop_id},
+    ).first()
+    if consumed is None:
+        raise PermissionError(APPROVAL_CONSUMED)
+
+
+def _approval_revalidation_failure(session: Session, loop: dict[str, Any]) -> str | None:
+    """Before every route: the loop's approval must still be approved, unexpired and bound to this loop."""
+    row = session.execute(text(_APPROVAL_LIFECYCLE_SQL + " FOR UPDATE"), {"id": str(loop["approval_id"])}).mappings().first()
+    if row is None or row["status"] == "CANCELLED":
+        return APPROVAL_REVOKED
+    if row["status"] != "APPROVED":
+        return "APPROVAL_NOT_APPROVED"
+    if row["is_expired"]:
+        return APPROVAL_EXPIRED
+    bound = row.get("consumed_by_loop_id")
+    if bound is not None and str(bound) != str(loop["id"]):
+        return APPROVAL_CONSUMED
+    return None
 
 
 def _bound_subject(approval: dict[str, Any]) -> WorkRouteSubject:
@@ -418,6 +462,7 @@ def create_loop(session: Session, payload: LoopCreate) -> dict[str, Any]:
     ).scalar_one()
     if int(conflicting_bindings) > 0:
         raise PermissionError("GOAL_RUNTIME_PLAN_ALREADY_BOUND_TO_OTHER_LOOP")
+    _consume_for_loop(session, approval, str(row["id"]))
     session.execute(
         text(
             """
@@ -544,7 +589,7 @@ def run_one_iteration(
         if states and all(str(status) == "PASSED" for status in states):
             return _complete_loop(session, loop, "all plan steps passed")
         return _block_loop(session, loop, "no ready step; dependencies or failed work remain")
-    revalidation_failure = _product_step_revalidation_failure(
+    revalidation_failure = _approval_revalidation_failure(session, loop) or _product_step_revalidation_failure(
         session, loop=loop, step=step, settings=settings
     )
     if revalidation_failure is not None:

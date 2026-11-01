@@ -63,6 +63,24 @@ approval's project cannot be changed (a database trigger rejects the UPDATE). Ap
 subject are still accepted for non-routing uses, such as result candidates and gates, but they can
 never route work.
 
+A `WORK_ROUTE` approval authorizes new work only while all of these hold, checked under a row lock at every route
+and again before every TaskLoop step:
+- **Not expired.** Approving it sets `expires_at` to now plus `PADOS_APPROVAL_TTL_SECONDS`. The default is 24 h; the
+  allowed range is 5 min to 7 days. After that, routes are refused with `APPROVAL_EXPIRED`.
+- **Not revoked.** `POST /control/approvals/{id}/revoke` (`version`, `reason`, `idempotency_key`) moves a pending or
+  approved `WORK_ROUTE` approval to `CANCELLED`. Routes are then refused with `APPROVAL_REVOKED`. Subject-less
+  approvals cannot be revoked here (`APPROVAL_NOT_REVOCABLE`).
+- **Not consumed.**
+  - The first TaskLoop created from the approval consumes it. A second loop, or a direct route, is refused with
+    `APPROVAL_CONSUMED`; a database trigger keeps the binding write-once.
+  - On the control API, each approved operation routes once. A replay with the same idempotency key returns the same
+    job.
+- **Request and project can take work.** A `CANCELLED` or `SUPERSEDED` work request is refused with
+  `REQUEST_NOT_ROUTABLE`. A project whose status is not active is refused with `PROJECT_NOT_ACTIVE`.
+
+A running loop whose approval expires, is revoked or is bound elsewhere stops before its next route. It moves to
+`WAITING_HUMAN`, records the reason, and runs nothing.
+
 `CONTROL_API` is a structural binding to the requesting surface, not a user identity: the control API
 has no authenticated user. `POST /control/work-requests/{id}/route` always routes as
 `CONTROL_API` with no step, whatever the client sends.

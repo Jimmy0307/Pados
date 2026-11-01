@@ -15,7 +15,7 @@ docker compose up -d postgres            # or any PostgreSQL 16+ with pgvector; 
 # create databases pados_dogfood_operational, pados_dogfood_proof, pados_dogfood_corpus, then:
 # `pados init` keeps the separate legacy Product Loop routes disabled. The proof lane below is for the governed
 # P6.10 ResultCandidate acceptance flow only; enabling `/product-loop/*` is outside this dogfood scope.
-PADOS_DB_NAME=pados_dogfood_operational alembic upgrade 20261010_0019
+PADOS_DB_NAME=pados_dogfood_operational alembic upgrade 20261101_0020
 PADOS_DB_NAME=pados_dogfood_proof alembic upgrade 20260730_0011
 PADOS_DB_NAME=pados_dogfood_proof alembic upgrade 20260808_0013
 PADOS_DB_NAME=pados_dogfood_proof alembic -c alembic_p6_19b.ini upgrade head

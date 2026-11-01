@@ -57,7 +57,7 @@ DEFAULT_TOKEN_PLAINTEXT = "pados-local-control-" + "token"  # the publicly known
 LANES = {"operational": "pados_dogfood_operational", "proof": "pados_dogfood_proof", "corpus": "pados_dogfood_corpus"}
 ACCEPT_LANES = {"operational": "pados_dogfood_accept_operational", "proof": "pados_dogfood_accept_proof"}
 # docs/product/QUICKSTART.md, verbatim explicit revisions (never the plural heads target on the proof lane)
-MIGRATIONS = [("operational", "alembic.ini", "20261010_0019"), ("proof", "alembic.ini", "20260730_0011"),
+MIGRATIONS = [("operational", "alembic.ini", "20261101_0020"), ("proof", "alembic.ini", "20260730_0011"),
               ("proof", "alembic.ini", "20260808_0013"), ("proof", "alembic_p6_19b.ini", "head"),
               ("corpus", "alembic.ini", "20260730_0011")]
 SUBJECT_SCHEMA = "pados.approval-subject.v1"
@@ -343,6 +343,48 @@ def task_flow(api: Api, project: str, tag: str) -> dict[str, Any]:
             "decisions": decisions, "events": events}
 
 
+def approval_lifecycle(api: Api, project: str, flow: dict[str, Any], tag: str) -> dict[str, Any]:
+    """SEC-4 over HTTP: a revoked approval authorizes nothing; a consumed approval cannot back a second loop."""
+    _, work = api.call("POST", "/control/work-requests", {"project_id": project, "title": f"Revoked {tag}",
+                                                         "body": "Synthetic: an approval withdrawn before use.",
+                                                         "idempotency_key": f"{tag}-wr"})
+    request = work["work_request"]["id"]
+    subject = {"kind": "WORK_ROUTE", "schema_version": SUBJECT_SCHEMA, "project_id": project, "request_id": request,
+               "actor": {"surfaces": ["TASK_LOOP"], "worker_types": ["DETERMINISTIC_TOOL"]}, "operations": OPS,
+               "scope_version_ref": None, "task_envelope_hash": None}
+    _, created = api.call("POST", "/control/approvals", {"project_id": project, "idempotency_key": f"{tag}-ap",
+                                                         "proposal_summary": "Revoked before use", "subject": subject})
+    approval = created["approval"]
+    _, approved = api.call("POST", f"/control/approvals/{approval['id']}/approve",
+                           {"version": approval["version"], "idempotency_key": f"{tag}-ok"})
+    approved_row = (approved or {}).get("approval", {}) if isinstance(approved, dict) else {}
+    revoke_http, revoked = api.call("POST", f"/control/approvals/{approval['id']}/revoke", {
+        "version": approved_row.get("version"), "reason": "dogfood: withdrawn", "idempotency_key": f"{tag}-rv"})
+    goal_http, goal = api.call("POST", "/control/task-goals", {
+        "project_id": project, "request_id": request, "approval_id": approval["id"], "idempotency_key": f"{tag}-g",
+        "objective": "Must be refused", "success_criteria": ["refused"]})
+    # The completed loop consumed its approval: a fresh goal and plan may still be drafted, but no second loop.
+    _, goal2 = api.call("POST", "/control/task-goals", {
+        "project_id": project, "request_id": flow["request_id"], "approval_id": flow["approval_id"],
+        "idempotency_key": f"{tag}-g2", "objective": "Second loop on a consumed approval",
+        "success_criteria": ["refused"]})
+    goal2_id = (goal2.get("task_goal") or goal2).get("id") if isinstance(goal2, dict) else None
+    plan2_http, plan2 = api.call("POST", "/control/task-plans", {"task_goal_id": goal2_id, "approval_id": flow["approval_id"],
+                                                        "idempotency_key": f"{tag}-p2", "steps": [{
+        "sequence": 1, "title": "Check references again", "step_type": "RUN_VALIDATION",
+        "required_capability": "RUN_STATIC_ANALYSIS", "command_id": PROBE}]})
+    plan2_id = (plan2.get("task_plan") or plan2).get("id") if isinstance(plan2, dict) else None
+    loop2_http, loop2 = api.call("POST", "/control/loops", {"task_goal_id": goal2_id, "active_plan_id": plan2_id,
+                                                           "approval_id": flow["approval_id"], "max_iterations": 2,
+                                                           "idempotency_key": f"{tag}-l2"})
+    return {"revoke_http": revoke_http, "revoked_status": (revoked or {}).get("approval", {}).get("status")
+            if isinstance(revoked, dict) else None, "goal_http": goal_http,
+            "goal_detail": goal.get("detail") if isinstance(goal, dict) else goal,
+            "second_plan_http": plan2_http, "second_plan_detail": plan2.get("detail") if isinstance(plan2, dict)
+            and plan2_http >= 400 else None, "second_loop_http": loop2_http, "second_loop_detail": loop2.get("detail") if isinstance(loop2, dict)
+            else loop2, "approval_expires_at": approved_row.get("expires_at")}
+
+
 def create_project(run: Run, api: Api, env: dict[str, str], root: Path, name: str, *, broken: bool) -> str:
     """A synthetic, public-safe workspace; the broken one has a reference to a file that does not exist."""
     workspace = root / "workspace" / name
@@ -570,6 +612,13 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
         cancel, _ = api.call("POST", f"/control/loops/{flow['loop_id']}/cancel", {})
         run.record("finished_loop_cannot_be_paused_or_cancelled", pause >= 400 and cancel >= 400,
                    pause=pause, cancel=cancel)
+
+        lifecycle = approval_lifecycle(api, project, flow, f"dogfood-lifecycle-{int(started)}")
+        run.record("revoked_or_consumed_approval_authorizes_nothing", lifecycle["revoke_http"] == 200
+                   and lifecycle["revoked_status"] == "CANCELLED" and lifecycle["goal_http"] == 403
+                   and lifecycle["goal_detail"] == "APPROVAL_REVOKED" and lifecycle["second_loop_http"] == 403
+                   and lifecycle["second_loop_detail"] == "APPROVAL_CONSUMED"
+                   and bool(lifecycle["approval_expires_at"]), **lifecycle)
 
         stop_server(server)
         operator = RemoteOperator(root, project)

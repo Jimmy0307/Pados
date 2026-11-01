@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 OPERATIONAL_DATABASE_DEFAULT = "pados_local_runtime"
 CORPUS_DATABASE_DEFAULT = "pados_corpus_runtime"
-OPERATIONAL_REVISION_DEFAULT = "20261010_0019"
+OPERATIONAL_REVISION_DEFAULT = "20261101_0020"
 CORPUS_REVISION_DEFAULT = "20260730_0011"
 EXCLUDED_REVISION_DEFAULT = "20260730_0012"
 
@@ -69,6 +69,8 @@ class Settings(BaseSettings):
         alias="PADOS_CONTROL_API_TOKEN_HASH",
     )
     control_request_max_bytes: int = Field(default=8192, alias="PADOS_CONTROL_REQUEST_MAX_BYTES")
+    # How long an approved WORK_ROUTE approval may authorize new work (RC2 SEC-4); 5 minutes to 7 days.
+    approval_ttl_seconds: int = Field(default=86400, ge=300, le=604800, alias="PADOS_APPROVAL_TTL_SECONDS")
     product_workspace_root: str = Field(default="", alias="PADOS_PRODUCT_WORKSPACE_ROOT")
     product_object_root: str = Field(default="", alias="PADOS_PRODUCT_OBJECT_ROOT")
     product_database_name: str = Field(default="", alias="PADOS_PRODUCT_DATABASE_NAME")

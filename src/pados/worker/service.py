@@ -16,12 +16,18 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from pados.control.approval_subject import (
+    APPROVAL_CONSUMED,
+    APPROVAL_EXPIRED,
     APPROVAL_NOT_APPROVED,
     APPROVAL_PROJECT_MISMATCH,
     APPROVAL_REF_NOT_FOUND,
     APPROVAL_REQUEST_MISMATCH,
     APPROVAL_SCOPE_MISMATCH,
+    APPROVAL_REVOKED,
     APPROVAL_SCOPE_VERSION_STALE,
+    NON_ROUTABLE_REQUEST_STATUSES,
+    PROJECT_NOT_ACTIVE,
+    REQUEST_NOT_ROUTABLE,
     ApprovalOperation,
     WorkRouteSubject,
     find_operation,
@@ -226,8 +232,18 @@ def _authorize_subject(
     project_id = str(request["project_id"])
     if str(approval["project_id"]) != project_id:
         raise PermissionError(APPROVAL_PROJECT_MISMATCH)
+    if approval["status"] == "CANCELLED":
+        raise PermissionError(APPROVAL_REVOKED)
     if approval["status"] != "APPROVED":
         raise PermissionError(APPROVAL_NOT_APPROVED)
+    if approval.get("is_expired"):
+        raise PermissionError(APPROVAL_EXPIRED)
+    if str(request.get("status")) in NON_ROUTABLE_REQUEST_STATUSES:
+        raise PermissionError(REQUEST_NOT_ROUTABLE)
+    if str(request.get("project_status") or "").upper() != "ACTIVE":
+        raise PermissionError(PROJECT_NOT_ACTIVE)
+    if route.surface != "TASK_LOOP" and approval.get("consumed_by_loop_id") is not None:
+        raise PermissionError(APPROVAL_CONSUMED)
     subject = load_bound_subject(approval["subject_kind"], approval["subject_json"], approval["proposal_hash"])
     bound_approval = request.get("approval_id")
     if bound_approval is not None and str(bound_approval) != route.approval_id:
@@ -262,7 +278,7 @@ def _assert_ready(
     request = session.execute(
         text(
             """
-            SELECT cwr.*, p.root_path
+            SELECT cwr.*, p.root_path, p.status AS project_status
             FROM control_work_requests cwr
             JOIN projects p ON p.id = cwr.project_id
             WHERE cwr.id = CAST(:request_id AS uuid)
@@ -272,7 +288,10 @@ def _assert_ready(
         {"request_id": request_id},
     ).mappings().one()
     approval = session.execute(
-        text("SELECT * FROM control_approvals WHERE id = CAST(:approval_id AS uuid)"),
+        text(
+            "SELECT *, (expires_at IS NOT NULL AND expires_at <= now()) AS is_expired "
+            "FROM control_approvals WHERE id = CAST(:approval_id AS uuid) FOR UPDATE"
+        ),
         {"approval_id": route.approval_id},
     ).mappings().first()
     project_id = str(request["project_id"])
@@ -285,6 +304,9 @@ def _assert_ready(
         )
     except PermissionError as exc:
         _refuse(session, str(exc), request_id=request_id, route=route, project_id=project_id,
+                subject_hash=str(approval["proposal_hash"]))
+    if route.surface != "TASK_LOOP" and _direct_operation_already_routed(session, route):
+        _refuse(session, APPROVAL_CONSUMED, request_id=request_id, route=route, project_id=project_id,
                 subject_hash=str(approval["proposal_hash"]))
     if route.capability_id not in capability_registry():
         raise PermissionError("capability mismatch")
@@ -304,6 +326,25 @@ def _assert_ready(
     if int(active) > 0:
         raise PermissionError("BLOCKED_PROJECT_BUSY")
     return RouteAuthorization(request=dict(request), subject=subject, operation=operation)
+
+
+def _direct_operation_already_routed(session: Session, route: RouteRequest) -> bool:
+    """A direct (non-loop) route uses each approved operation once; a replay of the same key is idempotent."""
+    routed = session.execute(
+        text(
+            """
+            SELECT 1 FROM worker_jobs
+            WHERE approval_id = CAST(:approval_id AS uuid)
+              AND capability_id = :capability_id
+              AND route_payload->>'command_id' IS NOT DISTINCT FROM :command_id
+              AND idempotency_key <> :idempotency_key
+            LIMIT 1
+            """
+        ),
+        {"approval_id": route.approval_id, "capability_id": route.capability_id.value,
+         "command_id": route.command_id, "idempotency_key": route.idempotency_key},
+    ).first()
+    return routed is not None
 
 
 def _idempotent_job(session: Session, request_id: str, route: RouteRequest) -> dict[str, Any] | None:

@@ -370,6 +370,18 @@ def create_app() -> FastAPI:
     def control_revise(approval_id: str, payload: ApprovalDecision, _: ControlAuth) -> object:
         return _decide(approval_id, payload, "REVISION_REQUESTED")
 
+    @app.post("/control/approvals/{approval_id}/revoke")
+    def control_revoke(approval_id: str, payload: ApprovalDecision, _: ControlAuth) -> object:
+        """Withdraw a WORK_ROUTE approval: nothing new routes under it; a running loop waits for a human."""
+        def _apply() -> dict[str, Any]:
+            with session_scope(settings) as session:
+                return dict(control_service.revoke_approval(
+                    session, approval_id, version=payload.version, reason=payload.reason,
+                    idempotency_key=payload.idempotency_key,
+                ))
+
+        return guarded(lambda: {"status": "ok", "approval": _apply()})
+
     @app.post("/control/projections/render")
     def control_render_projection(payload: ProjectionRenderRequest, _: ControlAuth) -> object:
         control_security.assert_request_safe(payload.model_dump(), max_bytes=settings.control_request_max_bytes)
