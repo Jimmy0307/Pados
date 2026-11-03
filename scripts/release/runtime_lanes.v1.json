@@ -149,8 +149,8 @@
         "min_passed": {
           "d1-binding": 31,
           "d4-handoff": 18,
-          "residual": 23,
-          "proof-lane": 17,
+          "residual": 25,
+          "proof-lane": 24,
           "p6-11": 7,
           "migration": 5
         }
