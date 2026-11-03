@@ -81,6 +81,9 @@ def test_a_replay_records_no_second_capture_event_and_a_conflict_records_none(
         first = create(session, payload)
         replay = create(session, payload)
         assert replay["id"] == first["id"] and replay == first  # the same record, the same shape
+        session.commit()  # a replay from a later transaction (a different xmin) is still a replay
+        later = create(session, payload)
+        assert later == first
         with pytest.raises(ValueError, match="IDEMPOTENCY_CONTENT_CONFLICT"):
             create(session, {**payload, **change})
         assert _events(session, project_id, event_type, field, first["id"]) == 1, event_type
