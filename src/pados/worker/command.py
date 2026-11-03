@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pados.memory.security import assert_no_secret
+from pados.operability.resilience import DeadlineExceeded, capped_timeout
 from pados.worker.schemas import CommandInvocation, ErrorCode
+
+PARENT_DEADLINE_EXCEEDED = "PARENT_DEADLINE_EXCEEDED"
 
 SAFE_ENV = {"PYTHONPATH", "PADOS_RUNTIME_MODE", "PADOS_LOG_LEVEL"}
 _PROBES = Path(__file__).resolve().parent / "probes"
@@ -120,6 +123,13 @@ def run_registered_command(invocation: CommandInvocation, *, project_root: Path)
     for key in list(process_env):
         if any(word in key.upper() for word in SECRET_ENV_WORDS):
             process_env.pop(key, None)
+    # OP-004: the command keeps its own timeout; a caller's remaining budget can only shorten it, and a spent budget
+    # refuses before the process starts.
+    try:
+        timeout = capped_timeout(float(invocation.timeout_seconds))
+    except DeadlineExceeded:
+        return {"status": "TIMED_OUT", "exit_code": None, "stdout": "", "stderr": "",
+                "error_code": PARENT_DEADLINE_EXCEEDED}
     try:
         completed = subprocess.run(
             argv,
@@ -129,7 +139,7 @@ def run_registered_command(invocation: CommandInvocation, *, project_root: Path)
             text=True,
             shell=False,
             check=False,
-            timeout=invocation.timeout_seconds,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
@@ -139,7 +149,8 @@ def run_registered_command(invocation: CommandInvocation, *, project_root: Path)
             "exit_code": None,
             "stdout": _redact(stdout[:10_000]),
             "stderr": _redact(stderr[:10_000]),
-            "error_code": ErrorCode.TIMED_OUT.value,
+            "error_code": ErrorCode.TIMED_OUT.value if timeout >= invocation.timeout_seconds
+            else PARENT_DEADLINE_EXCEEDED,
         }
     return {
         "status": "SUCCEEDED" if completed.returncode == 0 else "FAILED",

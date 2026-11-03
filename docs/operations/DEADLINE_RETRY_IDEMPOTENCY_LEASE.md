@@ -3,7 +3,8 @@
 Contract: [`PADOS_SERVICE_ENGINEERING_STANDARD.md`](../PADOS_SERVICE_ENGINEERING_STANDARD.md) §5. Code:
 `src/pados/operability/resilience.py`, `src/pados/operability/mutations.py`, `src/pados/control/service.py`
 (content conflicts), `src/pados/loop/service.py` (`_hold_lease`). Tests: `tests/operability/test_op004_resilience.py`,
-`tests/operability/test_op004_mutation_inventory.py`, `tests/integration/test_op004_idempotency_postgres.py`,
+`tests/operability/test_op004_mutation_inventory.py`, `tests/operability/test_op004_deadline_propagation.py`,
+`tests/integration/test_op004_db_deadline_postgres.py`, `tests/integration/test_op004_idempotency_postgres.py`,
 `tests/integration/test_op004_lease_postgres.py`, `tests/integration/test_op004_lease_model_takeover_postgres.py`.
 
 These extend the existing TaskLoop, worker-job and node mechanisms. No second scheduler or retry loop exists. The
@@ -13,11 +14,24 @@ TaskLoop owns iterations, each worker job keeps its own timeout, and nothing her
 
 - An API request may send `X-Request-Deadline-Ms` (an integer from 1 to 600000). Without it nothing changes.
 - A child call takes `min(its own timeout, remaining budget)`, and an inner deadline never extends an outer one.
-  - Compute-node calls are refused with `NODE_DEADLINE_EXCEEDED` before any network call once the budget is spent.
-  - A local-model call closes the job as `TIMED_OUT` / `PARENT_DEADLINE_EXCEEDED` without calling the model when less
-    than one second is left (the provider takes whole seconds).
-- Database calls keep their 2-second connect timeout. A per-statement deadline is not applied, and is listed as
-  remaining work.
+  Where the budget reaches today:
+
+| Boundary | How | When the budget is spent |
+|---|---|---|
+| PostgreSQL, through `pados.db.session_scope` | Each transaction gets `statement_timeout` = the remaining budget (transaction-local, set again after a commit) | Refused before the first statement; a statement past it is cancelled by the server. Both are `DB_DEADLINE_EXCEEDED`: `write_occurred` NO for a statement (the transaction rolls back), UNKNOWN when the commit itself was cancelled |
+| Local-model provider call (`_call_model`) | The job's timeout, capped | `TIMED_OUT` / `PARENT_DEADLINE_EXCEEDED` without calling the model when less than one second is left (the provider takes whole seconds) |
+| Registered command workers (`run_registered_command`) | The command's timeout, capped | Not started (`PARENT_DEADLINE_EXCEEDED`); a run cut short by the budget is `TIMED_OUT` / `PARENT_DEADLINE_EXCEEDED`, by its own timeout `TIMED_OUT` / `TIMED_OUT` |
+| Compute-node calls (`NodeClient`) | The call's timeout, capped | `NODE_DEADLINE_EXCEEDED` before any network call |
+
+  Not covered, deliberately or not yet:
+  - **Persisted job deadlines.** A queued or routed job keeps its own `timeout_seconds` from `queued_at`; a parent's
+    budget is not written into the job. A job run later, outside the request (a resumed step, another worker),
+    follows its own deadline only. This is by design: the job outlives the request that routed it.
+  - **Sessions not opened by `session_scope`** (`get_session_factory`, migrations, the test fixtures' own engines)
+    carry no statement timeout.
+  - **Work handed to another thread or process** does not inherit the context variable. Today the deferred model call
+    runs in the request's own thread; a future worker pool must pass the budget explicitly.
+  - The connect timeout stays 2 seconds and is not shortened by the budget.
 
 ## Retry
 

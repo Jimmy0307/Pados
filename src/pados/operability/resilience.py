@@ -33,9 +33,9 @@ T = TypeVar("T")
 
 
 class DeadlineExceeded(PadosError):
-    def __init__(self, code: str = "DEADLINE_EXCEEDED") -> None:
+    def __init__(self, code: str = "DEADLINE_EXCEEDED", *, write_occurred: WriteOutcome = WriteOutcome.NO) -> None:
         super().__init__(code, ErrorCategory.TIMEOUT, message="The operation's deadline had already passed.",
-                         retryable=False, write_occurred=WriteOutcome.NO)
+                         retryable=False, write_occurred=write_occurred)
 
 
 @dataclass(frozen=True)
