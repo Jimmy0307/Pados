@@ -4,7 +4,7 @@ Contract: [`PADOS_SERVICE_ENGINEERING_STANDARD.md`](../PADOS_SERVICE_ENGINEERING
 `src/pados/operability/resilience.py`, `src/pados/operability/mutations.py`, `src/pados/control/service.py`
 (content conflicts), `src/pados/loop/service.py` (`_hold_lease`). Tests: `tests/operability/test_op004_resilience.py`,
 `tests/operability/test_op004_mutation_inventory.py`, `tests/integration/test_op004_idempotency_postgres.py`,
-`tests/integration/test_op004_lease_postgres.py`.
+`tests/integration/test_op004_lease_postgres.py`, `tests/integration/test_op004_lease_model_takeover_postgres.py`.
 
 These extend the existing TaskLoop, worker-job and node mechanisms. No second scheduler or retry loop exists. The
 TaskLoop owns iterations, each worker job keeps its own timeout, and nothing here authorizes work.
@@ -53,17 +53,34 @@ The one retried boundary today is the compute-node job-status read (`NodeClient.
   While another owner holds a live lease, the iteration is refused with `LOOP_LEASE_HELD` before any step is
   selected, routed or published (`task_loop.lease.refused`, naming the holder).
 - After a crash the lease lapses within five minutes and another owner resumes the loop from its persisted iterations.
-- An owner-less step (the API step route, or the CLI without `--owner`) only observes the lease
-  (`task_loop.lease.observed`). It never renews another instance's lease and never revives a lapsed one, so it cannot
-  block a takeover. It is not refused either: every lease has a nominal owner from `start_loop`, so an owner-less
-  step cannot tell a live instance from an earlier start. Fencing therefore protects callers that name themselves; a
-  multi-instance scheduler must pass its instance id.
+- An owner-less step (the API step route, or the CLI without `--owner`) acts as the loop's **starting owner**, the
+  owner named in its `LOOP_STARTED` event. It renews that owner's lease, takes a free or lapsed lease as that owner,
+  and is refused with `LOOP_LEASE_HELD` while any other owner holds a live lease. So one operator who starts and
+  steps a loop keeps one lease, and a worker that took the lease over is never overridden by an owner-less step. A
+  loop with no recorded starting owner is refused (`LOOP_LEASE_OWNER_UNKNOWN`).
+- A deferred local-model call (RC2 SEC-9) runs with no transaction open, so the lease can lapse and be taken over
+  while the model runs. The whole `run_step` holds the lease as one owner:
+  - the model result is recorded only while that owner still holds the lease, checked with the lease row locked in
+    the same transaction. Otherwise the job closes `FAILED` / `LOOP_LEASE_LOST`, and the output is neither recorded
+    nor kept on disk;
+  - an owner fenced before the claim leaves the job `ROUTED` for the current holder, and its model is never called;
+  - the resumed iteration holds the lease again, so an owner that lost it decides and publishes nothing
+    (`LOOP_LEASE_HELD`). A result recorded while the owner still held the lease is validated and decided by whoever
+    holds the lease next, through the normal path.
+
+Trade-off, kept deliberately: an owner-less step shares the starting owner's identity. Two operator surfaces used at
+the same time on one loop (the API and the CLI) are therefore not fenced from each other; they are serialised by the
+loop row lock and the single-active-iteration check, and each model job is claimed exactly once. A deployment with
+several schedulers must pass each instance's own owner name. Requiring an explicit owner on every step would remove
+the shared identity, but it changes the operator API; that is a product decision, not part of this fix.
 
 ## Recovery
 
 | Symptom | Code | Safe action |
 |---|---|---|
 | A step is refused because another worker holds the loop | `LOOP_LEASE_HELD` | Wait for that owner, or for the lease to lapse (≤ 5 min) if the owner is gone |
+| A model job closed after the call | `LOOP_LEASE_LOST` | The lease was taken over while the model ran. The output was discarded; the current holder's next step routes the work again |
+| Every step is refused for a loop | `LOOP_LEASE_OWNER_UNKNOWN` | The loop has no `LOOP_STARTED` owner; step it with an explicit `--owner` |
 | A retried create returns a conflict | `*_IDEMPOTENCY_CONTENT_CONFLICT` | The key was already used for different content; use a new key for the new content |
 | A model job closes immediately | `PARENT_DEADLINE_EXCEEDED` | The caller's budget was spent; retry with a larger `X-Request-Deadline-Ms` |
 | A node call is refused | `NODE_DEADLINE_EXCEEDED` | Same as above; nothing was sent to the node |

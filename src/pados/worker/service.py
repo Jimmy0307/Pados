@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -1009,15 +1009,17 @@ def _execute_model_once(
     return _finish_model_job(session, job=job, **outcome)
 
 
-def execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any = None) -> dict[str, Any]:
+def execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any = None,
+                             fence: Callable[[Session], str | None] | None = None) -> dict[str, Any]:
     """``_execute_routed_model_job`` traced under the caller's operation for this job (OP-001)."""
     with operation_scope("worker", job_id=job_id):
-        result = _execute_routed_model_job(settings, job_id, session_factory=session_factory)
+        result = _execute_routed_model_job(settings, job_id, session_factory=session_factory, fence=fence)
         _LOG.info("worker.model_job.finished", job_status=result.get("status"), error_code=result.get("error_code"))
         return result
 
 
-def _execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any = None) -> dict[str, Any]:
+def _execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any = None,
+                              fence: Callable[[Session], str | None] | None = None) -> dict[str, Any]:
     """Run one ROUTED local-model job with no database transaction or row lock held during the call (RC2 SEC-9).
 
     1. A short transaction claims the job (ROUTED -> RUNNING); only one caller can win the claim.
@@ -1025,11 +1027,18 @@ def _execute_routed_model_job(settings: Any, job_id: str, *, session_factory: An
     3. A short transaction records the result only if the job is still RUNNING. A job that expired or was cancelled
        meanwhile keeps its state.
     A crash between the steps leaves a RUNNING job that ``expire_overdue_jobs`` times out; a repeated call is a no-op.
+
+    ``fence`` (OP-004) is the caller's lease check, run inside the claim transaction and again inside the transaction
+    that records the result; it returns an error code when the caller no longer holds the work. A caller fenced before
+    the claim leaves the job ROUTED for the current holder and never calls the model. A caller fenced after the call
+    records the job as FAILED with that code, and the model output is neither recorded nor kept on disk.
     """
     from pados.db import session_scope
 
     scope = session_factory or session_scope
     with scope(settings) as session:
+        if fence is not None and fence(session) is not None:
+            return get_job(session, job_id)
         refused = _deferred_claim_refusal(session, job_id)
         if refused is not None:
             return refused
@@ -1061,6 +1070,12 @@ def _execute_routed_model_job(settings: Any, job_id: str, *, session_factory: An
     )
     stdout_path = outcome.get("stdout_path")
     with scope(settings) as session:
+        lost = fence(session) if fence is not None else None
+        if lost is not None:
+            _LOG.warning("worker.model_job.fenced", outcome="rejected", error_code=lost)
+            outcome = {"status": "FAILED", "error_code": lost, "validation_status": "FAILED",
+                       "usage_metadata": {"measured_execution": None},
+                       "result_summary": f"The model result was discarded: {lost}."}
         recorded = _finish_model_job(session, job=job, require_running=True, **outcome)
         kept = isinstance(stdout_path, Path) and session.execute(
             text(

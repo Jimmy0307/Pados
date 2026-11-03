@@ -31,11 +31,12 @@ Injected by: `test_database_disconnect_is_a_dependency_failure_never_an_internal
 
 | Symptom | Code | Safe recovery | Verify |
 |---|---|---|---|
-| A step is refused | `LOOP_LEASE_HELD` | Another owner holds a live lease. Wait, or let it lapse (≤ 5 min) when that owner has crashed, then resume with an explicit owner | `task_loop.lease.held` / `.renewed` for the new owner; iterations continue from the persisted ones |
+| A step is refused | `LOOP_LEASE_HELD` | Another owner holds a live lease (an owner-less step acts as the loop's starting owner and is fenced like any other). Wait, or let it lapse (≤ 5 min) when that owner has crashed, then resume | `task_loop.lease.held` for the new owner; iterations continue from the persisted ones |
+| A model job closes `FAILED` right after its call | `LOOP_LEASE_LOST` | The lease was taken over while the model ran; the output was discarded, not recorded. Step again as the current holder, which routes the work again | `worker.model_job.fenced` in the log; no `stdout` artifact for that job |
 | A step answers `WAITING_HUMAN` | approval reasons (`APPROVAL_REVOKED`, `APPROVAL_EXPIRED`, `APPROVAL_CONSUMED`) | Human approval: create and decide a new approval and start a new loop. Never edit the approval row | The new loop routes under the new approval |
 | A job stays non-terminal past its deadline | `JOB_DEADLINE_EXCEEDED` (`TIMED_OUT`) | The next step expires it automatically; then step again | `worker_jobs.status = TIMED_OUT`, and the loop decides on it |
 
-Injected by: `tests/integration/test_op004_lease_postgres.py`, `tests/integration/test_sec4_approval_lifecycle_postgres.py`,
+Injected by: `tests/integration/test_op004_lease_postgres.py`, `tests/integration/test_op004_lease_model_takeover_postgres.py`, `tests/integration/test_sec4_approval_lifecycle_postgres.py`,
 `tests/integration/test_sec9_model_call_outside_transaction_postgres.py`, and
 `test_an_expired_parent_deadline_refuses_a_node_call_without_sending_it`.
 

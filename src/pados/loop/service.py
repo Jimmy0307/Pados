@@ -531,31 +531,55 @@ def start_loop(session: Session, loop_id: str, *, owner_instance: str = "pados-c
 
 
 LOOP_LEASE_HELD = "LOOP_LEASE_HELD"
+LOOP_LEASE_LOST = "LOOP_LEASE_LOST"
+LOOP_LEASE_OWNER_UNKNOWN = "LOOP_LEASE_OWNER_UNKNOWN"
 
 
-def _hold_lease(session: Session, loop: dict[str, Any], owner_instance: str | None) -> None:
-    """OP-004: an owner's lease is renewed on every iteration it runs; another owner is fenced out.
+def _starting_owner(session: Session, loop_id: str) -> str | None:
+    """The owner named when the loop was started (the latest LOOP_STARTED event), or None."""
+    owner = session.execute(text(
+        "SELECT payload_json->>'owner' FROM task_loop_events WHERE loop_id = CAST(:id AS uuid) "
+        "AND event_type = 'LOOP_STARTED' ORDER BY sequence_number DESC LIMIT 1"), {"id": loop_id}).scalar_one_or_none()
+    return None if owner is None else str(owner)
 
-    With an explicit owner the lease is taken when it is free, lapsed or already that owner's, and renewed (heartbeat
-    and expiry). While another owner holds a live lease the iteration is refused before anything is selected, routed
-    or published (fencing).
 
-    Without an owner (an operator-invoked step from the API, or the CLI without ``--owner``) the lease is only
-    observed: it is neither renewed nor revived. Renewing it would heartbeat on behalf of whichever instance holds it,
-    and reviving a lapsed lease would keep a crashed owner's claim alive and block a takeover. Every lease carries a
-    nominal owner from ``start_loop``, so an owner-less step cannot tell a live instance from an earlier start; it is
-    therefore not refused, which keeps single-operator use working. Fencing is for callers that name themselves.
+def _acting_owner(session: Session, loop_id: str, owner_instance: str | None) -> str:
+    """The owner a step holds the lease as: the named owner, or for an owner-less step the loop's starting owner."""
+    owner = owner_instance or _starting_owner(session, loop_id)
+    if not owner:
+        _LOG.warning("task_loop.lease.refused", outcome="rejected", error_code=LOOP_LEASE_OWNER_UNKNOWN)
+        raise PermissionError(LOOP_LEASE_OWNER_UNKNOWN)
+    return owner
+
+
+def _lease_fence(loop_id: str, owner: str) -> Any:
+    """A check for ``execute_routed_model_job``: None while ``owner`` still holds the lease, else LOOP_LEASE_LOST.
+
+    It locks the lease row, so a takeover cannot land between the check and the commit of the same transaction.
+    """
+    def check(session: Session) -> str | None:
+        holder = session.execute(text(
+            "SELECT owner_instance FROM task_loop_leases WHERE loop_id = CAST(:id AS uuid) FOR UPDATE"),
+            {"id": loop_id}).scalar_one_or_none()
+        return None if holder == owner else LOOP_LEASE_LOST
+
+    return check
+
+
+def _hold_lease(session: Session, loop: dict[str, Any], owner_instance: str | None) -> str:
+    """OP-004: the stepping owner's lease is renewed on every iteration it runs; any other owner is fenced out.
+
+    The lease is taken when it is free, lapsed or already the stepping owner's, and renewed (heartbeat and expiry).
+    While another owner holds a live lease the iteration is refused (LOOP_LEASE_HELD) before anything is selected,
+    routed or published.
+
+    A step without an owner (an operator step from the API, or the CLI without ``--owner``) acts as the owner that
+    started the loop. A single operator who starts and steps a loop therefore keeps one lease, while a named worker
+    that took the lease over is never overridden by an owner-less step. A loop with no recorded starting owner is
+    refused (LOOP_LEASE_OWNER_UNKNOWN). Returns the owner the lease is held as.
     """
     loop_id = str(loop["id"])
-    if owner_instance is None:
-        row = session.execute(text(
-            "SELECT owner_instance, lease_expires_at < now() AS lapsed FROM task_loop_leases "
-            "WHERE loop_id = CAST(:id AS uuid)"), {"id": loop_id}).mappings().first()
-        if row is None:
-            _LOG.warning("task_loop.lease.missing", loop_id=loop_id)
-            return
-        _LOG.info("task_loop.lease.observed", holder=row["owner_instance"], lapsed=bool(row["lapsed"]))
-        return
+    owner_instance = _acting_owner(session, loop_id, owner_instance)
     row = session.execute(text(
         """
         INSERT INTO task_loop_leases(loop_id, owner_instance, lease_expires_at)
@@ -576,6 +600,7 @@ def _hold_lease(session: Session, loop: dict[str, Any], owner_instance: str | No
                      holder=holder)
         raise PermissionError(LOOP_LEASE_HELD)
     _LOG.info("task_loop.lease.held", owner=owner_instance)
+    return owner_instance
 
 
 def run_one_iteration(
@@ -840,6 +865,10 @@ def _run_step(
 
     Routing commits first. A local-model job then runs with no transaction or lock held, and the same iteration is
     resumed in a new transaction. A model job left ROUTED by an interrupted step is picked up here as well.
+
+    OP-004: the whole step holds the lease as one owner (the named one, or the loop's starting owner). The model
+    result is recorded only while that owner still holds the lease, and the resumed iteration holds it again, so an
+    owner whose lease was taken over during the model call publishes nothing (LOOP_LEASE_LOST / LOOP_LEASE_HELD).
     """
     from pados.db import session_scope
 
@@ -849,12 +878,14 @@ def _run_step(
                                    idempotency_key=idempotency_key, defer_model_execution=True,
                                    owner_instance=owner_instance)
         deferred = _deferred_model_job(session, loop_id)
-    if deferred is None:
+        acting = None if deferred is None else _acting_owner(session, loop_id, owner_instance)
+    if deferred is None or acting is None:
         return result
-    execute_routed_model_job(settings, deferred, session_factory=scope)
+    execute_routed_model_job(settings, deferred, session_factory=scope, fence=_lease_fence(loop_id, acting))
     with scope(settings) as session:
         return run_one_iteration(session, loop_id=loop_id, settings=settings, artifact_root=artifact_root,
-                                 idempotency_key=f"{idempotency_key}:model-result", defer_model_execution=True)
+                                 idempotency_key=f"{idempotency_key}:model-result", defer_model_execution=True,
+                                 owner_instance=acting)
 
 
 def _waiting_for_job(

@@ -40,7 +40,7 @@ PROOF = "pados_ci_rc2_proof"
 MIGRATION = "pados_fc_migration_ci"   # migration suites require a pados_fc_migration_* database
 DATABASES = (OPS, D4, RESIDUAL, PROOF, MIGRATION)
 # Minimum passing tests per suite (the RC2 acceptance counts), so a silently shrunken suite fails the gate.
-MIN_TESTS = {"d1-binding": 30, "d4-handoff": 14, "residual": 16, "proof-lane": 17, "p6-11": 7, "migration": 5}
+MIN_TESTS = {"d1-binding": 30, "d4-handoff": 18, "residual": 17, "proof-lane": 17, "p6-11": 7, "migration": 5}
 
 
 def _connection() -> dict[str, str]:
@@ -131,7 +131,8 @@ def main(argv: list[str] | None = None) -> int:
                        {"PADOS_RC2_APPROVAL_BINDING_TEST_DATABASE_URL": _url(connection, OPS)}),
         # SEC-9 (model call outside the routing transaction) uses the D4 handoff database.
         "d4-handoff": (["tests/integration/test_rc2_loop_model_handoff_postgres.py",
-                        "tests/integration/test_sec9_model_call_outside_transaction_postgres.py"],
+                        "tests/integration/test_sec9_model_call_outside_transaction_postgres.py",
+                        "tests/integration/test_op004_lease_model_takeover_postgres.py"],
                        {"PADOS_RC2_D4_TEST_DATABASE_URL": _url(connection, D4)}),
         # The residual database also carries the OP-001 trace continuity suite (API -> TaskLoop -> job -> receipt).
         "residual": (["tests/integration/test_residual_plan_amendment_postgres.py",
