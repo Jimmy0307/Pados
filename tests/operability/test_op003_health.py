@@ -199,6 +199,8 @@ def _with_corpus(**lane: bool) -> dict[str, Any]:
 @pytest.mark.parametrize(("lane", "status", "reason", "overall"), [
     ({}, "OK", None, "OK"),
     ({"configured": False, "usable": False}, "NOT_CONFIGURED", "CORPUS_DB_UNCONFIGURED", "OK"),
+    ({"reachable": True, "authenticated": False, "usable": False, "missing": True}, "NOT_CONFIGURED",
+     "CORPUS_DB_UNCONFIGURED", "OK"),  # the default name, but no Corpus database was ever created
     ({"reachable": False, "authenticated": False, "usable": False}, "DEGRADED", "CORPUS_DB_UNAVAILABLE", "DEGRADED"),
     ({"migrations_current": False, "usable": False}, "DEGRADED", "CORPUS_MIGRATION_STALE", "DEGRADED"),
 ])
@@ -227,3 +229,22 @@ def test_system_health_probes_the_corpus_lane_without_changing_its_verdict(monke
     assert ("corpus", get_settings().corpus_database_name) in probed
     assert assessment["lanes"]["corpus"]["usable"] is False
     assert not any(reason.startswith("CORPUS") for reason in assessment["reasons"])
+
+
+def test_the_corpus_lane_is_not_probed_when_the_operational_lane_is_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pados.config import get_settings
+    from pados.operations import service as operations
+
+    probed: list[str] = []
+
+    def probe(_settings: Any, database: str, lane: str) -> dict[str, Any]:
+        probed.append(lane)
+        return {"database": database, "configured": True, "reachable": False, "authenticated": False,
+                "migrations_current": False, "usable": False, "main_revisions": [], "proof_revisions": []}
+
+    monkeypatch.setattr(operations, "_probe_lane", probe)
+    assessment = operations.system_health(get_settings())
+    assert "corpus" not in probed  # no third connection attempt to a server that is down
+    client = _client(monkeypatch, assessment)
+    body = client.get("/health/ready").json()
+    assert body["status"] == "NOT_READY" and "corpus_database" not in _checks(body)

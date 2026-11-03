@@ -187,11 +187,11 @@ def checks_from_system_health(assessment: Mapping[str, Any] | None, *, product_r
 def _corpus_check(assessment: Mapping[str, Any], latency_ms: float | None) -> tuple[DependencyCheck, ...]:
     """Optional: the Corpus lane (retrieval and ingestion). A failure degrades readiness and never blocks it."""
     lane = (assessment.get("lanes") or {}).get("corpus")
-    if not isinstance(lane, Mapping):
-        return ()
+    if not isinstance(lane, Mapping) or lane.get("skipped"):
+        return ()  # not probed: the operational lane is down, which already fails readiness
     if lane.get("usable"):
         return (DependencyCheck(name="corpus_database", required=False, status=CheckStatus.OK, latency_ms=latency_ms),)
-    if not lane.get("configured"):
+    if not lane.get("configured") or lane.get("missing"):
         return (DependencyCheck(name="corpus_database", required=False, status=CheckStatus.NOT_CONFIGURED,
                                 reason="CORPUS_DB_UNCONFIGURED", latency_ms=latency_ms),)
     reason = "CORPUS_MIGRATION_STALE" if lane.get("authenticated") else "CORPUS_DB_UNAVAILABLE"
