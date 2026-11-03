@@ -18,7 +18,7 @@ TaskLoop owns iterations, each worker job keeps its own timeout, and nothing her
 
 | Boundary | How | When the budget is spent |
 |---|---|---|
-| PostgreSQL, through `pados.db.session_scope` | Each transaction gets `statement_timeout` = the remaining budget (transaction-local, set again after a commit) | Refused before the first statement; a statement past it is cancelled by the server. Both are `DB_DEADLINE_EXCEEDED`: `write_occurred` NO for a statement (the transaction rolls back), UNKNOWN when the commit itself was cancelled |
+| PostgreSQL, through `pados.db.session_scope` | Each transaction gets `statement_timeout` = the budget left when it began (transaction-local, set again after a commit). It is per statement: several slow statements in one transaction can still run past the deadline in total | Refused before the first statement; a statement past it is cancelled by the server. Both are `DB_DEADLINE_EXCEEDED`. `write_occurred` is NO when nothing in the scope was committed, YES when an earlier commit in the scope already landed, and UNKNOWN when a commit itself was cancelled. Any cancellation while a deadline is set is reported this way, including one from another server timeout |
 | Local-model provider call (`_call_model`) | The job's timeout, capped | `TIMED_OUT` / `PARENT_DEADLINE_EXCEEDED` without calling the model when less than one second is left (the provider takes whole seconds) |
 | Registered command workers (`run_registered_command`) | The command's timeout, capped | Not started (`PARENT_DEADLINE_EXCEEDED`); a run cut short by the budget is `TIMED_OUT` / `PARENT_DEADLINE_EXCEEDED`, by its own timeout `TIMED_OUT` / `TIMED_OUT` |
 | Compute-node calls (`NodeClient`) | The call's timeout, capped | `NODE_DEADLINE_EXCEEDED` before any network call |
@@ -75,12 +75,14 @@ The one retried boundary today is the compute-node job-status read (`NodeClient.
   owner named in its `LOOP_STARTED` event. It renews that owner's lease, takes a free or lapsed lease as that owner,
   and is refused with `LOOP_LEASE_HELD` while any other owner holds a live lease. So one operator who starts and
   steps a loop keeps one lease, and a worker that took the lease over is never overridden by an owner-less step. A
-  loop with no recorded starting owner is refused (`LOOP_LEASE_OWNER_UNKNOWN`).
+  loop with no recorded starting owner is refused (`LOOP_LEASE_OWNER_UNKNOWN`). `LOOP_STARTED` is written only when
+  the start actually took the lease, so it never names an owner that another live owner fenced out.
 - A deferred local-model call (RC2 SEC-9) runs with no transaction open, so the lease can lapse and be taken over
   while the model runs. The whole `run_step` holds the lease as one owner:
   - the model result is recorded only while that owner still holds the lease, checked with the lease row locked in
-    the same transaction. Otherwise the job closes `FAILED` / `LOOP_LEASE_LOST`, and the output is neither recorded
-    nor kept on disk;
+    the same transaction. Otherwise the fenced owner writes no result and no terminal state: its claim goes back to
+    `ROUTED` (a `JOB_QUEUED` event with `result_discarded` and `LOOP_LEASE_LOST`), the output is neither recorded nor
+    kept on disk, and the current holder runs the job again under the usual deadline and approval checks;
   - an owner fenced before the claim leaves the job `ROUTED` for the current holder, and its model is never called;
   - the resumed iteration holds the lease again, so an owner that lost it decides and publishes nothing
     (`LOOP_LEASE_HELD`). A result recorded while the owner still held the lease is validated and decided by whoever
@@ -97,7 +99,7 @@ the shared identity, but it changes the operator API; that is a product decision
 | Symptom | Code | Safe action |
 |---|---|---|
 | A step is refused because another worker holds the loop | `LOOP_LEASE_HELD` | Wait for that owner, or for the lease to lapse (≤ 5 min) if the owner is gone |
-| A model job closed after the call | `LOOP_LEASE_LOST` | The lease was taken over while the model ran. The output was discarded; the current holder's next step routes the work again |
+| A model job went back to `ROUTED` after its call | `LOOP_LEASE_LOST` (in the `JOB_QUEUED` event) | The lease was taken over while the model ran. The output was discarded; the current holder's next step runs the job again |
 | Every step is refused for a loop | `LOOP_LEASE_OWNER_UNKNOWN` | The loop has no `LOOP_STARTED` owner; step it with an explicit `--owner` |
 | A retried create returns a conflict | `*_IDEMPOTENCY_CONTENT_CONFLICT` | The key was already used for different content; use a new key for the new content |
 | A model job closes immediately | `PARENT_DEADLINE_EXCEEDED` | The caller's budget was spent; retry with a larger `X-Request-Deadline-Ms` |

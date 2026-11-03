@@ -32,7 +32,7 @@ Injected by: `test_database_disconnect_is_a_dependency_failure_never_an_internal
 | Symptom | Code | Safe recovery | Verify |
 |---|---|---|---|
 | A step is refused | `LOOP_LEASE_HELD` | Another owner holds a live lease (an owner-less step acts as the loop's starting owner and is fenced like any other). Wait, or let it lapse (≤ 5 min) when that owner has crashed, then resume | `task_loop.lease.held` for the new owner; iterations continue from the persisted ones |
-| A model job closes `FAILED` right after its call | `LOOP_LEASE_LOST` | The lease was taken over while the model ran; the output was discarded, not recorded. Step again as the current holder, which routes the work again | `worker.model_job.fenced` in the log; no `stdout` artifact for that job |
+| A model job is `ROUTED` again right after its call | `LOOP_LEASE_LOST` (`JOB_QUEUED` event, `result_discarded`) | The lease was taken over while the model ran; the output was discarded, not recorded. Step again as the current holder, which runs the job again | `worker.model_job.fenced` in the log; no `stdout` artifact from the discarded call |
 | A step answers `WAITING_HUMAN` | approval reasons (`APPROVAL_REVOKED`, `APPROVAL_EXPIRED`, `APPROVAL_CONSUMED`) | Human approval: create and decide a new approval and start a new loop. Never edit the approval row | The new loop routes under the new approval |
 | A job stays non-terminal past its deadline | `JOB_DEADLINE_EXCEEDED` (`TIMED_OUT`) | The next step expires it automatically; then step again | `worker_jobs.status = TIMED_OUT`, and the loop decides on it |
 

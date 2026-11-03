@@ -1031,7 +1031,10 @@ def _execute_routed_model_job(settings: Any, job_id: str, *, session_factory: An
     ``fence`` (OP-004) is the caller's lease check, run inside the claim transaction and again inside the transaction
     that records the result; it returns an error code when the caller no longer holds the work. A caller fenced before
     the claim leaves the job ROUTED for the current holder and never calls the model. A caller fenced after the call
-    records the job as FAILED with that code, and the model output is neither recorded nor kept on disk.
+    writes no result: the job goes back from its own RUNNING claim to ROUTED (a ``JOB_QUEUED`` event with
+    ``result_discarded`` and the reason), the model
+    output is neither recorded nor kept on disk, and the current holder runs the job again under the usual deadline
+    and approval checks. A fenced caller never writes a terminal state onto work it no longer holds.
     """
     from pados.db import session_scope
 
@@ -1072,11 +1075,9 @@ def _execute_routed_model_job(settings: Any, job_id: str, *, session_factory: An
     with scope(settings) as session:
         lost = fence(session) if fence is not None else None
         if lost is not None:
-            _LOG.warning("worker.model_job.fenced", outcome="rejected", error_code=lost)
-            outcome = {"status": "FAILED", "error_code": lost, "validation_status": "FAILED",
-                       "usage_metadata": {"measured_execution": None},
-                       "result_summary": f"The model result was discarded: {lost}."}
-        recorded = _finish_model_job(session, job=job, require_running=True, **outcome)
+            recorded = _release_fenced_claim(session, job, lost)
+        else:
+            recorded = _finish_model_job(session, job=job, require_running=True, **outcome)
         kept = isinstance(stdout_path, Path) and session.execute(
             text(
                 "SELECT 1 FROM worker_job_artifacts WHERE job_id = CAST(:id AS uuid) "
@@ -1087,6 +1088,20 @@ def _execute_routed_model_job(settings: Any, job_id: str, *, session_factory: An
     if isinstance(stdout_path, Path) and not kept:
         stdout_path.unlink(missing_ok=True)  # an unrecorded late result must not look like evidence later
     return recorded
+
+
+def _release_fenced_claim(session: Session, job: Mapping[str, Any], code: str) -> dict[str, Any]:
+    """Hand a job this caller claimed back to ROUTED without a result (OP-004); a job in any other state is left."""
+    job_id = str(job["id"])
+    released = session.execute(
+        text("UPDATE worker_jobs SET status = 'ROUTED', started_at = NULL "
+             "WHERE id = CAST(:id AS uuid) AND status = 'RUNNING' RETURNING id"), {"id": job_id}).first()
+    _LOG.warning("worker.model_job.fenced", outcome="rejected", error_code=code, released=released is not None)
+    if released is not None:
+        # Queued again for the lease holder; the event type set is fixed by migration 0019, so the reason says why.
+        _event(session, job_id, str(job["project_id"]), "JOB_QUEUED",
+               {"requeued": True, "result_discarded": True, "reason": code})
+    return get_job(session, job_id)
 
 
 def _deferred_claim_refusal(session: Session, job_id: str) -> dict[str, Any] | None:

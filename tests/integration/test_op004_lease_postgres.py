@@ -132,3 +132,19 @@ def test_a_lapsed_lease_can_be_taken_over_and_the_loop_resumes(seeded: tuple[Ses
     assert lease["remaining"].total_seconds() > 240
     assert first["status"] == "RUNNING" and resumed["status"] in {"RUNNING", "COMPLETED"}
     assert _iterations(session, loop_id) == 2
+
+
+def test_start_records_no_owner_that_did_not_get_the_lease(seeded: tuple[Session, str]) -> None:
+    session, loop_id = seeded
+    session.execute(text("UPDATE task_loops SET status = 'READY' WHERE id = CAST(:l AS uuid)"), {"l": loop_id})
+    session.execute(text("UPDATE task_loop_leases SET owner_instance = 'live-worker', "
+                         "lease_expires_at = now() + interval '5 minutes' WHERE loop_id = CAST(:l AS uuid)"),
+                    {"l": loop_id})
+    started = int(session.execute(text("SELECT count(*) FROM task_loop_events WHERE loop_id = CAST(:l AS uuid) "
+                                       "AND event_type = 'LOOP_STARTED'"), {"l": loop_id}).scalar_one())
+    with pytest.raises(PermissionError, match="LOOP_LEASE_HELD"):
+        loop_service.start_loop(session, loop_id, owner_instance="late-starter")
+    after = int(session.execute(text("SELECT count(*) FROM task_loop_events WHERE loop_id = CAST(:l AS uuid) "
+                                     "AND event_type = 'LOOP_STARTED'"), {"l": loop_id}).scalar_one())
+    assert after == started  # owner-less steps can never come to act as "late-starter"
+    assert _lease(session, loop_id)["owner_instance"] == "live-worker"

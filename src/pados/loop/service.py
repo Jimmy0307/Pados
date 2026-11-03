@@ -510,7 +510,7 @@ def start_loop(session: Session, loop_id: str, *, owner_instance: str = "pados-c
         ),
         {"id": loop_id},
     ).mappings().one()
-    session.execute(
+    leased = session.execute(
         text(
             """
             INSERT INTO task_loop_leases(loop_id, owner_instance, lease_expires_at)
@@ -522,10 +522,16 @@ def start_loop(session: Session, loop_id: str, *, owner_instance: str = "pados-c
                 heartbeat_at = now()
             WHERE task_loop_leases.lease_expires_at < now()
                OR task_loop_leases.owner_instance = EXCLUDED.owner_instance
+            RETURNING owner_instance
             """
         ),
         {"loop_id": loop_id, "owner": owner_instance},
-    )
+    ).first()
+    if leased is None:
+        # OP-004: another owner holds a live lease. LOOP_STARTED names the owner owner-less steps act as, so it is
+        # written only for an owner that actually holds the lease; the status change rolls back with this refusal.
+        _LOG.warning("task_loop.lease.refused", outcome="rejected", error_code=LOOP_LEASE_HELD, owner=owner_instance)
+        raise PermissionError(LOOP_LEASE_HELD)
     _event(session, loop_id, str(row["project_id"]), "LOOP_STARTED", {"owner": owner_instance})
     return dict(row)
 

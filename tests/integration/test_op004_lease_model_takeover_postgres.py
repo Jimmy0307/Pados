@@ -5,8 +5,9 @@
 ``loop_service.run_step`` commits routing, calls the model with no transaction open (RC2 SEC-9) and resumes the
 iteration in a new transaction. A lease can lapse and be taken over by another worker in that window. Then:
 
-* the model result is not recorded for the old owner: the job closes FAILED with LOOP_LEASE_LOST, and its stdout is
-  neither recorded nor left on disk;
+* the model result is not recorded for the old owner, and the old owner writes no terminal state onto work it no
+  longer holds: the job goes back to ROUTED (JOB_QUEUED, result_discarded), its stdout is neither recorded nor left on disk,
+  and the new holder runs it again and completes the loop;
 * the old owner's resumed iteration is refused (LOOP_LEASE_HELD), so it decides and publishes nothing;
 * a takeover after the result was recorded (while the owner still held the lease) still stops the old owner's
   resumed iteration, and the new holder completes it through the normal validation path;
@@ -77,7 +78,12 @@ def test_a_takeover_during_the_model_call_discards_the_result_and_fences_the_old
         _step(runtime, scope, tmp_path, owner)
     assert probe.calls == 1
     job = _model_job(engine, runtime["request_id"])
-    assert (job["status"], job["error_code"], job["validation_status"]) == ("FAILED", "LOOP_LEASE_LOST", "FAILED")
+    assert (job["status"], job["error_code"]) == ("ROUTED", None)  # handed back, no result and no terminal state
+    with engine.connect() as connection:
+        discarded = connection.execute(text(
+            "SELECT count(*) FROM worker_job_events WHERE job_id = CAST(:j AS uuid) AND event_type = 'JOB_QUEUED' "
+            "AND payload_json->>'reason' = 'LOOP_LEASE_LOST'"), {"j": str(job["id"])}).scalar_one()
+    assert int(discarded) == 1
     with engine.connect() as connection:
         stdout_rows = connection.execute(text(
             "SELECT count(*) FROM worker_job_artifacts WHERE job_id = CAST(:j AS uuid) AND artifact_type = 'stdout'"),
@@ -87,11 +93,10 @@ def test_a_takeover_during_the_model_call_discards_the_result_and_fences_the_old
             {"j": str(job["id"])}).scalar_one()
     assert int(stdout_rows) == 0 and not (Path(str(handoff)).parent / "stdout.txt").exists()
     assert _decided(engine, runtime["loop_id"]) == decided  # the old owner decided nothing
-    _step(runtime, scope, tmp_path, "worker-b")  # the new holder carries on through the normal path
-    with engine.connect() as connection:
-        lost = connection.execute(text("SELECT status, error_code FROM worker_jobs WHERE id = CAST(:j AS uuid)"),
-                                  {"j": str(job["id"])}).one()
-    assert tuple(lost) == ("FAILED", "LOOP_LEASE_LOST")  # the discarded result never comes back as a success
+    finished = _step(runtime, scope, tmp_path, "worker-b")  # the new holder runs the job again itself
+    assert probe.calls == 2 and finished["loop"]["status"] == "COMPLETED"
+    rerun = _model_job(engine, runtime["request_id"])
+    assert rerun["id"] == job["id"] and (rerun["status"], rerun["validation_status"]) == ("SUCCEEDED", "PASSED")
 
 
 def test_a_takeover_after_the_result_was_recorded_still_stops_the_old_owners_completion(
