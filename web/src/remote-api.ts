@@ -176,6 +176,28 @@ export class RemoteApiError extends Error {
   }
 }
 
+/**
+ * What a remote operator is told about a failed request (OP-007): the outcome, what is safe to do next, the server's
+ * code for a refusal, and the request id for support. Raw transport text never reaches the notice.
+ */
+export function describeRemoteFailure(error: unknown): string {
+  if (!(error instanceof RemoteApiError)) return "The request failed.";
+  const reference = error.requestId ? ` Request ${error.requestId}.` : "";
+  switch (error.outcome) {
+    case "REQUEST_TIMEOUT":
+      return `The Home Base did not answer in time. Refresh to try the view again.${reference}`;
+    case "WRITE_OUTCOME_UNKNOWN":
+      return "The action may or may not have been applied. Refresh and check the attention view before trying "
+        + `again.${reference}`;
+    case "SESSION_STALE":
+      return `Your remote session is no longer valid. Sign in again with your access proof.${reference}`;
+    case "NETWORK_ERROR":
+      return `The Home Base could not be reached. Check the connection, then refresh.${reference}`;
+    default:
+      return `Refused: ${error.detail || `HTTP ${error.status}`}.${reference}`;
+  }
+}
+
 const PREFIX = "/remote/v1";
 
 function newIntentId(): string {

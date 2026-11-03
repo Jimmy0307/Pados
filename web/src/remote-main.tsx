@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { useCallback, useEffect, useState, type FormEvent, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
-import { RemoteApiError, RemoteClient, deriveBanner, type AttentionProjection, type ConnectivityProjection, type RemoteNodes, type RemoteRun, type WorkMapProjection } from "./remote-api";
+import { RemoteApiError, RemoteClient, describeRemoteFailure, deriveBanner, type AttentionProjection, type ConnectivityProjection, type RemoteNodes, type RemoteRun, type WorkMapProjection } from "./remote-api";
 import { ActionsView, AttentionView, ConnectivityBanner, REMOTE_VIEWS, TaskAssignmentView, WorkMapView, type RemoteView } from "./remote-console";
 import "./remote.css";
 
@@ -40,7 +40,7 @@ function RemoteApp(): ReactElement {
     } catch (error) {
       if (error instanceof RemoteApiError) {
         setReachable(true);
-        setNotice(error.detail);
+        setNotice(describeRemoteFailure(error));
       } else {
         setReachable(false);
       }
@@ -91,7 +91,7 @@ function RemoteApp(): ReactElement {
       setNotice(`${label}: ${result.outcome}`);
       return result;
     } catch (error) {
-      setNotice(`${label}: ${error instanceof RemoteApiError ? error.detail : "request failed"}`);
+      setNotice(`${label}: ${describeRemoteFailure(error)}`);
       return null;
     }
   }
@@ -130,7 +130,7 @@ function RemoteApp(): ReactElement {
       const descriptor = await client.presenceDescriptor("pados-remote-device");
       setNotice(`Device descriptor (give to the Home Base operator to enrol): ${JSON.stringify(descriptor)}`);
     } catch (error) {
-      setNotice(`register device: ${error instanceof RemoteApiError ? error.detail : "WebAuthn unavailable"}`);
+      setNotice(`register device: ${error instanceof RemoteApiError ? describeRemoteFailure(error) : "WebAuthn unavailable"}`);
     }
   })();
 
