@@ -53,7 +53,7 @@
       "health": {"endpoint": "/ready", "source": "src/pados/api/app.py"},
       "failure_injection": [{"path": "tests/security/test_rc2_arch1_product_dispatch_authority.py"},
                             {"path": "tests/security/test_rc2_sec2_cloud_egress_classification.py"}],
-      "runbook": {"gap": "no Product Loop recovery runbook: the Product Loop is disabled by default and its external runtimes are not validated"},
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Product Loop"},
       "runtime_lanes": ["rea-runtime", "openmaic-runtime", "ai-scientist-v3-runtime", "local-model-governed-acceptance"]
     },
     "C07": {
@@ -105,7 +105,7 @@
       "error_codes": ["ADAPTER_UNAVAILABLE", "ADAPTER_FAILURE"],
       "health": {"gap": "learning and capability-loop runtimes have no health contract"},
       "failure_injection": [{"path": "tests/capability_loop"}],
-      "runbook": {"gap": "no learning-loop recovery runbook"},
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Learning loop and anchors"},
       "runtime_lanes": ["rea-runtime", "openmaic-runtime"]
     },
     "C13": {
@@ -114,7 +114,7 @@
       "error_codes": ["PACK_MANIFEST_INVALID", "PACK_ADAPTER_FAILED", "PACK_CAPABILITY_CONFLICT"],
       "health": {"not_applicable": "packs are registry content, not a serving process"},
       "failure_injection": [{"path": "tests/capability/test_pack_boundaries.py"}],
-      "runbook": {"gap": "no pack/adapter recovery runbook; the OP-009 operability contract (docs/operations/PACK_OPERABILITY_CONTRACT.md) covers declarations, not recovery"},
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Capability packs and adapters"},
       "runtime_lanes": ["ai-scientist-v3-runtime"]
     },
     "C14": {
@@ -149,7 +149,7 @@
       "error_codes": ["PROVIDER_UNREACHABLE"],
       "health": {"gap": "optional projections report degradation per adapter, not through the v1 health schema"},
       "failure_injection": [{"path": "tests/connectivity"}],
-      "runbook": {"gap": "no recovery runbook for optional projections"}
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Optional projections"}
     }
   }
 }

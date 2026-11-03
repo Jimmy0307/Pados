@@ -95,3 +95,67 @@ need the corpus database lane; locally they fall into the documented environment
 
 Injected by: `test_partial_or_altered_evidence_never_verifies`, `tests/capability/test_execution_ledger.py`, and the
 governed acceptance suite in `tests/integration/test_final_convergence_product_loop_postgres.py`.
+
+## Product Loop
+
+Disabled by default (`PADOS_PRODUCT_LOOP_ENABLED=false`). While it is disabled no Product Loop route is registered
+and nothing below can happen. Its external runtimes (REA, OpenMAIC, AI-Scientist-v3) and governed model-output
+acceptance are `NOT_VALIDATED` runtime lanes, so this section covers the refusals the code makes, not a validated
+production path.
+
+| Symptom | Code | Safe recovery | Verify |
+|---|---|---|---|
+| The loop is enabled but its routes are absent | `PRODUCT_WORKSPACE_ROOT_REQUIRED`, `PRODUCT_OBJECT_ROOT_REQUIRED`, `PRODUCT_DATABASE_NAME_REQUIRED`, `PROOF_DATABASE_MUST_BE_SEPARATE`, `PRODUCT_DATABASE_MUST_BE_LOCAL` | Nothing was written. Set `PADOS_PRODUCT_WORKSPACE_ROOT`, `PADOS_PRODUCT_OBJECT_ROOT` and a separate local `PADOS_PRODUCT_DATABASE_NAME`, then restart | `/health/ready`: `product_loop_configuration` and `proof_database` read `OK` (required only while the loop is enabled) |
+| `POST /product-loop/runs` answers 403 | `APPROVAL_SUBJECT_MISMATCH`, `APPROVAL_REF_NOT_BOUND_TO_SCOPE`, `APPROVAL_REF_NOT_APPROVED`, `APPROVAL_CONSUMED`, `APPROVAL_VERIFICATION_UNAVAILABLE` | Refused before any run exists. Obtain a new human approval for exactly this operation; an approval is never edited or reused | The new run appears in `GET /product-loop/runs/{run_id}` |
+| A run ends `AUTHORITY_BLOCK` before the cloud call | `CLOUD_EGRESS_CLASSIFICATION_REFUSED`, `CLOUD_EGRESS_CEILING_INVALID`, `CLOUD_EGRESS_CLASSIFICATION_UNAVAILABLE` | The project's classification is above the cloud ceiling, or the ceiling is invalid (RESTRICTED is never valid). Raising `PADOS_PRODUCT_LOOP_CLOUD_MAX_CLASSIFICATION` is an owner decision, not a recovery step. No reclassify command exists | The run status in `GET /product-loop/runs/{run_id}` |
+| The provider is refused | `PRODUCT_LOOP_PROVIDER_INVALID`, `PRODUCT_LOOP_PROVIDER_UNAVAILABLE`, `CODEX_EXECUTABLE_UNAVAILABLE` | Only the Codex CLI has an adapter. Set `PADOS_PRODUCT_LOOP_PROVIDER` to `AUTO` or `CODEX` and install the CLI | `provider_routing` in `/health/ready` |
+| Provider output is refused | `CODEX_OUTPUT_PATH_SCOPE_MISMATCH`, `CODEX_OUTPUT_BUDGET_EXCEEDED`, `CODEX_OUTPUT_SECRET_SHAPED`, `CODEX_OUTPUT_NOT_UTF8` | Fails closed: nothing reaches the workspace. Correct the declared paths or the request and submit a new run | The new run's status |
+
+Injected by: `tests/security/test_rc2_arch1_product_dispatch_authority.py`,
+`tests/security/test_rc2_sec2_cloud_egress_classification.py`.
+
+## Learning loop and anchors
+
+The outcome store, advice log and anchors are a library (`src/pados/learning/`). The advisor is off by default, and no
+CLI or API drives it today, so every recovery below is an owner action in Python, not an operator command.
+`ADAPTER_UNAVAILABLE` and `ADAPTER_FAILURE` are outcome classifications that the store records, not refusals.
+
+| Symptom | Code | Safe recovery | Verify |
+|---|---|---|---|
+| An append is refused because a store is full | `OUTCOME_STORE_FULL_PRUNE_REQUIRED`, `OUTCOME_INGESTION_LEDGER_FULL_PRUNE_REQUIRED`, `ADVICE_LOG_FULL_PRUNE_REQUIRED`, `EVALUATION_STORE_FULL` | Nothing was evicted. Run the store's own `prune()`; purging an evaluation store is a human decision | The next append succeeds |
+| A re-ingest is refused | `OUTCOME_ALREADY_INGESTED`, `OUTCOME_RECORD_ALREADY_EXPIRED`, `LEARNING_OUTCOME_UNAUTHENTICATED` | By design; nothing was written and nothing needs doing | No new record |
+| The advice log head is not anchored after a crash | `ADVICE_LOG_HEAD_NOT_ANCHORED` | Fails closed; an unanchored suffix is never adopted. The owner inspects and truncates the unanchored entry (`docs/learning/OUTCOME_LEARNING_V1.md`). No tool does this today | `AdviceLog.verify()` reports `ok` and `ANCHORED` |
+| An anchor update is refused or unreachable | `ADVICE_LOG_ANCHOR_REFUSED`, `ADVICE_LOG_ANCHOR_UNAVAILABLE`, `ANCHOR_CONFLICT` | The previous file content was restored. Retry once the anchor is reachable | `AdviceLog.verify()` |
+| The anchor is lost or invalid, or the chain is broken | `ANCHOR_HEAD_LOST`, `ANCHOR_STATE_INVALID`, `ANCHOR_STATE_INSECURE`, `ADVICE_LOG_REWRITTEN`, `ADVICE_LOG_TRUNCATED`, `ADVICE_LOG_CHAIN_BROKEN` | Never re-created or repaired silently. Preserve the files and treat it as a security event. Only an empty log's empty anchor may be cleared by the owner | `AdviceLog.verify()` |
+
+Injected by: `tests/learning`, `tests/capability_loop`.
+
+## Capability packs and adapters
+
+Packs are registered by the owner (`register_pack`); nothing registers one automatically. The OP-009 contract
+(`docs/operations/PACK_OPERABILITY_CONTRACT.md`) covers what a pack declares; this section covers recovery.
+
+| Symptom | Code | Safe recovery | Verify |
+|---|---|---|---|
+| A pack is rejected at registration | `PACK_MANIFEST_INVALID` (or the first `PACK_*` validation code), `PACK_CAPABILITY_CONFLICT`, `PACK_STALE_REGISTRATION` | The registry was not touched. Fix the manifest; a capability another pack defines is never redefined | `pack_operability.check()` passes and the pack registers |
+| Registration stopped partway | `PACK_REGISTRATION_INCOMPLETE` | Every adapter that call registered was revoked again; register again | The pack's adapters are listed once |
+| Registration stopped and its undo failed | `PACK_REGISTRATION_COMPENSATION_FAILED` | The registry may hold part of the pack. Stop, and call `disable_pack` for that pack (idempotent; receipts are kept) | No adapter of the pack remains registered |
+| An adapter fails at run time | `PACK_ADAPTER_FAILED` | Not retryable. Read the declared error code in the result (declared codes keep their own `retryable` flag) and fix the cause before running again | A new run's result |
+| A pack is not plannable | `ADAPTER_UNAVAILABLE` | Its runtime reports unavailable, so planning fails closed. Restore the runtime; the AI-Scientist-v3 runtime is `NOT_VALIDATED` | The pack plans again |
+
+Injected by: `tests/capability/test_pack_boundaries.py`, `tests/capability/test_op009_pack_operability.py`.
+
+## Optional projections
+
+Enterprise, connectivity, machines and compute nodes are optional (`PADOS_ENTERPRISE_CONFIG`,
+`PADOS_CONNECTIVITY_CONFIG`, `PADOS_MACHINES_CONFIG`, `PADOS_COMPUTE_NODES_CONFIG`, all unset by default). Unset or
+broken, they never change Core readiness. `pados doctor --json` reports each one outside its `ok` verdict.
+
+| Symptom | Code | Safe recovery | Verify |
+|---|---|---|---|
+| A cloud provider is unreachable | `PROVIDER_UNREACHABLE` | The run fails as `RUNTIME_FAILURE` (`retryable`); nothing is rerouted to another provider. Restore the connection and run again | `pados doctor`: `connectivity.wan` is up and not `stale` |
+| Every Product Loop dispatch is blocked | `CONNECTIVITY_CONFIG_INVALID` | The connectivity file is invalid, so nothing is probed and dispatch fails closed. Fix the file or unset the variable | `pados doctor`: the `connectivity` section is valid |
+| An enterprise capability is refused | `ENTERPRISE_EXTENSION_INVALID`, `REMOTE_EGRESS_NOT_APPROVED`, `SECRET_REFERENCE_NOT_AUTHORIZED`, `SECRET_REFERENCE_UNAVAILABLE` | Reported only. Remote egress needs `allow_remote_egress: true`, and every secret reference must be listed as authorized: owner decisions in the enterprise config | `pados doctor`: `enterprise.status` is `ENTERPRISE_EXTENSION_READY` |
+| A machine or node projection is invalid | `MACHINE_INVENTORY_INVALID`, `COMPUTE_NODES_INVALID` | Projection only. Fix the inventory file | `pados doctor`: `machines` / `compute_nodes` observed |
+
+Injected by: `tests/connectivity`, `tests/enterprise`, `tests/machines`.
