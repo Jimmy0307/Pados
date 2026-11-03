@@ -35,54 +35,163 @@
       "description": "scripts/dogfood/local_dogfood_e2e.py on Windows 11 with a private PostgreSQL cluster; evidence is E2E_RESULT.json.",
       "platform": "windows",
       "max_age_days": 14,
-      "claims": ["LOCAL_SUPERVISED_DOGFOOD_E2E_WINDOWS"],
-      "does_not_cover": ["HARDWARE_WEBAUTHN_AUTHENTICATOR", "MULTI_USER", "NETWORK_EXPOSURE"]
+      "claims": [
+        "LOCAL_SUPERVISED_DOGFOOD_E2E_WINDOWS"
+      ],
+      "does_not_cover": [
+        "HARDWARE_WEBAUTHN_AUTHENTICATOR",
+        "MULTI_USER",
+        "NETWORK_EXPOSURE"
+      ],
+      "source": {
+        "format": "e2e-result"
+      }
     },
     "vmware-linux-e2e": {
       "description": "The same E2E on the VMware Linux VM (virt=vmware, never WSL), from a fresh online clone.",
       "platform": "linux",
       "max_age_days": 14,
-      "claims": ["LOCAL_SUPERVISED_DOGFOOD_E2E_LINUX"],
-      "does_not_cover": ["HARDWARE_WEBAUTHN_AUTHENTICATOR", "MULTI_USER", "NETWORK_EXPOSURE"]
+      "claims": [
+        "LOCAL_SUPERVISED_DOGFOOD_E2E_LINUX"
+      ],
+      "does_not_cover": [
+        "HARDWARE_WEBAUTHN_AUTHENTICATOR",
+        "MULTI_USER",
+        "NETWORK_EXPOSURE",
+        "HYPERVISOR_ATTESTATION"
+      ],
+      "source": {
+        "format": "e2e-result"
+      },
+      "notes": "E2E_RESULT.json records the platform string, not the hypervisor; a WSL kernel string is refused, but VMware itself is attested only by the vm-summary of the ci-gates lane."
     },
     "windows-ci-gates": {
-      "description": "The 14 CI-required gates run natively on Windows (ci_policy, ruff, mypy, mypy_win32, compileall, d1, d2, d4, migration_gate, win_native_1, win_native_2, win_local_intel, public_export, secret_scan); evidence is the gate summary.",
+      "description": "The CI-required gates run natively on Windows by run_gates.ps1; evidence is its gate-summary.json. The registry fixes the complete gate list.",
       "platform": "windows",
       "max_age_days": 14,
-      "claims": ["CI_REQUIRED_GATES_WINDOWS"],
-      "notes": "win_local_intel contains a pre-existing timing-sensitive test (R19-3); a run where it failed is FAIL, not PASS."
+      "claims": [
+        "CI_REQUIRED_GATES_WINDOWS"
+      ],
+      "notes": "win_local_intel contains a pre-existing timing-sensitive test (R19-3); a run where it failed is FAIL, not PASS.",
+      "source": {
+        "format": "gate-summary",
+        "required_checks": [
+          "ci_policy",
+          "ruff",
+          "mypy",
+          "mypy_win32",
+          "compileall",
+          "d1",
+          "d2",
+          "d4",
+          "migration_gate",
+          "win_native_1",
+          "win_native_2",
+          "win_local_intel",
+          "public_export",
+          "secret_scan",
+          "operability_gate",
+          "doc_lint",
+          "frontend",
+          "npm_cli"
+        ]
+      }
     },
     "vmware-linux-ci-gates": {
       "description": "The CI gate set on the VMware Linux VM, including the full deterministic suite with CI-provisioned databases and the wheel build.",
       "platform": "linux",
       "max_age_days": 14,
-      "claims": ["CI_GATES_LINUX"]
+      "claims": [
+        "CI_GATES_LINUX"
+      ],
+      "source": {
+        "format": "vm-summary",
+        "required_checks": [
+          "ci_policy",
+          "ruff",
+          "mypy",
+          "mypy_win32",
+          "compileall",
+          "migration_gate",
+          "d1",
+          "d2",
+          "d4",
+          "pack_focused",
+          "full_pytest",
+          "public_export",
+          "secret_scan",
+          "wheel_build",
+          "operability_gate",
+          "doc_lint",
+          "frontend",
+          "npm_cli_tests",
+          "integration_pg"
+        ]
+      }
     },
     "postgres-integration": {
-      "description": "scripts/release/postgres_integration_gate.py, all suites, skips refused.",
+      "description": "scripts/release/postgres_integration_gate.py, all suites, skips refused; evidence is its postgres-integration.json (schema v1) beside the per-suite reports it hashes.",
       "platform": "any",
       "max_age_days": 14,
-      "claims": ["POSTGRES_INTEGRATION_SUITES"]
+      "claims": [
+        "POSTGRES_INTEGRATION_SUITES"
+      ],
+      "source": {
+        "format": "postgres-gate",
+        "required_checks": [
+          "d1-binding",
+          "d4-handoff",
+          "residual",
+          "proof-lane",
+          "p6-11",
+          "migration"
+        ]
+      }
     },
     "github-ci": {
-      "description": "The required GitHub status checks for the exact commit.",
+      "description": "The required GitHub check runs for the exact commit; evidence is the unmodified GET /repos/{owner}/{repo}/commits/{sha}/check-runs response.",
       "platform": "github",
       "max_age_days": 14,
-      "claims": ["GITHUB_REQUIRED_CHECKS"]
+      "claims": [
+        "GITHUB_REQUIRED_CHECKS"
+      ],
+      "source": {
+        "format": "github-check-runs",
+        "app": "github-actions",
+        "required_checks": [
+          "linux (lint, types, tests, build)",
+          "windows (native suites)",
+          "macos (static and contract)",
+          "secret scan and CI policy",
+          "dependency review",
+          "codeql (python)",
+          "codeql (javascript-typescript)"
+        ]
+      }
     },
     "windows-full-suite": {
       "description": "pytest tests --ignore=tests/integration on Windows.",
       "platform": "windows",
       "max_age_days": 14,
-      "claims": ["FULL_DETERMINISTIC_SUITE_WINDOWS"],
+      "claims": [
+        "FULL_DETERMINISTIC_SUITE_WINDOWS"
+      ],
       "known_status": "FAIL",
-      "notes": "R19-3: 126 environment-dependent failures that are identical on pristine main. A baseline-identical run is recorded as FAIL with its comparison, never as PASS."
+      "notes": "R19-3: 126 environment-dependent failures that are identical on pristine main. A baseline-identical run is recorded as FAIL with its comparison, never as PASS. Evidence is a gate summary of its own (run_gates.ps1 -Only full_pytest, gate-summary-partial.json); the ci-gates summary cannot back two lanes.",
+      "source": {
+        "format": "gate-summary",
+        "required_checks": [
+          "full_pytest"
+        ]
+      }
     },
     "local-model-measured-execution": {
       "description": "Stage B M2 -> M2.1/M3 (Windows and VMware) -> M4.1 live run of the pinned qwen3:8b artifact on local Ollama.",
       "platform": "windows",
       "max_age_days": 30,
-      "claims": ["MEASURED_LOCAL_EXECUTION_QWEN3_8B"],
+      "claims": [
+        "MEASURED_LOCAL_EXECUTION_QWEN3_8B"
+      ],
       "does_not_cover": [
         "MODEL_OUTPUT_TO_RESULT_CANDIDATE_OR_CAS",
         "REA_RUNTIME",
@@ -97,7 +206,9 @@
       "description": "Model output entering a ResultCandidate, human approval and the CAS.",
       "platform": "any",
       "max_age_days": 30,
-      "claims": ["MODEL_OUTPUT_GOVERNED_ACCEPTANCE"],
+      "claims": [
+        "MODEL_OUTPUT_GOVERNED_ACCEPTANCE"
+      ],
       "known_status": "NOT_VALIDATED",
       "notes": "R19-6: the path does not exist by design (MODEL OUTPUT != TRUTH); the measured-execution lane never satisfies it."
     },
@@ -105,7 +216,9 @@
       "description": "The REA real runtime.",
       "platform": "any",
       "max_age_days": 30,
-      "claims": ["REA_RUNTIME"],
+      "claims": [
+        "REA_RUNTIME"
+      ],
       "known_status": "NOT_VALIDATED",
       "notes": "PR #16 explicitly did not validate the real REA runtime."
     },
@@ -113,7 +226,9 @@
       "description": "The OpenMAIC real runtime.",
       "platform": "any",
       "max_age_days": 30,
-      "claims": ["OPENMAIC_RUNTIME"],
+      "claims": [
+        "OPENMAIC_RUNTIME"
+      ],
       "known_status": "NOT_VALIDATED",
       "notes": "PR #16 explicitly did not validate the real OpenMAIC runtime."
     },
@@ -121,7 +236,9 @@
       "description": "The AI-Scientist-v3 governed research pack real runtime.",
       "platform": "any",
       "max_age_days": 30,
-      "claims": ["AI_SCIENTIST_V3_RUNTIME"],
+      "claims": [
+        "AI_SCIENTIST_V3_RUNTIME"
+      ],
       "known_status": "NOT_VALIDATED",
       "notes": "PR #17 is a draft and its real runtime is REAL_RUNTIME_NOT_VALIDATED."
     }

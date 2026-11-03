@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""OP-002: the evidence index takes a PASS only from a machine-written runner record for the same commit."""
+"""OP-002: the evidence index takes a PASS only from the registry-bound runner record for the same commit."""
 from __future__ import annotations
 
 import json
@@ -19,6 +19,8 @@ REGISTRY = load_registry(ROOT / "scripts" / "release" / "runtime_lanes.v1.json")
 SHA = "a" * 40
 OTHER = "b" * 40
 SCRIPT = ROOT / "scripts" / "release" / "runtime_lane_index.py"
+WINDOWS_GATES = REGISTRY.lanes["windows-ci-gates"].source.required_checks  # type: ignore[union-attr]
+VM_GATES = REGISTRY.lanes["vmware-linux-ci-gates"].source.required_checks  # type: ignore[union-attr]
 
 
 def _spec(*lanes: dict[str, Any]) -> dict[str, Any]:
@@ -27,17 +29,26 @@ def _spec(*lanes: dict[str, Any]) -> dict[str, Any]:
 
 def _gates_lane(**extra: Any) -> dict[str, Any]:
     base: dict[str, Any] = {"lane_id": "windows-ci-gates", "platform": "windows", "command": "run_gates.ps1",
-                            "source": "gate-summary", "gates": ["ruff", "mypy"], "evidence_path": "gate-summary.json"}
+                            "evidence_path": "gate-summary.json"}
     base.update(extra)
     return base
 
 
-def _gate_summary(root: Path, *, commit: str = SHA, exits: dict[str, int] | None = None,
+def _gate_summary(root: Path, *, commit: str = SHA, exits: dict[str, int | None] | None = None,
                   finished: datetime | None = None, name: str = "gate-summary.json") -> Path:
-    gates = {gate: {"command": gate, "exit_code": code} for gate, code in (exits or {"ruff": 0, "mypy": 0}).items()}
+    codes = {gate: 0 for gate in WINDOWS_GATES} | (exits or {})
+    gates = {gate: {"command": gate, "exit_code": code} for gate, code in codes.items() if code is not None}
     record = {"repo_head": commit, "gates": gates, "finished": (finished or datetime.now(UTC)).isoformat()}
     path = root / name
     path.write_text(json.dumps(record), encoding="utf-8")
+    return path
+
+
+def _e2e(root: Path, *, platform: str = "Windows-11", verdict: str = "PASS", name: str = "E2E_RESULT.json") -> Path:
+    path = root / name
+    path.write_text(json.dumps({"verdict": verdict, "commit": SHA, "platform": platform,
+                                "finished": datetime.now(UTC).isoformat(),
+                                "steps": [{"step": "one", "status": verdict}]}), encoding="utf-8")
     return path
 
 
@@ -55,8 +66,8 @@ def test_a_pass_is_read_from_the_runner_record_and_the_gate_accepts_it(tmp_path:
     assert _verdict(index, tmp_path, "windows-ci-gates") == (LaneStatus.PASS, "VERIFIED")
 
 
-def test_any_failing_named_gate_makes_the_lane_fail(tmp_path: Path) -> None:
-    _gate_summary(tmp_path, exits={"ruff": 0, "mypy": 2})
+def test_any_failing_required_gate_makes_the_lane_fail(tmp_path: Path) -> None:
+    _gate_summary(tmp_path, exits={"mypy": 2})
     index = build_index(load_spec(_spec(_gates_lane())), root=tmp_path, registry=REGISTRY)
     assert (index.records[0].status, index.records[0].exit_code) == (LaneStatus.FAIL, 2)
 
@@ -73,41 +84,55 @@ def test_a_typed_zero_exit_code_is_refused_and_pass_cannot_be_declared(tmp_path:
                        registry=REGISTRY).records[0].status is LaneStatus.FAIL  # a FAIL is never an upgrade
 
 
-@pytest.mark.parametrize(("record", "lane", "code"), [
-    ({"commit": OTHER}, {}, "RUNTIME_LANE_SOURCE_COMMIT_MISMATCH"),
-    ({}, {"gates": ["ruff", "pytest"]}, "RUNTIME_LANE_SOURCE_GATE_MISSING"),
-    ({}, {"gates": []}, "RUNTIME_LANE_SOURCE_GATES_REQUIRED"),
-    ({}, {"exit_code": 0}, "RUNTIME_LANE_EXIT_CODE_FROM_SPEC_AND_SOURCE"),
+@pytest.mark.parametrize("field", [{"source": "gate-summary"}, {"gates": ["ruff"]}])
+def test_the_spec_cannot_name_the_source_or_the_checks(field: dict[str, Any]) -> None:
+    with pytest.raises(IndexBuildError, match="RUNTIME_LANE_SPEC_INVALID"):
+        load_spec(_spec(_gates_lane(**field)))
+
+
+@pytest.mark.parametrize(("record", "code"), [
+    ({"commit": OTHER}, "RUNTIME_LANE_SOURCE_COMMIT_MISMATCH"),
+    ({"exits": {"secret_scan": None}}, "RUNTIME_LANE_SOURCE_GATE_MISSING"),
 ])
-def test_a_record_that_does_not_match_the_spec_refuses_the_build(tmp_path: Path, record: dict[str, Any],
-                                                                lane: dict[str, Any], code: str) -> None:
+def test_a_record_that_does_not_match_the_registry_refuses_the_build(tmp_path: Path, record: dict[str, Any],
+                                                                    code: str) -> None:
     _gate_summary(tmp_path, **record)
     with pytest.raises(IndexBuildError, match=code):
-        build_index(load_spec(_spec(_gates_lane(**lane))), root=tmp_path, registry=REGISTRY)
+        build_index(load_spec(_spec(_gates_lane())), root=tmp_path, registry=REGISTRY)
 
 
 def test_vmware_and_e2e_records_are_cross_checked_for_platform(tmp_path: Path) -> None:
-    vm = {"sha": SHA, "virt": "vmware", "e2e": 0, "gates": {"ruff": 0}, "finished": datetime.now(UTC).isoformat()}
+    vm = {"sha": SHA, "virt": "vmware", "e2e": 0, "gates": dict.fromkeys(VM_GATES, 0),
+          "finished": datetime.now(UTC).isoformat()}
     (tmp_path / "vm.json").write_text(json.dumps(vm), encoding="utf-8")
-    vm_lane = {"lane_id": "vmware-linux-e2e", "platform": "linux", "command": "vm_online_chain.sh",
-               "source": "vm-summary", "gates": ["e2e"], "evidence_path": "vm.json"}
+    vm_lane = {"lane_id": "vmware-linux-ci-gates", "platform": "linux", "command": "vm_online_chain.sh",
+               "evidence_path": "vm.json"}
     assert build_index(load_spec(_spec(vm_lane)), root=tmp_path, registry=REGISTRY).records[0].status is LaneStatus.PASS
     (tmp_path / "vm.json").write_text(json.dumps({**vm, "virt": "wsl"}), encoding="utf-8")
     with pytest.raises(IndexBuildError, match="RUNTIME_LANE_SOURCE_PLATFORM_MISMATCH"):
         build_index(load_spec(_spec(vm_lane)), root=tmp_path, registry=REGISTRY)
-    e2e = {"verdict": "PASS", "commit": SHA, "platform": "Linux-6.8.0-x86_64"}
-    (tmp_path / "E2E_RESULT.json").write_text(json.dumps(e2e), encoding="utf-8")
     e2e_lane = {"lane_id": "windows-native-e2e", "platform": "windows", "command": "local_dogfood_e2e.py",
-                "source": "e2e-result", "evidence_path": "E2E_RESULT.json"}
+                "evidence_path": "E2E_RESULT.json"}
+    _e2e(tmp_path, platform="Linux-6.8.0-x86_64")
     with pytest.raises(IndexBuildError, match="RUNTIME_LANE_SOURCE_PLATFORM_MISMATCH"):
         build_index(load_spec(_spec(e2e_lane)), root=tmp_path, registry=REGISTRY)
-    (tmp_path / "E2E_RESULT.json").write_text(json.dumps({**e2e, "verdict": "FAIL", "platform": "Windows-11"}),
-                                              encoding="utf-8")
+    _e2e(tmp_path, platform="Linux-5.15.153.1-microsoft-standard-WSL2-x86_64")
+    linux_lane = {**e2e_lane, "lane_id": "vmware-linux-e2e", "platform": "linux"}
+    with pytest.raises(IndexBuildError, match="RUNTIME_LANE_SOURCE_PLATFORM_MISMATCH"):
+        build_index(load_spec(_spec(linux_lane)), root=tmp_path, registry=REGISTRY)
+    _e2e(tmp_path, verdict="FAIL")
     assert build_index(load_spec(_spec(e2e_lane)), root=tmp_path, registry=REGISTRY).records[0].status is LaneStatus.FAIL
 
 
-def test_no_exit_code_and_no_source_means_not_validated(tmp_path: Path) -> None:
+def test_no_exit_code_and_no_evidence_means_not_validated(tmp_path: Path) -> None:
     lane = {"lane_id": "github-ci", "platform": "github", "command": "ci.yml", "notes": "no run for this commit"}
+    assert build_index(load_spec(_spec(lane)), root=tmp_path,
+                       registry=REGISTRY).records[0].status is LaneStatus.NOT_VALIDATED
+
+
+def test_a_lane_without_a_registry_source_cannot_pass(tmp_path: Path) -> None:
+    (tmp_path / "rea.json").write_text(json.dumps({"verdict": "PASS"}), encoding="utf-8")
+    lane = {"lane_id": "rea-runtime", "platform": "any", "command": "rea", "evidence_path": "rea.json"}
     assert build_index(load_spec(_spec(lane)), root=tmp_path,
                        registry=REGISTRY).records[0].status is LaneStatus.NOT_VALIDATED
 
@@ -126,7 +151,7 @@ def test_a_declared_downgrade_keeps_the_evidence_but_needs_a_reason(tmp_path: Pa
 @pytest.mark.parametrize(("lane", "code"), [
     (_gates_lane(evidence_path="absent.json"), "RUNTIME_LANE_EVIDENCE_MISSING"),
     (_gates_lane(evidence_path="../outside.json"), "RUNTIME_LANE_EVIDENCE_OUTSIDE_ROOT"),
-    (_gates_lane(evidence_path=None), "RUNTIME_LANE_EVIDENCE_REQUIRED"),
+    (_gates_lane(evidence_path=None, exit_code=1), "RUNTIME_LANE_EVIDENCE_REQUIRED"),
     (_gates_lane(lane_id="no-such-lane"), "RUNTIME_LANE_UNKNOWN"),
 ])
 def test_unusable_evidence_refuses_the_whole_build(tmp_path: Path, lane: dict[str, Any], code: str) -> None:
@@ -139,11 +164,8 @@ def test_unusable_evidence_refuses_the_whole_build(tmp_path: Path, lane: dict[st
 
 
 def test_one_file_cannot_back_two_lanes(tmp_path: Path) -> None:
-    vm = {"sha": SHA, "virt": "vmware", "e2e": 0, "gates": {"ruff": 0}}
-    (tmp_path / "vm.json").write_text(json.dumps(vm), encoding="utf-8")
-    common = {"platform": "linux", "command": "vm", "source": "vm-summary", "evidence_path": "vm.json"}
-    spec = _spec({"lane_id": "vmware-linux-e2e", "gates": ["e2e"], **common},
-                 {"lane_id": "vmware-linux-ci-gates", "gates": ["ruff"], **common})
+    _gate_summary(tmp_path, exits={"full_pytest": 0})
+    spec = _spec(_gates_lane(), _gates_lane(lane_id="windows-full-suite"))
     with pytest.raises(IndexBuildError, match="RUNTIME_LANE_EVIDENCE_REUSED"):
         build_index(load_spec(spec), root=tmp_path, registry=REGISTRY)
 
@@ -156,9 +178,8 @@ def test_recorded_at_is_the_runners_finish_time_so_an_old_record_is_stale(tmp_pa
 
 def test_verify_detects_an_edited_or_removed_evidence_file(tmp_path: Path) -> None:
     path = _gate_summary(tmp_path)
-    e2e = {"verdict": "PASS", "commit": SHA, "platform": "Windows-11"}
-    (tmp_path / "E2E_RESULT.json").write_text(json.dumps(e2e), encoding="utf-8")
-    e2e_lane = {"lane_id": "windows-native-e2e", "platform": "windows", "command": "e2e", "source": "e2e-result",
+    _e2e(tmp_path)
+    e2e_lane = {"lane_id": "windows-native-e2e", "platform": "windows", "command": "e2e",
                 "evidence_path": "E2E_RESULT.json"}
     index = build_index(load_spec(_spec(_gates_lane(), e2e_lane)), root=tmp_path, registry=REGISTRY)
     assert verify_index(index, root=tmp_path) == ()

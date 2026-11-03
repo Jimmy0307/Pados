@@ -694,7 +694,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True).stdout.strip()
     (run.out / "E2E_RESULT.json").write_text(json.dumps({
         "verdict": "PASS" if passed else "FAIL", "commit": head, "platform": platform.platform(),
-        "python": sys.version.split()[0], "seconds": int(time.time() - started), "steps": run.steps},
+        "python": sys.version.split()[0], "seconds": int(time.time() - started),
+        "finished": datetime.now(UTC).isoformat(), "steps": run.steps},
         indent=2, default=str), encoding="utf-8")
     print(f"E2E {'PASS' if passed else 'FAIL'} -> {run.out / 'E2E_RESULT.json'}", flush=True)
     return 0 if passed else 1

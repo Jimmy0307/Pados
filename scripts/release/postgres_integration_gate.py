@@ -9,14 +9,21 @@ heads, then runs each suite through ``regression_gate.py`` with skips refused (a
 for lack of a database is a failure here, never a pass). Every database name is fixed and disposable; an
 existing one is only dropped with ``--recreate``. The password is passed to child processes through the
 environment and is never printed or written to the reports.
+
+``OUTDIR/postgres-integration.json`` (schema ``pados.postgres-integration.v1``) is the runner record the
+``postgres-integration`` runtime lane reads: the commit, the platform family, the finish time and, per suite, its
+status and the SHA-256 of its ``postgres-<suite>.json`` report, so a suite report edited afterwards no longer matches.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import platform
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -84,6 +91,22 @@ def _migrate(database: str, *targets: str, config: str = "alembic.ini") -> None:
             raise SystemExit(f"POSTGRES_GATE_MIGRATION_FAILED {database} {target}")
 
 
+def _summary(outdir: Path, results: dict[str, int]) -> dict[str, object]:
+    def digest(name: str) -> str | None:
+        report = outdir / f"postgres-{name}.json"
+        return hashlib.sha256(report.read_bytes()).hexdigest() if report.is_file() else None
+
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True,  # noqa: S603,S607
+                          check=False).stdout.strip()
+    return {"schema_version": "pados.postgres-integration.v1",
+            "status": "PASS" if not any(results.values()) else "FAIL",
+            "suites": {name: ("PASS" if code == 0 else "FAIL") for name, code in results.items()},
+            "suite_reports": {name: {"status": "PASS" if code == 0 else "FAIL", "sha256": digest(name)}
+                              for name, code in results.items()},
+            "source_commit": head, "platform": platform.system().lower(),
+            "finished": datetime.now(UTC).isoformat()}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("outdir", type=Path)
@@ -134,8 +157,7 @@ def main(argv: list[str] | None = None) -> int:
                               str(args.outdir / f"postgres-{name}.json"), "--no-skips",
                               "--min-tests", str(MIN_TESTS[name]), "--basetemp", str(args.outdir / f"pt-{name}"),
                               *paths], _env(**extra))
-    summary = {"status": "PASS" if not any(results.values()) else "FAIL",
-               "suites": {name: ("PASS" if code == 0 else "FAIL") for name, code in results.items()}}
+    summary = _summary(args.outdir, results)
     (args.outdir / "postgres-integration.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n",
                                                            encoding="utf-8")
     print(f"POSTGRES_INTEGRATION {summary['status']} {summary['suites']}")

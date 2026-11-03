@@ -3,10 +3,11 @@
 
 The builder never takes a PASS on the spec author's word:
 
-* A PASS comes only from a machine-written runner record named by ``source``: a Windows gate summary
-  (``run_gates.ps1``), a VMware chain summary (``vm_online_chain.sh``) or an E2E result (``local_dogfood_e2e.py``).
-  The builder reads the commit, the exit codes of the named gates, the platform where the record has one, and the
-  finish time from that file. A record for another commit, a missing gate or a platform mismatch refuses the build.
+* A PASS comes only from the machine-written runner record format the lane registry binds to the lane
+  (``LaneDefinition.source``), read by ``runtime_lane_sources.read_source`` against the registry's complete set of
+  required checks. The spec names the evidence file; it cannot name, narrow or replace the format or the checks. A
+  record for another commit, a missing check or a platform mismatch refuses the build. The gate re-reads the same
+  record on every ``--claim``, so an index edited after the build gains nothing.
 * A spec may still state a non-zero exit code without a source (a FAIL is never an upgrade), but a spec-typed
   ``exit_code: 0`` is refused.
 * A spec may *downgrade* a lane (SKIPPED or NOT_VALIDATED, with a reason).
@@ -21,7 +22,6 @@ acceptance paths.
 """
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,9 +29,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from pados.release.runtime_lane_sources import SourceError, read_source
 from pados.release.runtime_lanes import (
     EvidenceIndex,
     EvidenceRecord,
+    LaneDefinition,
     LaneStatus,
     RuntimeLaneRegistry,
     _resolved_evidence,
@@ -50,8 +52,6 @@ class LaneSpec(BaseModel):
     exit_code: int | None = None
     evidence_path: str | None = Field(default=None, max_length=500)
     declare: Literal["SKIPPED", "NOT_VALIDATED"] | None = None
-    source: Literal["gate-summary", "vm-summary", "e2e-result"] | None = None
-    gates: tuple[str, ...] = Field(default=(), max_length=64)
     notes: str = Field(default="", max_length=2000)
 
 
@@ -85,55 +85,20 @@ def _evidence_file(root: Path, lane: LaneSpec) -> Path:
     return resolved
 
 
-def _aware(value: object) -> datetime | None:
-    if not isinstance(value, str):
-        return None
+def _from_source(lane: LaneSpec, definition: LaneDefinition, path: Path, *, commit: str) -> tuple[int, datetime]:
+    """The exit code and finish time read from the lane's registry-bound runner record."""
+    assert definition.source is not None
     try:
-        moment = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    return moment if moment.tzinfo is not None else None
+        reading = read_source(definition.source, path, commit=commit)
+    except SourceError as exc:
+        raise IndexBuildError(f"RUNTIME_LANE_{exc.code} {lane.lane_id}: {exc}") from exc
+    expected = definition.platform if definition.platform != "any" else lane.platform
+    if reading.platform != expected or lane.platform != reading.platform:
+        raise IndexBuildError(f"RUNTIME_LANE_SOURCE_PLATFORM_MISMATCH {lane.lane_id}")
+    return reading.exit_code, reading.finished
 
 
-def _gate_exit(gates: Mapping[str, Any], name: str, lane_id: str) -> int:
-    entry = gates.get(name)
-    code = entry.get("exit_code") if isinstance(entry, Mapping) else entry
-    if isinstance(code, bool) or not isinstance(code, int):
-        raise IndexBuildError(f"RUNTIME_LANE_SOURCE_GATE_MISSING {lane_id}:{name}")
-    return code
-
-
-def _from_source(lane: LaneSpec, path: Path, *, commit: str) -> tuple[int, datetime]:
-    """The exit code and finish time read from a machine-written runner record, cross-checked against the spec."""
-    try:
-        record = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError) as exc:
-        raise IndexBuildError(f"RUNTIME_LANE_SOURCE_UNREADABLE {lane.lane_id}") from exc
-    if not isinstance(record, Mapping):
-        raise IndexBuildError(f"RUNTIME_LANE_SOURCE_UNREADABLE {lane.lane_id}")
-    if lane.source == "e2e-result":
-        recorded_commit, platform = record.get("commit"), str(record.get("platform", "")).lower()
-        if not platform.startswith(lane.platform.lower()):
-            raise IndexBuildError(f"RUNTIME_LANE_SOURCE_PLATFORM_MISMATCH {lane.lane_id}")
-        exit_code = 0 if record.get("verdict") == "PASS" else 1
-    else:
-        recorded_commit = record.get("repo_head" if lane.source == "gate-summary" else "sha")
-        if lane.source == "vm-summary" and (lane.platform != "linux" or record.get("virt") != "vmware"):
-            raise IndexBuildError(f"RUNTIME_LANE_SOURCE_PLATFORM_MISMATCH {lane.lane_id}")
-        gates = record.get("gates")
-        if not isinstance(gates, Mapping) or not lane.gates:
-            raise IndexBuildError(f"RUNTIME_LANE_SOURCE_GATES_REQUIRED {lane.lane_id}")
-        # The VMware summary keeps the E2E exit code beside its gates.
-        available = {**gates, "e2e": record["e2e"]} if "e2e" in record else dict(gates)
-        exits = [_gate_exit(available, name, lane.lane_id) for name in lane.gates]
-        exit_code = next((code for code in exits if code != 0), 0)
-    if recorded_commit != commit:
-        raise IndexBuildError(f"RUNTIME_LANE_SOURCE_COMMIT_MISMATCH {lane.lane_id}")
-    finished = _aware(record.get("finished")) or datetime.fromtimestamp(path.stat().st_mtime, UTC)
-    return exit_code, finished
-
-
-def _record(lane: LaneSpec, *, commit: str, root: Path, now: datetime) -> EvidenceRecord:
+def _record(lane: LaneSpec, definition: LaneDefinition, *, commit: str, root: Path, now: datetime) -> EvidenceRecord:
     common: dict[str, Any] = {"lane_id": lane.lane_id, "commit": commit, "platform": lane.platform,
                               "command": lane.command, "notes": lane.notes}
     if lane.declare is not None:
@@ -146,11 +111,9 @@ def _record(lane: LaneSpec, *, commit: str, root: Path, now: datetime) -> Eviden
             evidence = {"evidence_path": lane.evidence_path, "evidence_sha256": _sha256(path)}
         return EvidenceRecord(status=LaneStatus(lane.declare), exit_code=lane.exit_code, recorded_at=now,
                               **common, **evidence)
-    if lane.source is not None:
-        if lane.exit_code is not None:
-            raise IndexBuildError(f"RUNTIME_LANE_EXIT_CODE_FROM_SPEC_AND_SOURCE {lane.lane_id}")
+    if definition.source is not None and lane.exit_code is None and lane.evidence_path is not None:
         path = _evidence_file(root, lane)
-        exit_code, produced = _from_source(lane, path, commit=commit)
+        exit_code, produced = _from_source(lane, definition, path, commit=commit)
         return EvidenceRecord(status=LaneStatus.PASS if exit_code == 0 else LaneStatus.FAIL, exit_code=exit_code,
                               evidence_path=lane.evidence_path, evidence_sha256=_sha256(path), recorded_at=produced,
                               **common)
@@ -158,7 +121,7 @@ def _record(lane: LaneSpec, *, commit: str, root: Path, now: datetime) -> Eviden
         # Nothing ran (or the exit code was not captured): never a PASS.
         return EvidenceRecord(status=LaneStatus.NOT_VALIDATED, recorded_at=now, **common)
     if lane.exit_code == 0:
-        # A PASS needs a machine-written runner record; a typed zero is the spec author's word.
+        # A PASS needs the registry-bound runner record; a typed zero is the spec author's word.
         raise IndexBuildError(f"RUNTIME_LANE_PASS_NEEDS_MACHINE_SOURCE {lane.lane_id}")
     path = _evidence_file(root, lane)
     produced = datetime.fromtimestamp(path.stat().st_mtime, UTC)
@@ -166,13 +129,14 @@ def _record(lane: LaneSpec, *, commit: str, root: Path, now: datetime) -> Eviden
                           evidence_sha256=_sha256(path), recorded_at=produced, **common)
 
 
-def build_index(spec: IndexSpec, *, root: Path, registry: RuntimeLaneRegistry | None = None,
+def build_index(spec: IndexSpec, *, root: Path, registry: RuntimeLaneRegistry,
                 now: datetime | None = None) -> EvidenceIndex:
     moment = now or datetime.now(UTC)
-    unknown = sorted({lane.lane_id for lane in spec.lanes} - set(registry.lanes)) if registry else []
+    unknown = sorted({lane.lane_id for lane in spec.lanes} - set(registry.lanes))
     if unknown:
         raise IndexBuildError(f"RUNTIME_LANE_UNKNOWN {unknown}")
-    records = tuple(_record(lane, commit=spec.commit, root=root, now=moment) for lane in spec.lanes)
+    records = tuple(_record(lane, registry.lanes[lane.lane_id], commit=spec.commit, root=root, now=moment)
+                    for lane in spec.lanes)
     shared: dict[str, list[str]] = {}
     for record in records:
         if record.evidence_path is not None:

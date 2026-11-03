@@ -6,14 +6,16 @@ names the lanes it requires. Evidence records say what happened in a lane (PASS,
 bind it to a commit, platform, command, exit code and an evidence file with its SHA-256.
 
 ``evaluate`` only interprets evidence. A required lane counts only with a PASS record for exactly the target commit,
-on the lane's platform, inside its freshness window, with exit code 0, and with an evidence file inside the evidence
-root that hashes to the recorded digest and is not reused by another lane. Everything else blocks the target and is
-reported with a stable reason. The report carries ``semantic_authority = NONE``: it grants no approval, acceptance or
+on the lane's platform, with exit code 0, and with an evidence file inside the evidence root that hashes to the
+recorded digest and is not reused by another lane. The gate then re-reads that file as the lane's runner record,
+under the format and the complete check set the registry fixes for the lane (``runtime_lane_sources``): the record
+itself must say PASS for this commit and platform, and its own finish time must be inside the freshness window. A
+lane with no machine source in the registry can never PASS. Everything else blocks the target and is reported with a
+stable reason. The report carries ``semantic_authority = NONE``: it grants no approval, acceptance or
 release decision, and the existing approval, acceptance and promotion checks stay authoritative.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
 from datetime import datetime, timedelta
@@ -22,6 +24,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from pados.release.runtime_lane_sources import NOT_VALIDATED_CODES, LaneSource, SourceError, read_source, sha256_file
 
 REGISTRY_SCHEMA = "pados.runtime-lanes.v1"
 EVIDENCE_SCHEMA = "pados.runtime-lane-evidence.v1"
@@ -49,6 +53,15 @@ class LaneDefinition(_Frozen):
     # The documented state when no evidence is supplied; informational only, never counted as evidence.
     known_status: LaneStatus | None = None
     notes: str = ""
+    # The only runner record format that can make this lane PASS, with its complete set of required checks. A lane
+    # without one stays NOT_VALIDATED whatever an evidence index says.
+    source: LaneSource | None = None
+
+    @model_validator(mode="after")
+    def _source_fits_the_platform(self) -> LaneDefinition:
+        if self.source is not None and not self.source.fits_platform(self.platform):
+            raise ValueError(f"SOURCE_FORMAT_DOES_NOT_FIT_PLATFORM {self.source.format}:{self.platform}")
+        return self
 
 
 class TargetDefinition(_Frozen):
@@ -149,11 +162,7 @@ def load_evidence(data: Mapping[str, Any]) -> EvidenceIndex:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return sha256_file(path)
 
 
 def _resolved_evidence(root: Path, relative: str) -> Path | None:
@@ -176,16 +185,13 @@ def _reused(records: tuple[EvidenceRecord, ...], root: Path) -> set[str]:
     return {lane for lanes in owners.values() if len(lanes) > 1 for lane in lanes}
 
 
-def _check_pass(record: EvidenceRecord, lane: LaneDefinition, *, commit: str, now: datetime, root: Path,
-                reused: set[str]) -> tuple[LaneStatus, str]:
+def _check_bound_file(record: EvidenceRecord, lane: LaneDefinition, *, commit: str, root: Path,
+                      reused: set[str]) -> tuple[LaneStatus, str] | Path:
+    """The index-level checks; returns the verified evidence file, or the verdict that stops here."""
     if lane.platform != "any" and record.platform != lane.platform:
         return LaneStatus.FAIL, "EVIDENCE_PLATFORM_MISMATCH"
     if record.commit != commit:
         return LaneStatus.NOT_VALIDATED, "EVIDENCE_COMMIT_MISMATCH"
-    if record.recorded_at > now + _CLOCK_SKEW:
-        return LaneStatus.FAIL, "EVIDENCE_FROM_THE_FUTURE"
-    if now - record.recorded_at > timedelta(days=lane.max_age_days):
-        return LaneStatus.NOT_VALIDATED, "EVIDENCE_STALE"
     if record.exit_code != 0:
         return LaneStatus.FAIL, "PASS_WITH_NONZERO_EXIT"
     resolved = _resolved_evidence(root, str(record.evidence_path))
@@ -197,6 +203,30 @@ def _check_pass(record: EvidenceRecord, lane: LaneDefinition, *, commit: str, no
         return LaneStatus.FAIL, "EVIDENCE_HASH_MISMATCH"
     if record.lane_id in reused:
         return LaneStatus.FAIL, "EVIDENCE_REUSED_ACROSS_LANES"
+    return resolved
+
+
+def _check_pass(record: EvidenceRecord, lane: LaneDefinition, *, commit: str, now: datetime, root: Path,
+                reused: set[str]) -> tuple[LaneStatus, str]:
+    if lane.source is None:
+        # Nothing machine-readable can back this lane; a PASS here is someone's word.
+        return LaneStatus.NOT_VALIDATED, "LANE_HAS_NO_MACHINE_SOURCE"
+    bound = _check_bound_file(record, lane, commit=commit, root=root, reused=reused)
+    if not isinstance(bound, Path):
+        return bound
+    try:
+        reading = read_source(lane.source, bound, commit=commit)
+    except SourceError as exc:
+        return (LaneStatus.NOT_VALIDATED if exc.code in NOT_VALIDATED_CODES else LaneStatus.FAIL), exc.code
+    expected_platform = lane.platform if lane.platform != "any" else record.platform
+    if reading.platform != expected_platform:
+        return LaneStatus.FAIL, "SOURCE_PLATFORM_MISMATCH"
+    if reading.exit_code != 0:
+        return LaneStatus.FAIL, "SOURCE_RECORD_NOT_PASS"
+    if reading.finished > now + _CLOCK_SKEW:
+        return LaneStatus.FAIL, "EVIDENCE_FROM_THE_FUTURE"
+    if now - reading.finished > timedelta(days=lane.max_age_days):
+        return LaneStatus.NOT_VALIDATED, "EVIDENCE_STALE"
     return LaneStatus.PASS, "VERIFIED"
 
 

@@ -2,9 +2,10 @@
 """OP-002: per-lane runtime validation status, bound to evidence, and a readiness claim it cannot fake.
 
 The gate only reads evidence. A required lane counts only with a PASS record for the exact target commit whose
-evidence file exists and hashes to the recorded digest, recorded inside the lane's freshness window and with exit code
-0. Anything else (missing, stale, wrong commit, hash mismatch, SKIPPED, NOT_VALIDATED, FAIL) blocks the target. The
-gate grants no approval and no acceptance.
+evidence file exists and hashes to the recorded digest, with exit code 0, and whose runner record (re-read under the
+lane's registry-bound format) itself says PASS and finished inside the lane's freshness window. Anything else
+(missing, stale, wrong commit, hash mismatch, SKIPPED, NOT_VALIDATED, FAIL) blocks the target. The gate grants no
+approval and no acceptance.
 """
 from __future__ import annotations
 
@@ -38,16 +39,22 @@ def _registry() -> RuntimeLaneRegistry:
         "schema_version": "pados.runtime-lanes.v1",
         "targets": {"dogfood": {"description": "test target", "required_lanes": ["alpha", "beta"]}},
         "lanes": {
-            "alpha": {"description": "alpha lane", "platform": "windows", "max_age_days": 7, "claims": ["A"]},
-            "beta": {"description": "beta lane", "platform": "linux", "max_age_days": 7, "claims": ["B"]},
-            "gamma": {"description": "optional lane", "platform": "linux", "max_age_days": 7, "claims": ["C"]},
+            "alpha": {"description": "alpha lane", "platform": "windows", "max_age_days": 7, "claims": ["A"],
+                      "source": {"format": "e2e-result"}},
+            "beta": {"description": "beta lane", "platform": "linux", "max_age_days": 7, "claims": ["B"],
+                     "source": {"format": "e2e-result"}},
+            "gamma": {"description": "optional lane", "platform": "linux", "max_age_days": 7, "claims": ["C"],
+                      "source": {"format": "e2e-result"}},
         },
     })
 
 
-def _record(tmp_path: Path, lane: str, **overrides: Any) -> dict[str, Any]:
-    evidence = tmp_path / f"{lane}.log"
-    evidence.write_text(f"{lane} evidence\n", encoding="utf-8")
+def _record(tmp_path: Path, lane: str, *, finished: datetime | None = None, **overrides: Any) -> dict[str, Any]:
+    evidence = tmp_path / f"{lane}.json"
+    platform = {"windows": "Windows-11", "linux": "Linux-6.8"}[_registry().lanes[lane].platform]
+    evidence.write_text(json.dumps({"verdict": "PASS", "commit": COMMIT, "platform": platform,
+                                    "finished": (finished or NOW - timedelta(days=1)).isoformat(),
+                                    "steps": [{"step": lane, "status": "PASS"}]}), encoding="utf-8")
     record = {"lane_id": lane, "status": "PASS", "commit": COMMIT, "platform": _registry().lanes[lane].platform,
               "command": f"run {lane}", "exit_code": 0, "evidence_path": evidence.name,
               "evidence_sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
@@ -85,8 +92,8 @@ def test_a_failing_optional_lane_never_blocks_but_stays_visible(tmp_path: Path) 
     ({"status": "FAIL", "exit_code": 1}, "LANE_FAILED", LaneStatus.FAIL),
     ({"exit_code": 1}, "PASS_WITH_NONZERO_EXIT", LaneStatus.FAIL),
     ({"commit": "b" * 40}, "EVIDENCE_COMMIT_MISMATCH", LaneStatus.NOT_VALIDATED),
-    ({"recorded_at": (NOW - timedelta(days=30)).isoformat()}, "EVIDENCE_STALE", LaneStatus.NOT_VALIDATED),
-    ({"recorded_at": (NOW + timedelta(days=1)).isoformat()}, "EVIDENCE_FROM_THE_FUTURE", LaneStatus.FAIL),
+    ({"finished": NOW - timedelta(days=30)}, "EVIDENCE_STALE", LaneStatus.NOT_VALIDATED),
+    ({"finished": NOW + timedelta(days=1)}, "EVIDENCE_FROM_THE_FUTURE", LaneStatus.FAIL),
     ({"evidence_sha256": "0" * 64}, "EVIDENCE_HASH_MISMATCH", LaneStatus.FAIL),
     ({"evidence_path": "missing.log"}, "EVIDENCE_FILE_MISSING", LaneStatus.FAIL),
     ({"evidence_path": "../outside.log"}, "EVIDENCE_PATH_OUTSIDE_ROOT", LaneStatus.FAIL),
