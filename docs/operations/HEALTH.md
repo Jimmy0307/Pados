@@ -28,6 +28,7 @@ Each check has `name`, `required`, `status` (`OK`, `DEGRADED`, `FAILED`, `NOT_CO
 | `product_object_root` | only with the Product Loop | `OBJECT_ROOT_UNUSABLE` |
 | `product_loop_configuration` | only with the Product Loop | `PRODUCT_LOOP_UNCONFIGURED` (not configured) |
 | `provider_routing` | only with the Product Loop | `PROVIDER_UNAVAILABLE` (not configured while the Product Loop is disabled) |
+| `corpus_database` | never | `CORPUS_DB_UNAVAILABLE`, `CORPUS_MIGRATION_STALE` (degraded), `CORPUS_DB_UNCONFIGURED` (not configured). Retrieval and ingestion only; the core loop does not need it. |
 | `chat_provider` | never | `MOCK_CHAT_PROVIDER_SELECTED` (degraded), `CHAT_PROVIDER_UNCONFIGURED` (not configured). `OK` means configured, not that a live call succeeded. |
 
 A probe that does not finish in time reports `PROBE_TIMEOUT`. One that raises reports `PROBE_FAILED`, and its message

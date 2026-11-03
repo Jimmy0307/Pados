@@ -68,7 +68,7 @@
       "name": "Corpus, ingestion and retrieval",
       "contract": {"gap": "no corpus operability contract record beyond the runbook section"},
       "error_codes": ["INGEST_FAILED", "CORPUS_UNAVAILABLE", "BATCH_NOT_AUTHORIZED"],
-      "health": {"gap": "corpus lane readiness is not part of /health/ready"},
+      "health": {"endpoint": "/health/ready", "source": "src/pados/api/app.py"},
       "failure_injection": [{"path": "tests/unit/test_p6_15_corpus_runtime.py"}],
       "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Corpus"}
     },

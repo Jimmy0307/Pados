@@ -164,6 +164,7 @@ def checks_from_system_health(assessment: Mapping[str, Any] | None, *, product_r
             status = CheckStatus.DEGRADED if degraded and not required else CheckStatus.FAILED
         return DependencyCheck(name=name, required=required, status=status, reason=failure, latency_ms=latency_ms)
 
+    corpus = _corpus_check(assessment, latency_ms)
     operational_failure = next((r for r in ("OPERATIONAL_DB_UNAVAILABLE", "OPERATIONAL_MIGRATION_STALE")
                                 if r in reasons), None)
     proof_failure = next((r for r in ("PROOF_DB_UNCONFIGURED", "PROOF_DB_NOT_SEPARATE", "PROOF_DB_UNAVAILABLE",
@@ -180,7 +181,22 @@ def checks_from_system_health(assessment: Mapping[str, Any] | None, *, product_r
         # Unused while the Product Loop is disabled: an absent provider is then not configured, not degraded.
         check("provider_routing", product_required, bool(dims.get("provider_configured")), "PROVIDER_UNAVAILABLE",
               unconfigured=not product_required),
-    )
+    ) + corpus
+
+
+def _corpus_check(assessment: Mapping[str, Any], latency_ms: float | None) -> tuple[DependencyCheck, ...]:
+    """Optional: the Corpus lane (retrieval and ingestion). A failure degrades readiness and never blocks it."""
+    lane = (assessment.get("lanes") or {}).get("corpus")
+    if not isinstance(lane, Mapping):
+        return ()
+    if lane.get("usable"):
+        return (DependencyCheck(name="corpus_database", required=False, status=CheckStatus.OK, latency_ms=latency_ms),)
+    if not lane.get("configured"):
+        return (DependencyCheck(name="corpus_database", required=False, status=CheckStatus.NOT_CONFIGURED,
+                                reason="CORPUS_DB_UNCONFIGURED", latency_ms=latency_ms),)
+    reason = "CORPUS_MIGRATION_STALE" if lane.get("authenticated") else "CORPUS_DB_UNAVAILABLE"
+    return (DependencyCheck(name="corpus_database", required=False, status=CheckStatus.DEGRADED, reason=reason,
+                            latency_ms=latency_ms),)
 
 
 def chat_provider_check(mode: str) -> DependencyCheck:

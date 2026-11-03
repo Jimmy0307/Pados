@@ -188,3 +188,42 @@ def test_a_finished_probe_result_is_reused_briefly_and_then_refreshed() -> None:
     second = health_contract.bounded(probe, timeout_s=1.0, shared=shared)
     assert first[0] == second[0] == 1 and len(calls) == 1
     assert health_contract.bounded(probe, timeout_s=1.0)[0] == 2  # no shared state: a fresh run
+
+
+def _with_corpus(**lane: bool) -> dict[str, Any]:
+    corpus = {"configured": True, "reachable": True, "authenticated": True, "migrations_current": True,
+              "usable": True, **lane}
+    return {**_assessment(), "lanes": {"corpus": corpus}}
+
+
+@pytest.mark.parametrize(("lane", "status", "reason", "overall"), [
+    ({}, "OK", None, "OK"),
+    ({"configured": False, "usable": False}, "NOT_CONFIGURED", "CORPUS_DB_UNCONFIGURED", "OK"),
+    ({"reachable": False, "authenticated": False, "usable": False}, "DEGRADED", "CORPUS_DB_UNAVAILABLE", "DEGRADED"),
+    ({"migrations_current": False, "usable": False}, "DEGRADED", "CORPUS_MIGRATION_STALE", "DEGRADED"),
+])
+def test_corpus_readiness_is_reported_as_an_optional_check(monkeypatch: pytest.MonkeyPatch, lane: dict[str, bool],
+                                                           status: str, reason: str | None, overall: str) -> None:
+    response = _client(monkeypatch, _with_corpus(**lane)).get("/health/ready")
+    corpus = _checks(response.json())["corpus_database"]
+    assert (corpus["required"], corpus["status"], corpus.get("reason")) == (False, status, reason)
+    assert response.status_code == 200 and response.json()["status"] == overall  # never blocks readiness
+
+
+def test_system_health_probes_the_corpus_lane_without_changing_its_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pados.config import get_settings
+    from pados.operations import service as operations
+
+    probed: list[tuple[str, str]] = []
+
+    def probe(_settings: Any, database: str, lane: str) -> dict[str, Any]:
+        probed.append((lane, database))
+        usable = lane != "corpus"  # the corpus lane is down; nothing else may change because of it
+        return {"database": database, "configured": True, "reachable": usable, "authenticated": usable,
+                "migrations_current": usable, "usable": usable, "main_revisions": [], "proof_revisions": []}
+
+    monkeypatch.setattr(operations, "_probe_lane", probe)
+    assessment = operations.system_health(get_settings())
+    assert ("corpus", get_settings().corpus_database_name) in probed
+    assert assessment["lanes"]["corpus"]["usable"] is False
+    assert not any(reason.startswith("CORPUS") for reason in assessment["reasons"])

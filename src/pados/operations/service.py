@@ -162,6 +162,9 @@ def system_health(settings: Settings) -> dict[str, Any]:
     proof_name = settings.product_database_name
     separate = bool(proof_name) and proof_name != settings.operational_database_name
     proof = _probe_lane(settings, proof_name if separate else "", "proof")
+    # OP-003: the Corpus lane is probed for /health/ready as an optional check only. It is kept out of ``reasons`` and
+    # ``ready`` so the existing readiness verdict does not change.
+    corpus = _probe_lane(settings, settings.corpus_database_name, "corpus")
     configured = bool(
         settings.api_host in {"127.0.0.1", "localhost"}
         and separate
@@ -234,7 +237,7 @@ def system_health(settings: Settings) -> dict[str, Any]:
             "product_loop_configured": configured,
             "provider_configured": provider_ready,
         },
-        "lanes": {"operational": operational, "proof": proof},
+        "lanes": {"operational": operational, "proof": proof, "corpus": corpus},
         "reasons": reasons,
         "provider_live_uat": provider_live_uat,
         "provider_selection": provider_selection,
