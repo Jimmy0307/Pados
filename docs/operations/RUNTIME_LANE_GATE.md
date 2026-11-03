@@ -27,11 +27,11 @@ which is reviewed with the code; neither an evidence index nor an index spec can
 | Lane | Source format | Required checks |
 |---|---|---|
 | `windows-native-e2e`, `vmware-linux-e2e` | `e2e-result` (`E2E_RESULT.json`) | `verdict` PASS and every step PASS; the platform string must match (a WSL kernel is refused) |
-| `windows-ci-gates` | `gate-summary` (`run_gates.ps1`) | the 18 CI gates, from `ci_policy` to `npm_cli` |
+| `windows-ci-gates` | `gate-summary` (`run_gates.ps1`, which must record its `platform`) | the 18 CI gates, from `ci_policy` to `npm_cli` |
 | `windows-full-suite` | `gate-summary` of its own run (`run_gates.ps1 -Only full_pytest`) | `full_pytest` |
 | `vmware-linux-ci-gates` | `vm-summary` (`virt` must be `vmware`) | the 19 chain gates, including `full_pytest` and `integration_pg` |
-| `postgres-integration` | `postgres-gate` (`postgres-integration.json`, schema v1) | all six suites; each suite report beside it is re-hashed and must be PASS for the same commit with no skips |
-| `github-ci` | `github-check-runs` (the unmodified `GET /repos/{owner}/{repo}/commits/{sha}/check-runs` response) | the seven required checks, every run by `github-actions`, completed and `success` |
+| `postgres-integration` | `postgres-gate` (`postgres-integration.json`, schema v1) | all six suites; each suite report beside it is re-hashed and must be PASS for the same commit with no skips and at least the registry's `min_passed` tests (kept equal to the runner's `MIN_TESTS` by a test) |
+| `github-ci` | `github-check-runs` (the unmodified `GET /repos/{owner}/{repo}/commits/{sha}/check-runs` response) | the seven required checks; every run must belong to `Jimmy0307/Pados` (a fork shares the commit, not the repository), be from the `github-actions` app (slug and id 15368), be completed and `success` |
 | model, REA, OpenMAIC, AI-Scientist-v3 lanes | none | can never PASS today |
 
 A **target** names the lanes it requires:
@@ -105,6 +105,10 @@ the runner's own record is, and let `runtime_lane_index.py build` read the rest 
   backs two lanes, or if a lane id is not in the registry.
 - `verify` re-hashes every referenced file and exits 1 on a mismatch or a missing file.
 
+Every record must carry its own finish time (`finished`, or each check run's `completed_at`); a record without one is
+refused (`SOURCE_FORMAT_INVALID`), and the file's modification time never stands in for it, so copying or touching a
+record cannot make it fresh. The finish time inside the record is still only as trustworthy as the record's bytes.
+
 The PostgreSQL record must be the schema v1 aggregate the gate writes from this commit on. Older aggregates (status
 and suite names only) carry no commit, so they are refused (`SOURCE_FORMAT_INVALID`); run the gate again. The GitHub
 record must be the raw API response for the commit, not a summary; a response that holds fewer runs than its
@@ -130,7 +134,8 @@ as `PASS` / `VERIFIED`. Every other outcome blocks the target:
 | SHA-256 differs | FAIL | `EVIDENCE_HASH_MISMATCH` |
 | The same evidence file cited for two lanes | FAIL (both) | `EVIDENCE_REUSED_ACROSS_LANES` |
 | The runner record is for another commit, or a GitHub check is still running | NOT_VALIDATED | `SOURCE_COMMIT_MISMATCH` / `SOURCE_CHECK_INCOMPLETE` |
-| The runner record is not of the lane's format | FAIL | `SOURCE_FORMAT_INVALID` |
+| The runner record is not of the lane's format, or lacks its finish time or platform | FAIL | `SOURCE_FORMAT_INVALID` |
+| A GitHub record from another repository | FAIL | `SOURCE_REPOSITORY_MISMATCH` |
 | A required check is absent from the record | FAIL | `SOURCE_GATE_MISSING` |
 | A PostgreSQL suite report is missing or was edited | FAIL | `SOURCE_SUITE_REPORT_MISSING` / `SOURCE_SUITE_REPORT_HASH_MISMATCH` |
 | The record's platform (or hypervisor) is not the lane's | FAIL | `SOURCE_PLATFORM_MISMATCH` |

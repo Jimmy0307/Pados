@@ -40,7 +40,7 @@ PROOF = "pados_ci_rc2_proof"
 MIGRATION = "pados_fc_migration_ci"   # migration suites require a pados_fc_migration_* database
 DATABASES = (OPS, D4, RESIDUAL, PROOF, MIGRATION)
 # Minimum passing tests per suite (the RC2 acceptance counts), so a silently shrunken suite fails the gate.
-MIN_TESTS = {"d1-binding": 31, "d4-handoff": 18, "residual": 21, "proof-lane": 17, "p6-11": 7, "migration": 5}
+MIN_TESTS = {"d1-binding": 31, "d4-handoff": 18, "residual": 23, "proof-lane": 17, "p6-11": 7, "migration": 5}
 
 
 def _connection() -> dict[str, str]:
@@ -103,7 +103,8 @@ def _summary(outdir: Path, results: dict[str, int]) -> dict[str, object]:
             "suites": {name: ("PASS" if code == 0 else "FAIL") for name, code in results.items()},
             "suite_reports": {name: {"status": "PASS" if code == 0 else "FAIL", "sha256": digest(name)}
                               for name, code in results.items()},
-            "source_commit": head, "platform": platform.system().lower(),
+            # platform.platform(): a WSL kernel string ("...-microsoft-standard-WSL2") is then visible to the reader.
+            "source_commit": head, "platform": platform.platform(),
             "finished": datetime.now(UTC).isoformat()}
 
 

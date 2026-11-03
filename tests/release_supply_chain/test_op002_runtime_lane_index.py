@@ -38,7 +38,7 @@ def _gate_summary(root: Path, *, commit: str = SHA, exits: dict[str, int | None]
                   finished: datetime | None = None, name: str = "gate-summary.json") -> Path:
     codes = {gate: 0 for gate in WINDOWS_GATES} | (exits or {})
     gates = {gate: {"command": gate, "exit_code": code} for gate, code in codes.items() if code is not None}
-    record = {"repo_head": commit, "gates": gates, "finished": (finished or datetime.now(UTC)).isoformat()}
+    record = {"repo_head": commit, "platform": "Win32NT", "gates": gates, "finished": (finished or datetime.now(UTC)).isoformat()}
     path = root / name
     path.write_text(json.dumps(record), encoding="utf-8")
     return path

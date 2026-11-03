@@ -48,7 +48,7 @@ def _gate_summary(root: Path, *, commit: str = SHA, exits: dict[str, int] | None
                   finished: datetime | None = None, name: str = "gate-summary.json") -> Path:
     codes = {gate: 0 for gate in WINDOWS_GATES} | {"full_pytest": 1, "pack_focused": 1} | (exits or {})
     gates = {gate: {"command": gate, "exit_code": code} for gate, code in codes.items()}
-    return _write(root / name, {"repo_head": commit, "gates": gates,
+    return _write(root / name, {"repo_head": commit, "platform": "Win32NT", "gates": gates,
                                 "finished": (finished or _now()).isoformat()})
 
 

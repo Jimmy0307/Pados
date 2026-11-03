@@ -145,7 +145,15 @@
           "proof-lane",
           "p6-11",
           "migration"
-        ]
+        ],
+        "min_passed": {
+          "d1-binding": 31,
+          "d4-handoff": 18,
+          "residual": 23,
+          "proof-lane": 17,
+          "p6-11": 7,
+          "migration": 5
+        }
       }
     },
     "github-ci": {
@@ -166,7 +174,9 @@
           "dependency review",
           "codeql (python)",
           "codeql (javascript-typescript)"
-        ]
+        ],
+        "app_id": 15368,
+        "repository": "Jimmy0307/Pados"
       }
     },
     "windows-full-suite": {

@@ -15,8 +15,13 @@ Formats:
   platform, finish time and, per suite, its status and the SHA-256 of its ``regression_gate`` report. Each suite
   report beside it is re-hashed and re-read (same commit, PASS, no skips, no problems).
 * ``github-check-runs``: the GitHub REST response for ``GET /repos/{owner}/{repo}/commits/{sha}/check-runs`` saved
-  unmodified. Every required check name must have a completed run by the expected app on this commit, and every run
-  of that name must have concluded ``success``. A truncated page (``total_count`` larger than the list) is refused.
+  unmodified. Every run must belong to the registry's repository (its ``url``), every required check name must have
+  a completed run by the expected app (slug and numeric id) on this commit, and every run of that name must have
+  concluded ``success``. A truncated page (``total_count`` larger than the list) is refused.
+
+Every format must carry its own finish time (``finished``, or ``completed_at`` per check run); the file's
+modification time never stands in for it, so copying or touching a record cannot make it fresh. A gate summary must
+name its platform. The PostgreSQL suites must each report at least the registry's minimum number of passed tests.
 
 What this proves is that the bytes the index points at say PASS for this commit, platform and complete check set.
 It does not authenticate who wrote the bytes; content truth stays with review and the existing acceptance paths.
@@ -27,7 +32,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -53,8 +58,12 @@ class LaneSource(BaseModel):
 
     format: SourceFormat
     required_checks: tuple[str, ...] = Field(default=(), max_length=64)
-    # github-check-runs only: the GitHub App that must have produced every required check run.
+    # github-check-runs only: the repository and the GitHub App (slug and numeric id) every required run must have.
     app: str | None = Field(default=None, max_length=80)
+    app_id: int | None = None
+    repository: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+    # postgres-gate only: the minimum passed tests per suite, rechecked by the reader (the runner enforces it too).
+    min_passed: dict[str, int] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _checks_fit_the_format(self) -> LaneSource:
@@ -65,8 +74,12 @@ class LaneSource(BaseModel):
             raise ValueError(f"SOURCE_NEEDS_REQUIRED_CHECKS {self.format}")
         if len(set(self.required_checks)) != len(self.required_checks):
             raise ValueError("SOURCE_REQUIRED_CHECKS_REPEAT")
-        if (self.format == "github-check-runs") != (self.app is not None):
-            raise ValueError("SOURCE_APP_IS_FOR_GITHUB_CHECK_RUNS_ONLY")
+        github = self.format == "github-check-runs"
+        if any((value is not None) != github for value in (self.app, self.app_id, self.repository)):
+            raise ValueError("SOURCE_APP_AND_REPOSITORY_ARE_FOR_GITHUB_CHECK_RUNS_ONLY")
+        if self.min_passed and (self.format != "postgres-gate" or set(self.min_passed) - set(self.required_checks)
+                                or min(self.min_passed.values()) < 1):
+            raise ValueError("SOURCE_MIN_PASSED_INVALID")
         return self
 
     def fits_platform(self, platform: str) -> bool:
@@ -117,8 +130,11 @@ def _aware(value: object) -> datetime | None:
     return moment if moment.tzinfo is not None else None
 
 
-def _finished(record: Mapping[str, Any], path: Path) -> datetime:
-    return _aware(record.get("finished")) or datetime.fromtimestamp(path.stat().st_mtime, UTC)
+def _finished(record: Mapping[str, Any]) -> datetime:
+    moment = _aware(record.get("finished"))
+    if moment is None:
+        raise SourceError("SOURCE_FORMAT_INVALID", "FINISHED_MISSING")
+    return moment
 
 
 def _load(path: Path) -> Mapping[str, Any]:
@@ -157,8 +173,10 @@ def _gate_summary(source: LaneSource, record: Mapping[str, Any], path: Path, com
             isinstance(entry, Mapping) for entry in gates.values()):
         raise SourceError("SOURCE_FORMAT_INVALID")
     _expect_commit(record["repo_head"], commit)
-    platform = _platform_family(record.get("platform", "windows"))
-    return SourceReading(_first_failure(gates, source.required_checks), _finished(record, path), platform)
+    if not isinstance(record.get("platform"), str) or not record["platform"].strip():
+        raise SourceError("SOURCE_FORMAT_INVALID", "PLATFORM_MISSING")
+    platform = _platform_family(record["platform"])
+    return SourceReading(_first_failure(gates, source.required_checks), _finished(record), platform)
 
 
 def _vm_summary(source: LaneSource, record: Mapping[str, Any], path: Path, commit: str) -> SourceReading:
@@ -168,7 +186,7 @@ def _vm_summary(source: LaneSource, record: Mapping[str, Any], path: Path, commi
     _expect_commit(record["sha"], commit)
     platform = "linux" if record.get("virt") == "vmware" else f"virt:{record.get('virt')}"
     available = {**gates, "e2e": record["e2e"]} if "e2e" in record else dict(gates)
-    return SourceReading(_first_failure(available, source.required_checks), _finished(record, path), platform)
+    return SourceReading(_first_failure(available, source.required_checks), _finished(record), platform)
 
 
 def _e2e_result(record: Mapping[str, Any], path: Path, commit: str) -> SourceReading:
@@ -178,10 +196,10 @@ def _e2e_result(record: Mapping[str, Any], path: Path, commit: str) -> SourceRea
         raise SourceError("SOURCE_FORMAT_INVALID")
     _expect_commit(record.get("commit"), commit)
     passed = record["verdict"] == "PASS" and bool(steps) and all(step.get("status") == "PASS" for step in steps)
-    return SourceReading(0 if passed else 1, _finished(record, path), _platform_family(record.get("platform")))
+    return SourceReading(0 if passed else 1, _finished(record), _platform_family(record.get("platform")))
 
 
-def _suite_report(directory: Path, suite: str, entry: object, commit: str) -> bool:
+def _suite_report(directory: Path, suite: str, entry: object, commit: str, minimum: int) -> bool:
     if not isinstance(entry, Mapping) or not isinstance(entry.get("sha256"), str):
         raise SourceError("SOURCE_FORMAT_INVALID", suite)
     report_path = directory / f"postgres-{suite}.json"
@@ -195,7 +213,7 @@ def _suite_report(directory: Path, suite: str, entry: object, commit: str) -> bo
     passed = counts.get("passed") if isinstance(counts, Mapping) else None
     return (entry.get("status") == "PASS" and report.get("status") == "PASS" and report.get("skipped") == []
             and report.get("problems") == [] and isinstance(passed, int) and not isinstance(passed, bool)
-            and passed > 0)
+            and passed >= max(1, minimum))
 
 
 def _postgres_gate(source: LaneSource, record: Mapping[str, Any], path: Path, commit: str) -> SourceReading:
@@ -206,8 +224,9 @@ def _postgres_gate(source: LaneSource, record: Mapping[str, Any], path: Path, co
     missing = [suite for suite in source.required_checks if suite not in suites]
     if missing:
         raise SourceError("SOURCE_GATE_MISSING", ",".join(missing))
-    passed = all([_suite_report(path.parent, suite, suites[suite], commit) for suite in source.required_checks])
-    return SourceReading(0 if passed else 1, _finished(record, path), _platform_family(record.get("platform")))
+    passed = all([_suite_report(path.parent, suite, suites[suite], commit, source.min_passed.get(suite, 1))
+                  for suite in source.required_checks])
+    return SourceReading(0 if passed else 1, _finished(record), _platform_family(record.get("platform")))
 
 
 def _github_check_runs(source: LaneSource, record: Mapping[str, Any], commit: str) -> SourceReading:
@@ -219,11 +238,15 @@ def _github_check_runs(source: LaneSource, record: Mapping[str, Any], commit: st
         raise SourceError("SOURCE_FORMAT_INVALID", "TRUNCATED_PAGE")
     if any(run.get("head_sha") != commit for run in runs):
         raise SourceError("SOURCE_COMMIT_MISMATCH")
+    prefix = f"https://api.github.com/repos/{source.repository}/check-runs/"
+    if any(not str(run.get("url", "")).startswith(prefix) for run in runs):
+        raise SourceError("SOURCE_REPOSITORY_MISMATCH")  # a fork shares the commit, not the repository
     finished: list[datetime] = []
     failed = False
     for name in source.required_checks:
         named = [run for run in runs if run.get("name") == name
-                 and isinstance(run.get("app"), Mapping) and run["app"].get("slug") == source.app]
+                 and isinstance(run.get("app"), Mapping) and run["app"].get("slug") == source.app
+                 and run["app"].get("id") == source.app_id]
         if not named:
             raise SourceError("SOURCE_GATE_MISSING", name)
         if any(run.get("status") != "completed" for run in named):

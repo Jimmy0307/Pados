@@ -27,7 +27,7 @@ def _now() -> datetime:
 
 
 def _suite_report(root: Path, suite: str, **change: Any) -> str:
-    body = {"gate": f"postgres-{suite}", "status": "PASS", "counts": {"passed": 5}, "skipped": [], "problems": [],
+    body = {"gate": f"postgres-{suite}", "status": "PASS", "counts": {"passed": 40}, "skipped": [], "problems": [],
             "source_commit": SHA} | change
     path = root / f"postgres-{suite}.json"
     path.write_text(json.dumps(body), encoding="utf-8")
@@ -98,7 +98,9 @@ def test_the_gate_writes_the_record_the_reader_accepts(tmp_path: Path) -> None:
 
 def _run(name: str, **change: Any) -> dict[str, Any]:
     return {"name": name, "head_sha": SHA, "status": "completed", "conclusion": "success",
-            "completed_at": _now().strftime("%Y-%m-%dT%H:%M:%SZ"), "app": {"slug": "github-actions"}} | change
+            "url": "https://api.github.com/repos/Jimmy0307/Pados/check-runs/1",
+            "completed_at": _now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "app": {"slug": "github-actions", "id": 15368}} | change
 
 
 def _gh(root: Path, runs: list[dict[str, Any]] | None = None, total: int | None = None) -> Path:
@@ -123,6 +125,10 @@ def test_check_run_defects(tmp_path: Path) -> None:
     assert _code(_gh(tmp_path, [_run(names[0], status="in_progress", conclusion=None),
                                 *[_run(n) for n in names[1:]]]), GH) == "SOURCE_CHECK_INCOMPLETE"
     assert _code(_gh(tmp_path, total=len(names) + 30), GH) == "SOURCE_FORMAT_INVALID"  # a truncated first page
+    fork = "https://api.github.com/repos/someone/Pados/check-runs/9"  # a fork has the same commit SHA
+    assert _code(_gh(tmp_path, [_run(n, url=fork) for n in names]), GH) == "SOURCE_REPOSITORY_MISMATCH"
+    other_app = {"slug": "github-actions", "id": 1}  # the right slug from another app id
+    assert _code(_gh(tmp_path, [_run(n, app=other_app) for n in names]), GH) == "SOURCE_GATE_MISSING"
     failed = [_run(names[0], conclusion="failure"), *[_run(n) for n in names]]  # one run of a name failed
     assert read_source(GH, _gh(tmp_path, failed), commit=SHA).exit_code == 1  # type: ignore[arg-type]
 
@@ -145,3 +151,36 @@ def test_check_runs_at_the_gate_bind_commit_and_freshness(tmp_path: Path) -> Non
                                                                                   "EVIDENCE_STALE")
     assert verdict(_gh(tmp_path, [_run(n, conclusion="failure") for n in names])) == (LaneStatus.FAIL,
                                                                                       "SOURCE_RECORD_NOT_PASS")
+
+
+def test_a_suite_below_the_registry_minimum_is_not_a_pass(tmp_path: Path) -> None:
+    path = _pg(tmp_path)
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body["suite_reports"]["d1-binding"]["sha256"] = _suite_report(tmp_path, "d1-binding", counts={"passed": 3})
+    path.write_text(json.dumps(body), encoding="utf-8")
+    assert read_source(PG, path, commit=SHA).exit_code == 1  # type: ignore[arg-type]
+
+
+def test_the_registry_minimums_match_the_gate_runner() -> None:
+    spec = importlib.util.spec_from_file_location("pg_gate_min", ROOT / "scripts" / "release" /
+                                                  "postgres_integration_gate.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert PG.min_passed == module.MIN_TESTS  # type: ignore[union-attr]
+
+
+def test_a_wsl_postgres_record_is_not_a_linux_record(tmp_path: Path) -> None:
+    path = _pg(tmp_path, platform="Linux-5.15.153.1-microsoft-standard-WSL2-x86_64-with-glibc2.35")
+    assert read_source(PG, path, commit=SHA).platform == "linux-wsl"  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("drop", ["finished", "platform"])
+def test_a_gate_summary_without_its_finish_time_or_platform_is_refused(tmp_path: Path, drop: str) -> None:
+    source = REGISTRY.lanes["windows-full-suite"].source
+    body = {"repo_head": SHA, "platform": "Win32NT", "finished": _now().isoformat(),
+            "gates": {"full_pytest": {"exit_code": 0}}}
+    del body[drop]
+    path = tmp_path / "gate-summary.json"
+    path.write_text(json.dumps(body), encoding="utf-8")
+    assert _code(path, source) == "SOURCE_FORMAT_INVALID"  # never the file's mtime, never a default platform
