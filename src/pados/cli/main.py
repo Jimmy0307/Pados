@@ -174,7 +174,7 @@ def main(
         level = get_settings().log_level
     except Exception:  # noqa: BLE001 - invalid settings are reported by the command itself (e.g. init, doctor)
         level = "INFO"
-    configure_logging(level, stream=sys.stderr)
+    configure_logging(level, to_stderr=True)
     # OP-001: one operation context per command, from PADOS_REQUEST_ID / PADOS_CORRELATION_ID when they are safe
     # identifiers, otherwise generated. It only traces (events, logs); it never authorizes or changes a command.
     operation = context_from_headers(os.environ.get("PADOS_REQUEST_ID"), os.environ.get("PADOS_CORRELATION_ID"),
@@ -297,7 +297,7 @@ def doctor(
     _assert_project_import_path()
     settings = get_settings()
     runtime_mode = settings.runtime_mode.lower()
-    configure_logging(settings.log_level, stream=sys.stderr)
+    configure_logging(settings.log_level, to_stderr=True)
     logger = get_logger("pados.cli")
     checks: dict[str, Any] = {
         "python": sys.version.split()[0],
