@@ -127,7 +127,8 @@ def test_staleness_counts_from_the_runner_record_not_the_index(tmp_path: Path) -
 def test_missing_or_rehashed_evidence_still_fails(tmp_path: Path) -> None:
     summary = _gate_summary(tmp_path)
     record = _hand_record("windows-ci-gates", summary, tmp_path)
-    _gate_summary(tmp_path, exits={"ruff": 0})  # rewritten: same content shape, new finish time, new bytes
+    # Rewritten with the same verdict but different bytes (an earlier finish time, so never byte-identical).
+    _gate_summary(tmp_path, finished=_now() - timedelta(minutes=1))
     assert _verdict(tmp_path, record, lane="windows-ci-gates") == (LaneStatus.FAIL, "EVIDENCE_HASH_MISMATCH")
     summary.unlink()
     assert _verdict(tmp_path, record, lane="windows-ci-gates") == (LaneStatus.FAIL, "EVIDENCE_FILE_MISSING")
