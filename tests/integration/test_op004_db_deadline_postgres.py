@@ -69,3 +69,11 @@ def test_a_spent_budget_refuses_the_transaction_before_its_first_statement(scope
     with pytest.raises(DeadlineExceeded), deadline_scope(Deadline(expires_at=0.0, clock=lambda: 1.0)), \
             scoped() as session:
         session.execute(text("SELECT 1"))
+
+
+def test_a_cancellation_after_an_earlier_commit_in_the_scope_reports_the_write(scoped: Any) -> None:
+    with pytest.raises(DeadlineExceeded) as caught, deadline_scope(Deadline.after(0.8)), scoped() as session:
+        session.execute(text("SELECT 1"))
+        session.commit()  # durable: the scope has already written something
+        session.execute(text("SELECT pg_sleep(5)"))
+    assert caught.value.write_occurred is WriteOutcome.YES
