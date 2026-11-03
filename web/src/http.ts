@@ -124,7 +124,7 @@ export type SingleFlight = <T>(key: string, action: () => Promise<T>) => Promise
 /**
  * Duplicate-action protection with its own scope: an identical write already in flight in this scope returns the same
  * promise, not a second send. Each client (each sign-in or session) needs its own scope, so two clients never share
- * one another's request, challenge or response. The key is method, URL and body only; credentials never enter it.
+ * one another's request, challenge or response. The key is method, URL and body only; no actor, proof or session handle enters it.
  */
 export function createSingleFlight(): SingleFlight {
   const inFlight = new Map<string, Promise<unknown>>();

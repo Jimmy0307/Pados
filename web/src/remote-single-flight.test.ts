@@ -33,7 +33,7 @@ describe("remote single flight", () => {
     const first = call(alice)("/approvals/appr-1/step-up", stepUp);
     const second = call(bob)("/approvals/appr-1/step-up", stepUp);
     await ticks();
-    expect(shared.seen.map((s) => s.actor)).toEqual(["alice", "bob"]);  // two sends, each with its own credentials
+    expect(shared.seen.map((s) => s.actor)).toEqual(["alice", "bob"]);  // two sends, each with its own actor and proof
     shared.release.forEach((go) => go());
     expect((await first).challenge_id).toBe("challenge-for-alice");
     expect((await second).challenge_id).toBe("challenge-for-bob");
