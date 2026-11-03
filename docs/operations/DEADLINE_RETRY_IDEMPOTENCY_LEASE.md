@@ -49,6 +49,10 @@ The one retried boundary today is the compute-node job-status read (`NodeClient.
   with the same content returns the same record. The same key with different content is
   `*_IDEMPOTENCY_CONTENT_CONFLICT` (HTTP 409), never a silent success that returns the earlier content. Work requests,
   messages and unbound approvals did not check this before OP-004.
+- A replay changes nothing, so it records nothing: `CONTROL_MESSAGE_CAPTURED`, `WORK_REQUEST_CAPTURED` and
+  `APPROVAL_CREATED` sync events are written only when the row was actually inserted (`RETURNING (xmax = 0)`). A
+  replay logs `control.idempotent_replay` instead, and a content conflict writes no event. Approval decisions, their
+  audit records and the approval-binding refusals are unchanged.
 - Every mutating core API route is classified in `pados.operability.mutations.MUTATIONS`:
 
 | Kind | Meaning | Client rule |

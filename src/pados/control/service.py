@@ -15,6 +15,9 @@ from pados.control.approval_subject import (
     WorkRouteSubject,
     subject_hash,
 )
+from pados.logging_config import get_logger
+
+_LOG = get_logger("pados.control")
 
 
 def list_projects(session: Session) -> list[dict[str, object]]:
@@ -75,6 +78,20 @@ def _same_content(row: Any, values: Mapping[str, Any], fields: tuple[str, ...], 
         raise ValueError(code)
 
 
+def _captured(session: Session, row: Any, event_type: str, payload: dict[str, Any]) -> dict[str, object]:
+    """Record the capture event only when the row was just inserted; a replay changes nothing and records nothing.
+
+    ``inserted`` comes from ``RETURNING (xmax = 0)``: zero on a fresh insert, the updating transaction on the
+    ``ON CONFLICT DO UPDATE`` replay path. It is dropped from the returned record, so a replay returns the same shape.
+    """
+    record = {key: value for key, value in row.items() if key != "inserted"}
+    if row["inserted"]:
+        append_sync_event(session, str(record["project_id"]), event_type, payload)
+    else:
+        _LOG.info("control.idempotent_replay", outcome="replayed", event_type=event_type)
+    return record
+
+
 def add_message(session: Session, payload: Mapping[str, object]) -> dict[str, object]:
     row = session.execute(
         text(
@@ -82,14 +99,13 @@ def add_message(session: Session, payload: Mapping[str, object]) -> dict[str, ob
             INSERT INTO control_messages(project_id, body, author, idempotency_key)
             VALUES (:project_id, :body, :author, :idempotency_key)
             ON CONFLICT (project_id, idempotency_key) DO UPDATE SET body = control_messages.body
-            RETURNING id, project_id, body, author, idempotency_key, created_at
+            RETURNING id, project_id, body, author, idempotency_key, created_at, (xmax = 0) AS inserted
             """
         ),
         dict(payload),
     ).mappings().one()
     _same_content(row, payload, ("body", "author"), "MESSAGE_IDEMPOTENCY_CONTENT_CONFLICT")
-    append_sync_event(session, str(row["project_id"]), "CONTROL_MESSAGE_CAPTURED", {"message_id": str(row["id"])})
-    return dict(row)
+    return _captured(session, row, "CONTROL_MESSAGE_CAPTURED", {"message_id": str(row["id"])})
 
 
 def list_messages(session: Session, project_id: str) -> list[dict[str, object]]:
@@ -116,14 +132,14 @@ def create_work_request(session: Session, payload: Mapping[str, object]) -> dict
             INSERT INTO control_work_requests(project_id, title, body, status, idempotency_key)
             VALUES (:project_id, :title, :body, :status, :idempotency_key)
             ON CONFLICT (project_id, idempotency_key) DO UPDATE SET title = control_work_requests.title
-            RETURNING id, project_id, title, body, status, idempotency_key, created_at, updated_at
+            RETURNING id, project_id, title, body, status, idempotency_key, created_at, updated_at,
+                      (xmax = 0) AS inserted
             """
         ),
         values,
     ).mappings().one()
     _same_content(row, values, ("title", "body"), "WORK_REQUEST_IDEMPOTENCY_CONTENT_CONFLICT")
-    append_sync_event(session, str(row["project_id"]), "WORK_REQUEST_CAPTURED", {"request_id": str(row["id"])})
-    return dict(row)
+    return _captured(session, row, "WORK_REQUEST_CAPTURED", {"request_id": str(row["id"])})
 
 
 def get_work_request(session: Session, request_id: str) -> dict[str, object]:
@@ -138,7 +154,7 @@ _INSERT_UNBOUND_APPROVAL = """
     INSERT INTO control_approvals(project_id, proposal_hash, proposal_summary, idempotency_key)
     VALUES (:project_id, :proposal_hash, :proposal_summary, :idempotency_key)
     ON CONFLICT (project_id, idempotency_key) DO UPDATE SET proposal_hash = control_approvals.proposal_hash
-    RETURNING *
+    RETURNING *, (xmax = 0) AS inserted
 """
 
 _INSERT_BOUND_APPROVAL = """
@@ -150,7 +166,7 @@ _INSERT_BOUND_APPROVAL = """
       CAST(:subject_json AS jsonb)
     )
     ON CONFLICT (project_id, idempotency_key) DO UPDATE SET proposal_hash = control_approvals.proposal_hash
-    RETURNING *
+    RETURNING *, (xmax = 0) AS inserted
 """
 
 
@@ -212,8 +228,7 @@ def create_approval(session: Session, payload: Mapping[str, object]) -> dict[str
         values = _bound_subject_values(session, values, raw_subject)
         row = session.execute(text(_INSERT_BOUND_APPROVAL), values).mappings().one()
         _same_content(row, values, ("proposal_hash", "proposal_summary"), "APPROVAL_IDEMPOTENCY_CONTENT_CONFLICT")
-    append_sync_event(session, str(row["project_id"]), "APPROVAL_CREATED", {"approval_id": str(row["id"])})
-    return dict(row)
+    return _captured(session, row, "APPROVAL_CREATED", {"approval_id": str(row["id"])})
 
 
 def list_approvals(session: Session) -> list[dict[str, object]]:
