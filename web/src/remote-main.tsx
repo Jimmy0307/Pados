@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { RemoteApiError, RemoteClient, describeRemoteFailure, deriveBanner, type AttentionProjection, type ConnectivityProjection, type RemoteNodes, type RemoteRun, type WorkMapProjection } from "./remote-api";
-import { ActionsView, AttentionView, ConnectivityBanner, REMOTE_VIEWS, TaskAssignmentView, WorkMapView, type RemoteView } from "./remote-console";
+import { ActionsView, AttentionView, ConnectivityBanner, LocalConsoleHint, REMOTE_VIEWS, TaskAssignmentView, WorkMapView, type RemoteView } from "./remote-console";
 import "./remote.css";
 
 function RemoteApp(): ReactElement {
@@ -114,6 +114,7 @@ function RemoteApp(): ReactElement {
       </form>
       {notice && <p className="rc-notice" role="alert">{notice}</p>}
       <p className="rc-note">Access values stay in memory for this session. The browser sends intent only.</p>
+      <LocalConsoleHint />
     </main>;
   }
 

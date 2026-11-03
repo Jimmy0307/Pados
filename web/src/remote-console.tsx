@@ -11,6 +11,12 @@ import {
 } from "./remote-api";
 
 export type RemoteView = "map" | "tasks" | "attention" | "actions";
+/** On the Remote sign-in: a local operator on this computer uses the local console, which needs no access proof. */
+export function LocalConsoleHint(): ReactElement {
+  return <p className="rc-note">Using PADOS on this computer? <a href="/operator.html">Open the local operator console</a>.
+    This sign-in is for the Remote console, which needs a Home Base with Remote Operations configured.</p>;
+}
+
 export const REMOTE_VIEWS: { id: RemoteView; label: string }[] = [
   { id: "map", label: "Map" },
   { id: "tasks", label: "Tasks" },
