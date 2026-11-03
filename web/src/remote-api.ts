@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** Remote Operations client. Sends intents, reads projections. Holds no context. */
 
-import { actionKey, HttpError, requestJson, singleFlight, type RequestOutcome } from "./http";
+import { actionKey, createSingleFlight, HttpError, requestJson, type RequestOutcome } from "./http";
 export type Bucket = "WAITING_APPROVAL" | "FAILED" | "RUNNING" | "COMPLETED";
 
 export interface RemoteRun {
@@ -189,6 +189,8 @@ export class RemoteClient {
   private readonly baseUrl: string;
   // Server-issued session handle: binding context for step-up, kept in memory only.
   private sessionHandle: string | null = null;
+  // Duplicate-write protection scoped to this client: never shared with another sign-in or session.
+  private readonly singleFlight = createSingleFlight();
 
   constructor(
     private readonly signIn: RemoteSignIn,
@@ -227,7 +229,8 @@ export class RemoteClient {
       throw new RemoteApiError(error.status, detail, error.requestId, error.outcome);
     });
     const method = (init.method || "GET").toUpperCase();
-    return method !== "GET" && typeof init.body === "string" ? singleFlight(actionKey(method, url, init.body), send) : send();
+    return method !== "GET" && typeof init.body === "string"
+      ? this.singleFlight(actionKey(method, url, init.body), send) : send();
   }
 
   attention(): Promise<AttentionProjection> {

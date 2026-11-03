@@ -119,16 +119,26 @@ export async function requestJson<T>(url: string, init: RequestInit = {}, option
   throw lastError;
 }
 
-const inFlight = new Map<string, Promise<unknown>>();
+export type SingleFlight = <T>(key: string, action: () => Promise<T>) => Promise<T>;
 
-/** Duplicate-action protection: an identical write already in flight returns the same promise, not a second send. */
-export function singleFlight<T>(key: string, action: () => Promise<T>): Promise<T> {
-  const existing = inFlight.get(key) as Promise<T> | undefined;
-  if (existing) return existing;
-  const promise = action().finally(() => inFlight.delete(key));
-  inFlight.set(key, promise);
-  return promise;
+/**
+ * Duplicate-action protection with its own scope: an identical write already in flight in this scope returns the same
+ * promise, not a second send. Each client (each sign-in or session) needs its own scope, so two clients never share
+ * one another's request, challenge or response. The key is method, URL and body only; credentials never enter it.
+ */
+export function createSingleFlight(): SingleFlight {
+  const inFlight = new Map<string, Promise<unknown>>();
+  return <T>(key: string, action: () => Promise<T>): Promise<T> => {
+    const existing = inFlight.get(key) as Promise<T> | undefined;
+    if (existing) return existing;
+    const promise = action().finally(() => inFlight.delete(key));
+    inFlight.set(key, promise);
+    return promise;
+  };
 }
+
+/** The local console's scope: one page, one operator session. Remote clients each create their own. */
+export const singleFlight: SingleFlight = createSingleFlight();
 
 export function actionKey(method: string, url: string, body: BodyInit | null | undefined): string {
   return `${method.toUpperCase()} ${url} ${typeof body === "string" ? body : body ? "[binary]" : ""}`;
