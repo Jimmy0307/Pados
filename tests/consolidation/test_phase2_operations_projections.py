@@ -68,3 +68,19 @@ class OperationsProjectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResultAcceptanceInboxTests(unittest.TestCase):
+    """A pending result acceptance points at the step-up decision, never at the control-token approval route."""
+
+    def test_a_result_acceptance_item_names_the_step_up_path(self):
+        projects = [{"id": "p1", "name": "One", "status": "active"}]
+        approvals = [{"project_id": "p1", "id": "ap9", "item": "Result acceptance for task t1", "status": "PENDING",
+                      "result_acceptance": True},
+                     {"project_id": "p1", "id": "ap8", "item": "Work route", "status": "PENDING"}]
+        items = {i["id"]: i for i in decision_inbox_projection(projects, [], [], [], approvals)}
+        candidate, route = items["approval:ap9"], items["approval:ap8"]
+        self.assertNotIn("/control/approvals", candidate["target"])
+        self.assertIn("WebAuthn step-up", candidate["required_human_action"])
+        self.assertIn("not accepted", candidate["required_human_action"])
+        self.assertEqual(route["target"], "/control/approvals/ap8")

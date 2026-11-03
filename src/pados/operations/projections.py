@@ -103,12 +103,19 @@ def decision_inbox_projection(
         approval_id = str(row.get("id") or row.get("approval_id") or "")
         if not approval_id:
             continue
+        if row.get("result_acceptance"):
+            # A verified result that is not accepted yet: only a fresh WebAuthn step-up in the Remote console decides
+            # it (the control API refuses with RESULT_ACCEPTANCE_REQUIRES_STEP_UP).
+            action = ("Verified, not accepted yet: approve or reject it in the Remote console with a fresh WebAuthn "
+                      "step-up")
+            target = "/remote/v1/approvals"
+        else:
+            action, target = "Approve, reject, or revise the governed work package", f"/control/approvals/{approval_id}"
         items.append(_inbox_item(
             project_by_id[project_id], row, item_type="APPROVAL",
             item=str(row.get("item") or row.get("title") or row.get("scope_type") or approval_id),
             reason=str(row.get("reason") or row.get("source") or "PADOS approval gate"),
-            action="Approve, reject, or revise the governed work package",
-            target=f"/control/approvals/{approval_id}", priority=row.get("priority", 90),
+            action=action, target=target, priority=row.get("priority", 90),
         ))
     for row in runs:
         project_id = _known_project_id(row, project_by_id)
