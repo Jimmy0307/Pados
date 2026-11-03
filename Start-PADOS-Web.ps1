@@ -91,10 +91,11 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if (-not $frontendReady) { throw "FRONTEND_START_FAILED" }
-    if (-not $NoBrowser) { Start-Process $FrontendUrl | Out-Null }
+    # The root page is the Remote console sign-in; the local operator console is /operator.html.
+    if (-not $NoBrowser) { Start-Process "$FrontendUrl/operator.html" | Out-Null }
 
     Write-Host "PADOS Web Control Center is running."
-    Write-Host "Frontend: $FrontendUrl"
+    Write-Host "Frontend: $FrontendUrl/operator.html (local console)"
     Write-Host "Backend:  $BackendUrl"
     Write-Host "Press Ctrl+C to stop both child processes."
     while ($true) {

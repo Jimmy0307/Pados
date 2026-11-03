@@ -22,7 +22,7 @@ PADOS_DB_NAME=pados_dogfood_proof alembic -c alembic_p6_19b.ini upgrade head
 PADOS_DB_NAME=pados_dogfood_corpus alembic upgrade 20260730_0011
 pados doctor                             # Core readiness plus optional extension and security-posture sections
 pados serve                              # API on 127.0.0.1:8088
-cd web && npm ci && npm run dev          # UI on 127.0.0.1:5173 (Control Center -> Mission Control)
+cd web && npm ci && npm run dev          # local console: http://127.0.0.1:5173/operator.html (the root page is the Remote sign-in)
 pados project create --name demo --root-path ./runtime/local/workspace
 ```
 
@@ -37,6 +37,9 @@ No chat model is configured by default (`PADOS_CHAT_PROVIDER` unset). Cognitive 
 tests only. Its output is labeled `MOCK_CONTRACT_TEST_ONLY`, and `pados doctor` warns while it is selected. A local
 Ollama model runs only under a measured execution binding. The model call runs after the routing transaction commits,
 so no database lock is held while the model thinks.
+
+On Windows (PowerShell), set variables with `$env:` and run the tools from `.venv\Scripts`; the step-by-step
+version, including what has no command yet, is [`LOCAL_USAGE_GUIDE.md`](LOCAL_USAGE_GUIDE.md).
 
 **Verify the whole local path end to end (synthetic data, loopback, no provider credentials).**
 

@@ -9,6 +9,11 @@ Describe "Start-PADOS-Web launcher" {
         $source | Should Not Match "postgresql\+?psycopg://"
     }
 
+    It "opens the local operator console, not the Remote sign-in" {
+        $source = Get-Content -Raw -Encoding UTF8 (Join-Path $Root "Start-PADOS-Web.ps1")
+        $source | Should Match 'Start-Process "\$FrontendUrl/operator\.html"'
+    }
+
     It "is reachable from the existing slash launcher" {
         $source = Get-Content -Raw -Encoding UTF8 (Join-Path $Root "Start-PADOS.ps1")
         $source | Should Match 'LauncherCommand -eq "/web"'
