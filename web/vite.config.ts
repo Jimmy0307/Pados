@@ -23,6 +23,11 @@ export default defineConfig(({ mode, command }) => {
           target: env.PADOS_WEB_BACKEND_URL || "http://127.0.0.1:8088",
           changeOrigin: false,
         },
+        // The Control Center's work request and approval actions use the existing control API with the token.
+        "/control": {
+          target: env.PADOS_WEB_BACKEND_URL || "http://127.0.0.1:8088",
+          changeOrigin: false,
+        },
       },
     },
   };
