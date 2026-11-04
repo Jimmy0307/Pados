@@ -352,3 +352,47 @@ def test_the_collector_refuses_partial_pages() -> None:
         collector.collect("Jimmy0307/Pados", SHA, fetch=lambda e: [{}] * 100 if "/annotations" in e else fetch(e))
     with pytest.raises(SystemExit, match="BAD_ARGUMENTS"):
         collector.collect("Jimmy0307/Pados; rm", SHA, fetch=fetch)
+
+
+# --- review round: a failure is never reported as "not validated" ------------------------------------------------
+
+
+def test_a_failed_check_beside_a_running_one_is_a_failure(tmp_path: Path) -> None:
+    # Independent review: the reader used to stop at the first incomplete check, before a later failed one.
+    bundle = GithubBundle(GH, SHA)  # type: ignore[arg-type]
+    first, last = GH.required_checks[0], GH.required_checks[-1]  # type: ignore[union-attr]
+    for run in bundle.named(first):
+        run.update(status="in_progress", conclusion=None, completed_at=None)
+    for run in bundle.named(last):
+        run["conclusion"] = "failure"
+    path = _write(tmp_path / "gh.json", bundle.record())
+    assert _gate(tmp_path, "github-ci", path, "github") == (LaneStatus.FAIL, "SOURCE_RECORD_NOT_PASS")
+
+
+def test_a_failed_lookalike_check_is_still_a_failure(tmp_path: Path) -> None:
+    bundle = GithubBundle(GH, SHA)  # type: ignore[arg-type]
+    bundle.add("windows (native suites)", workflow=".github/workflows/lookalike.yml", conclusion="failure")
+    assert read_source(GH, _write(tmp_path / "gh.json", bundle.record()), commit=SHA).exit_code == 1  # type: ignore[arg-type]
+
+
+def test_duplicate_check_run_ids_are_refused(tmp_path: Path) -> None:
+    bundle = GithubBundle(GH, SHA)  # type: ignore[arg-type]
+    bundle.runs.append(dict(bundle.runs[0]))
+    assert _code(GH, _write(tmp_path / "gh.json", bundle.record())) == "SOURCE_FORMAT_INVALID"  # type: ignore[arg-type]
+
+
+def test_a_reduced_run_that_failed_is_a_failure(tmp_path: Path) -> None:
+    steps = [name for name in E2E.required_checks if name != "governed_acceptance_suite"]  # type: ignore[union-attr]
+    record = e2e_record(E2E, commit=SHA, steps=steps, run_mode="skip-acceptance-suite",  # type: ignore[arg-type]
+                        verdict="FAIL")
+    record["steps"][3]["status"] = "FAIL"
+    path = _write(tmp_path / "E2E_RESULT.json", record)
+    assert _gate(tmp_path, "windows-native-e2e", path, "windows") == (LaneStatus.FAIL, "SOURCE_RECORD_NOT_PASS")
+
+
+def test_the_collector_asks_for_the_latest_attempts_only() -> None:
+    collector = _module("collect_gh_latest", "scripts/release/collect_github_actions_evidence.py")
+    asked: list[str] = []
+    fetch = _fake_api(GithubBundle(GH, SHA))  # type: ignore[arg-type]
+    collector.collect("Jimmy0307/Pados", SHA, fetch=lambda e: (asked.append(e), fetch(e))[1])
+    assert any("check-runs?filter=latest&" in endpoint for endpoint in asked)
