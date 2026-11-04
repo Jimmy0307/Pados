@@ -143,6 +143,39 @@ coverage is the operability gate report (`scripts/release/operability_gate.py`).
 | Runbook distinguishes evidence from assumptions | Met where present | `docs/operations/RECOVERY_RUNBOOKS.md` |
 | CI/CD enforces the contract and reports skipped/not-validated lanes | Met | OP-002, OP-006, OP-010 CI steps |
 
+## Local usability (branch `feat/local-usability-20261103`, PR #21)
+
+Scope: one user, this computer, supervised, synthetic or non-sensitive data. Found by walking the journeys on
+Windows 11 from a fresh clone (round 1), then by Codex review of `3b01111` (round 2).
+
+| ID | Finding | Status |
+|---|---|---|
+| F1 | `pados doctor --json` printed a log event after the JSON | Fixed (`39789de`, `c1e90d6`): CLI log events go to standard error |
+| F2 | The quickstart's web URL is the Remote sign-in | Fixed (`b08cf6f`, `3b01111`): the sign-in links the local console; the launcher opens `/operator.html` |
+| F3 | An empty project list said "Loading projects…" forever | Fixed (`b08cf6f`) |
+| F4 | The control token could decide a ResultCandidate's approval and strand the candidate (no CAS bypass) | Fixed (`2d4937f`): `RESULT_ACCEPTANCE_REQUIRES_STEP_UP` |
+| F5 | A step on a paused or cancelled loop said only "conflict" | Fixed (`eea457a`): `LOOP_NOT_RUNNING: the loop is …` |
+| F6 | The E2E never checked `/health/live` and `/health/ready` | Fixed (`a4da7e7`) |
+| U1 | The inbox's Open for a result acceptance pointed at an API route | Fixed (`5603cf7`): inbox items carry `open`; it opens the Remote console's Actions view, whose sign-in names what is needed (a Remote sign-in and an enrolled WebAuthn device). Playwright and unit tests |
+| U2 | Page links were absolute and left a sub-path build (`/Pados/`) | Fixed (`5603cf7`): joined to Vite's `BASE_URL`; checked in Chromium on a `/Pados/` build |
+| U3 | An unknown `PADOS_LOG_LEVEL` crashed every command, `--help`, `init` and `doctor` included | Fixed (`929aacf`, value no longer echoed in `fc95ac4`); `doctor` outside the checkout now says `WORKTREE_IMPORT_PATH_MISMATCH` |
+| U4 | Comments said the step-up proof is consumed in the decision transaction | Corrected (`93d6af7`, `fc95ac4`): consumption commits on its own, the approval and candidate decision commit together later, and a REJECT has a third step. Not atomic; a PostgreSQL test pins the failure between them (proof spent, nothing decided, replay refused, a fresh step-up decides) |
+| U5 | The web launcher ran uvicorn directly, skipping `pados serve`'s start-up refusals | Fixed (`1544b76`, `fc95ac4`): it runs `pados serve`; Pester covers the default token, a non-loopback host and a unique token (Pester is not part of CI) |
+| U6 | Work requests and approvals needed API scripts | Fixed (`a86d860`): the Control Center creates work requests and approves, rejects or revises work package approvals through the existing `/control` routes and control token, after the person confirms the exact approval; result approvals stay step-up only |
+| R2-M2 | (review) A build served from another host would have sent the typed control token there | Fixed (`448427f`): the token field and every control request refuse off loopback (`CONTROL_TOKEN_LOCAL_ONLY`) |
+| R2-L6–L9 | (review) the reject step, the echoed log value, a `localhost` backend, one idempotency key per request and late approval responses | Fixed (`fc95ac4`, `448427f`) |
+
+Still open for local use (each needs a product or owner decision, not a code fix in scope):
+
+| Gap | Why | Unblock |
+|---|---|---|
+| Approval requests (WORK_ROUTE subjects), goals, plans and loops have no form | Writing the subject (capability, command, worker, maximum risk) decides what work may run | A product decision on which commands a person may request from the console, then a form over `POST /control/approvals` |
+| Project creation is CLI-only | No API route creates a project | Decide whether projects are created from the web |
+| A result is accepted only in the Remote console | Needs `PADOS_REMOTE_CONFIG`, an actor and an enrolled WebAuthn device | The owner configures Remote Operations and enrols a device |
+| The control token is pasted into the console each time | Kept in page memory only, by design | A local session exchange would be new authority design |
+| Graceful stop (Ctrl+C) was not exercised; only a hard stop and restart | Interactive | A manual check by the owner |
+| Real local model run (`qwen3:8b`) | Needs a new, exact, temporary `model_ref` authorization | The owner's decision (model, project, purpose, expiry, revocation) |
+
 ## Residuals carried from PR #19 (still OPEN; merging PR #19 did not resolve them)
 
 | ID | Residual | Status | Why it stays open | Tracked with |
