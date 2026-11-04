@@ -84,3 +84,16 @@ class ResultAcceptanceInboxTests(unittest.TestCase):
         self.assertIn("WebAuthn step-up", candidate["required_human_action"])
         self.assertIn("not accepted", candidate["required_human_action"])
         self.assertEqual(route["target"], "/control/approvals/ap8")
+
+    def test_each_item_says_where_a_person_acts_on_it(self):
+        projects = [{"id": "p1", "name": "One", "status": "active"}]
+        approvals = [{"project_id": "p1", "id": "ap9", "status": "PENDING", "result_acceptance": True},
+                     {"project_id": "p1", "id": "ap8", "status": "PENDING"}]
+        decisions = [{"project_id": "p1", "id": "d1", "question": "Which?"}]
+        items = {i["id"]: i for i in decision_inbox_projection(projects, decisions, [], [], approvals)}
+        self.assertEqual(items["approval:ap9"]["open"], {
+            "surface": "REMOTE_CONSOLE", "view": "actions", "approval_id": "ap9",
+            "needs": ["REMOTE_SIGN_IN", "ENROLLED_WEBAUTHN_DEVICE"]})
+        self.assertEqual(items["approval:ap8"]["open"]["surface"], "CONTROL_CENTER")
+        self.assertEqual(items["decision:d1"]["open"], {"surface": "API", "path": "/control/projects/p1",
+                                                        "needs": ["CONTROL_TOKEN"]})

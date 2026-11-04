@@ -106,16 +106,20 @@ def decision_inbox_projection(
         if row.get("result_acceptance"):
             # A verified result that is not accepted yet: only a fresh WebAuthn step-up in the Remote console decides
             # it (the control API refuses with RESULT_ACCEPTANCE_REQUIRES_STEP_UP).
-            action = ("Verified, not accepted yet: approve or reject it in the Remote console with a fresh WebAuthn "
-                      "step-up")
+            action = ("Verified, not accepted yet: approve or reject it in the Remote console (Actions) with a fresh "
+                      "WebAuthn step-up. Needs a Remote sign-in and a WebAuthn device enrolled for your actor")
             target = "/remote/v1/approvals"
+            ui = {"surface": "REMOTE_CONSOLE", "view": "actions", "approval_id": approval_id,
+                  "needs": ["REMOTE_SIGN_IN", "ENROLLED_WEBAUTHN_DEVICE"]}
         else:
             action, target = "Approve, reject, or revise the governed work package", f"/control/approvals/{approval_id}"
+            ui = {"surface": "CONTROL_CENTER", "view": "approvals", "approval_id": approval_id,
+                  "needs": ["CONTROL_TOKEN"]}
         items.append(_inbox_item(
             project_by_id[project_id], row, item_type="APPROVAL",
             item=str(row.get("item") or row.get("title") or row.get("scope_type") or approval_id),
             reason=str(row.get("reason") or row.get("source") or "PADOS approval gate"),
-            action=action, target=target, priority=row.get("priority", 90),
+            action=action, target=target, priority=row.get("priority", 90), ui=ui,
         ))
     for row in runs:
         project_id = _known_project_id(row, project_by_id)
@@ -181,6 +185,7 @@ def _inbox_item(
     action: str,
     target: str,
     priority: Any,
+    ui: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     project_id = str(project["id"])
     identity = str(row.get("id") or row.get("run_id") or row.get("approval_id") or item)
@@ -195,7 +200,10 @@ def _inbox_item(
         "status": str(row.get("status") or "OPEN"),
         "reason_source": reason[:500],
         "required_human_action": action,
+        # ``target`` is the authority (API) route; ``open`` is where a person acts on it. An item with no console
+        # surface yet names the API route only, and the console shows it as a reference, not a link.
         "target": target,
+        "open": dict(ui) if ui is not None else {"surface": "API", "path": target, "needs": ["CONTROL_TOKEN"]},
         "provenance": {
             "project_id": project_id,
             "record": str(row.get("source") or _INBOX_RECORDS[item_type]),
