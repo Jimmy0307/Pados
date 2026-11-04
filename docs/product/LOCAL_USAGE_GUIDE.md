@@ -44,9 +44,14 @@ Never run `alembic upgrade heads` on the proof database.
 - `http://127.0.0.1:8088/health/ready` lists each dependency. `operational_database` is required; the others,
   including `corpus_database`, are optional. `chat_provider` is `NOT_CONFIGURED` by default, which is expected.
 - Web console: `cd web; npm ci; npm run dev`, then open **`http://127.0.0.1:5173/operator.html`**. That is the local
-  operator console (Corpus Operator, and the Control Center tab with Mission Control and the Decision Inbox). The root
-  page `http://127.0.0.1:5173/` is the **Remote console sign-in**, which needs Remote Operations configured; it links
-  to the local console.
+  operator console (Corpus Operator, and the Control Center tab with Mission Control, the Decision Inbox, Approvals
+  and New work request). The root page `http://127.0.0.1:5173/` is the **Remote console sign-in**, which needs Remote
+  Operations configured; it links to the local console. In a build served under a sub-path (for example `/Pados/`),
+  every page link stays under that sub-path.
+- Or start both with one command on Windows: `.\Start-PADOS-Web.ps1`. It runs `pados doctor`, then `pados serve`
+  (with the same refusals: a non-loopback host or the shipped default token stops it, and the launcher prints
+  `BACKEND_START_REFUSED` with the reason), waits for `/health/live`, starts the web console and opens
+  `/operator.html`.
 
 ## 3. Create a project
 
@@ -59,17 +64,22 @@ this command.
 
 ## 4. Run a real job (the deterministic Markdown reference check)
 
-The control API takes a work request, an approval with a WORK_ROUTE subject, a goal, a plan and a TaskLoop. **There
-is no CLI or web form for work requests and approvals yet**, so this step needs the control token
-(`runtime\local\control.token`, sent as the `X-PADOS-Control-Token` header) and the JSON bodies that
-`task_flow` in `scripts/dogfood/local_dogfood_e2e.py` builds. In order:
+The control API takes a work request, an approval with a WORK_ROUTE subject, a goal, a plan and a TaskLoop. All of
+them need the control token (`runtime\local\control.token`). In order:
 
-1. `POST /control/work-requests` (project, title, a TaskEnvelope body).
-2. `POST /control/approvals` with a WORK_ROUTE subject naming `markdown_reference_check`. A loop cannot be created
-   before the approval is approved.
-3. `POST /control/approvals/{id}/approve` — your decision as the operator, with the approval's `version`.
-4. `POST /control/task-goals`, `POST /control/task-plans`, `POST /control/loops`, `POST /control/loops/{id}/start`.
-5. `POST /control/loops/{id}/step` until the loop is `COMPLETED`.
+1. **Work request (web):** Control Center → **New work request**. Paste the control token into the masked field
+   (it stays in that page's memory only; reloading forgets it), choose the project, give a title and what should be
+   done, **Create work request**. Or `POST /control/work-requests`.
+2. **Approval request (API only):** `POST /control/approvals` with a WORK_ROUTE subject naming
+   `markdown_reference_check` (the JSON body `task_flow` in `scripts/dogfood/local_dogfood_e2e.py` builds). There is
+   no form for this yet: writing the subject (capability, command, worker type, maximum risk) is a product decision.
+3. **Your decision (web):** Control Center → **Approvals** (or the inbox's **Review**). The panel shows what the
+   approval authorizes: request, worker type, each capability and command with its maximum risk, and the version.
+   **Approve**, **Reject** or **Request revision** asks you to confirm that exact approval before anything is sent.
+   Or `POST /control/approvals/{id}/approve` with the approval's `version`. A loop cannot be created before this.
+4. **Goal, plan, loop (API only):** `POST /control/task-goals`, `POST /control/task-plans`, `POST /control/loops`,
+   `POST /control/loops/{id}/start`, then `POST /control/loops/{id}/step` until the loop is `COMPLETED`, or
+   `pados loop step <id>`.
 
 The job runs the read-only probe on the project's Markdown files and records its outcome and SHA-256 digests.
 
@@ -100,7 +110,7 @@ standard error.
 | You see | It means |
 |---|---|
 | Loop `COMPLETED`, job `SUCCEEDED`, validation `PASSED` | **Execution evidence.** The registered command ran and its declared outcome passed. Nothing is accepted yet. |
-| `pados loop submit-result-candidate` → `WAITING_APPROVAL` | A verified **ResultCandidate**, not accepted. The Decision Inbox shows it as "Verified, not accepted yet". |
+| `pados loop submit-result-candidate` → `WAITING_APPROVAL` | A verified **ResultCandidate**, not accepted. The Decision Inbox shows it as "Verified, not accepted yet", with **Open in Remote console**: that link opens the Remote console's Actions view, whose sign-in lists what you need (a Remote sign-in, and a WebAuthn device enrolled for your actor). The Control Center has no decide buttons for it. |
 | Accepted / `COMMITTED`, ScopeVersion advanced | **Governed acceptance**: only after a fresh WebAuthn step-up in the Remote console, through the single CAS. The control token cannot accept or reject a result (`RESULT_ACCEPTANCE_REQUIRES_STEP_UP`). |
 
 Model output (local Ollama) is execution evidence at most; it is never accepted by itself.
@@ -110,11 +120,16 @@ Model output (local Ollama) is execution evidence at most; it is never accepted 
 | Symptom | Cause | What to do |
 |---|---|---|
 | `pados doctor` fails on the database | Wrong host, port or password in `.env`, or PostgreSQL is not running | Fix `.env`; `pados doctor` names the failing check |
-| `pados serve` exits with `DEFAULT_CONTROL_TOKEN_REFUSED` | `.env` holds the public default token | Run `pados init --force` in a fresh checkout, or set a unique token hash |
+| `pados serve` exits with `DEFAULT_CONTROL_TOKEN_REFUSED` (the launcher: `BACKEND_START_REFUSED ... DEFAULT_CONTROL_TOKEN_REFUSED`) | `.env` holds the public default token | Run `pados init --force` in a fresh checkout, or set a unique token hash |
+| `pados init` prints `exists: ... (use --force to overwrite)` | An `.env` is already there; init never replaces a working token silently | Keep it, or `pados init --force` for a new token (then use the new one everywhere) |
+| `PADOS_LOG_LEVEL_INVALID: the value is not one of ...` on standard error | `PADOS_LOG_LEVEL` is not DEBUG, INFO, WARNING, ERROR or CRITICAL | Commands still run and log at INFO; fix the value. `pados doctor --json` reports it under `settings.log_level` |
+| `WORKTREE_IMPORT_PATH_MISMATCH` from `pados doctor` | Run from another directory than the checkout the CLI is installed from | `cd` to the checkout the message names |
+| Control Center: `Not recorded: ... version` or `approval is not pending` | Someone decided or changed the approval since you opened it | Reopen it from Approvals; it shows the current version and status |
 | Browser shows a sign-in asking for an actor and access proof | That is the Remote console | Open `/operator.html` instead |
 | Project list empty | No project exists yet | `pados project create --name <name> --root-path <folder>` |
 | `403` on `/control/...` | Missing or wrong `X-PADOS-Control-Token` | Send the token from `runtime\local\control.token` |
 | `409 LOOP_NOT_RUNNING` | The loop is paused, finished or cancelled | Resume a paused loop; create a new loop otherwise |
 | `403 RESULT_ACCEPTANCE_REQUIRES_STEP_UP` | A result acceptance was decided through the control API | Decide it in the Remote console with a WebAuthn step-up |
+| Remote step-up decision fails after your device verified it; the same proof is then `APPROVAL_PROOF_REPLAYED` | The proof is consumed in its own transaction before the decision is recorded; a failure in between spends it and decides nothing | Run a new step-up (approve or reject again); nothing was accepted |
 | `/health/ready` `DEGRADED`, `corpus_database` not OK | The Corpus database is down or not migrated | The core loop still works; start it or migrate it |
 | `chat_provider` `NOT_CONFIGURED`, cognitive actions report `COGNITIVE_PROVIDER_NOT_CONFIGURED` | No chat model is configured (default) | Expected; a local model runs only under a measured binding with an explicit authorization |
