@@ -31,8 +31,8 @@ def resolve_log_level(level: object) -> tuple[int, str | None]:
         return logging.INFO, None
     if name in LOG_LEVELS:
         return LOG_LEVELS[name], None
-    shown = "".join(char for char in str(level)[:20] if char.isprintable())
-    return logging.INFO, (f"PADOS_LOG_LEVEL_INVALID: {shown!r} is not one of DEBUG, INFO, WARNING, ERROR, CRITICAL; "
+    # The value itself is not echoed: a mis-pasted value could be something that must not reach a log.
+    return logging.INFO, ("PADOS_LOG_LEVEL_INVALID: the value is not one of DEBUG, INFO, WARNING, ERROR, CRITICAL; "
                           "logging at INFO")
 
 

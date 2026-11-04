@@ -36,19 +36,20 @@ function Get-StartRefusal([string]$ErrorLog) {
     return "no output"
 }
 
-function Wait-Backend([string]$Url, [System.Diagnostics.Process]$Process, [string]$ErrorLog, [int]$Attempts = 60) {
+function Wait-Backend([string[]]$Urls, [System.Diagnostics.Process]$Process, [string]$ErrorLog, [int]$Attempts = 60) {
     for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
         if ($Process.HasExited) {
             throw "BACKEND_START_REFUSED (exit $($Process.ExitCode)): $(Get-StartRefusal $ErrorLog)"
         }
-        try {
-            $response = Invoke-RestMethod -Uri $Url -Method Get -TimeoutSec 3
-            if ($response) { return $response }
-        } catch {
-            Start-Sleep -Milliseconds 500
+        foreach ($url in $Urls) {
+            try {
+                $response = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 3
+                if ($response) { return $response }
+            } catch { }
         }
+        Start-Sleep -Milliseconds 500
     }
-    throw "HTTP_HEALTHCHECK_FAILED_$Url"
+    throw "HTTP_HEALTHCHECK_FAILED_$($Urls -join ',')"
 }
 
 function Stop-Child([System.Diagnostics.Process]$Process) {
@@ -71,7 +72,8 @@ function Start-PadosBackend([string]$Python, [string]$Root, [int]$Port, [string]
         else { $env:PADOS_API_PORT = $previousPort }
     }
     try {
-        $null = Wait-Backend "http://127.0.0.1:$Port/health/live" $process $ErrorLog
+        # PADOS_API_HOST may be "localhost", which can resolve to ::1: either loopback answer counts.
+        $null = Wait-Backend @("http://127.0.0.1:$Port/health/live", "http://localhost:$Port/health/live") $process $ErrorLog
     } catch {
         Stop-Child $process
         throw

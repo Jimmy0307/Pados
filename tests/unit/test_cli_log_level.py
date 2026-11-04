@@ -32,7 +32,7 @@ def test_known_or_blank_levels_resolve_without_a_problem(value: object, level: i
 def test_unknown_levels_fall_back_to_info_with_a_stable_problem(value: str) -> None:
     numeric, problem = resolve_log_level(value)
     assert numeric == logging.INFO and problem is not None and problem.startswith("PADOS_LOG_LEVEL_INVALID: ")
-    assert "\x1b" not in problem  # the echoed value is cut and printable only
+    assert value not in problem  # the value is never echoed
 
 
 def test_configure_logging_does_not_raise_and_reports_once(capsys: pytest.CaptureFixture[str]) -> None:
