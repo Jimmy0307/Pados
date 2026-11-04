@@ -267,11 +267,13 @@ def decide_approval(
 ) -> dict[str, object]:
     """Decide a PENDING approval. An approved WORK_ROUTE approval authorizes new work only until ``expires_at``.
 
-    An approval that backs a ResultCandidate is decided only by the governed remote path, after a fresh WebAuthn
-    step-up (``governed_result_decision=True``), which records the decision bound to the consumed proof in the same
-    transaction. Any other caller (the control-token API) is refused with RESULT_ACCEPTANCE_REQUIRES_STEP_UP and the
-    approval stays PENDING: deciding it there would strand the candidate, since the step-up decision then finds the
-    approval no longer pending.
+    An approval that backs a ResultCandidate is decided only by the governed remote path
+    (``governed_result_decision=True``). That path first consumes a fresh WebAuthn step-up proof, in its own committed
+    transaction, and then decides this approval and records the candidate decision (bound to that proof) together in
+    one later transaction. The two are not atomic: a failure between them leaves the proof spent and nothing decided,
+    and the operator runs a new step-up. Any other caller (the control-token API) is refused with
+    RESULT_ACCEPTANCE_REQUIRES_STEP_UP and the approval stays PENDING: deciding it there would strand the candidate,
+    since the step-up decision then finds the approval no longer pending.
     """
     if ttl_seconds is None:
         from pados.config import get_settings

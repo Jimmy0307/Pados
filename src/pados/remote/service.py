@@ -341,7 +341,8 @@ class RemoteOperationsService:
         presented = self._authoritative_decision(session, str(envelope.approval_ref))
         action = StepUpAction(envelope.intent_type.value)
         step_up_binding = self._binding(session, action, presented)
-        # Atomic single-use consumption against the binding recomputed from current authority.
+        # Atomic single-use consumption against the binding recomputed from current authority. It commits on its
+        # own; the decision is recorded later, in a separate transaction (ports.decide), and is not atomic with it.
         consumed = step_up.consume(envelope.step_up_proof, step_up_binding)
         effects.append("decision")
         binding = bind_remote_decision(
