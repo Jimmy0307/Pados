@@ -2,9 +2,6 @@
 // Review findings: the inbox's "Open" for a result acceptance pointed at an API route (/remote/v1/approvals), not a
 // page where a person can decide; and page links were absolute ("/operator.html"), which leave a sub-path build
 // (base "/Pados/").
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -29,10 +26,10 @@ describe("page links under any base", () => {
   });
 
   it("has no absolute page links left in the console sources", () => {
-    const root = fileURLToPath(new URL(".", import.meta.url));
-    const sources = readdirSync(root).filter((name) => name.endsWith(".tsx"));
-    for (const name of sources) {
-      const text = readFileSync(join(root, name), "utf8");
+    // Vite's typed glob: no Node API types are needed (a fresh `npm ci` has none).
+    const sources = import.meta.glob("./*.tsx", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+    expect(Object.keys(sources).length).toBeGreaterThan(5);
+    for (const [name, text] of Object.entries(sources)) {
       expect(text, name).not.toMatch(/href="\/[^"]*\.html/);
       expect(text, name).not.toMatch(/href=\{?["'`]\/(operator|remote|index)\.html/);
     }

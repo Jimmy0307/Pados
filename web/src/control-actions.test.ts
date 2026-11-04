@@ -2,8 +2,6 @@
 // The Control Center's write actions use the existing control API: the same routes, the control token header, the
 // server's idempotency and version checks. Nothing is stored in the browser, and the server's refusal of a result
 // acceptance (RESULT_ACCEPTANCE_REQUIRES_STEP_UP) reaches the person as the code.
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -98,8 +96,10 @@ describe("the control token stays in page memory", () => {
   });
 
   it("is never written to browser storage or a cookie", () => {
-    for (const name of ["control-actions.tsx", "control-center.tsx"]) {
-      const source = readFileSync(fileURLToPath(new URL(name, import.meta.url)), "utf8");
+    const sources = import.meta.glob(["./control-actions.tsx", "./control-center.tsx"],
+      { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+    expect(Object.keys(sources)).toHaveLength(2);
+    for (const [name, source] of Object.entries(sources)) {
       expect(source, name).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie/);
     }
   });
