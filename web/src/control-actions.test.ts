@@ -6,11 +6,13 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { describeFailure } from "./http";
 import {
   CONTROL_TOKEN_HEADER,
   ControlTokenPanel,
+  LOCAL_ONLY,
+  isLocalPage,
   createWorkRequest,
   decideApproval,
   decisionPrompt,
@@ -39,6 +41,9 @@ const approval: ControlApproval = {
 function headerOf(init: RequestInit, name: string): string | undefined {
   return (init.headers as Record<string, string>)[name];
 }
+
+beforeEach(() => { vi.stubGlobal("location", { hostname: "127.0.0.1" }); });
+afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("control API actions", () => {
   it("creates a work request on the existing route with the token and a fresh idempotency key", async () => {
@@ -86,7 +91,7 @@ describe("control API actions", () => {
 
 describe("the control token stays in page memory", () => {
   it("is a masked field that the browser is told not to remember", () => {
-    const html = renderToStaticMarkup(createElement(ControlTokenPanel, { token: "", onChange: () => undefined }));
+    const html = renderToStaticMarkup(createElement(ControlTokenPanel, { token: "", onChange: () => undefined, local: true }));
     expect(html).toContain('type="password"');
     expect(html).toContain('autoComplete="off"');
     expect(html).toMatch(/memory only/);
@@ -97,5 +102,35 @@ describe("the control token stays in page memory", () => {
       const source = readFileSync(fileURLToPath(new URL(name, import.meta.url)), "utf8");
       expect(source, name).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie/);
     }
+  });
+});
+
+describe("the control token is used only on this computer", () => {
+  it("knows a loopback page from any other host", () => {
+    for (const host of ["127.0.0.1", "localhost", "LOCALHOST", "[::1]"]) expect(isLocalPage(host), host).toBe(true);
+    for (const host of ["jimmy0307.github.io", "pados.example.com", "127.0.0.1.example.com", "", "0.0.0.0"]) {
+      expect(isLocalPage(host), host).toBe(false);
+    }
+  });
+
+  it("sends nothing from a page served by another host", async () => {
+    vi.stubGlobal("location", { hostname: "jimmy0307.github.io" });
+    const { sent, fetcher } = recorder(200, { status: "ok", work_request: { id: "w1" } });
+    const failure = await createWorkRequest("tok-1", "p1", "t", "b", fetcher).catch((error: unknown) => error);
+    expect(String(failure)).toContain(LOCAL_ONLY);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("does not offer the token field on another host", () => {
+    const html = renderToStaticMarkup(createElement(ControlTokenPanel, { token: "", onChange: () => undefined, local: false }));
+    expect(html).not.toContain("<input");
+    expect(html).toMatch(/this computer/);
+  });
+
+  it("keeps one idempotency key for a retried request", async () => {
+    const { sent, fetcher } = recorder(200, { status: "ok", work_request: { id: "w1" } });
+    await createWorkRequest("tok-1", "p1", "t", "b", fetcher, "web-work-fixed");
+    await createWorkRequest("tok-1", "p1", "t", "b", fetcher, "web-work-fixed");
+    expect(sent.map((s) => JSON.parse(String(s.init.body)).idempotency_key)).toEqual(["web-work-fixed", "web-work-fixed"]);
   });
 });
