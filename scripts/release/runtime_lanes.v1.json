@@ -44,7 +44,34 @@
         "NETWORK_EXPOSURE"
       ],
       "source": {
-        "format": "e2e-result"
+        "format": "e2e-result",
+        "required_checks": [
+          "postgres_ready",
+          "pados_init_unique_token",
+          "migrations",
+          "pados_doctor",
+          "serve_refuses_default_token",
+          "control_auth",
+          "health_live_and_ready",
+          "project_create",
+          "approval_required_before_route",
+          "human_approval",
+          "plan_visible",
+          "execution_completed",
+          "execution_receipt",
+          "result_candidate_verified_waiting_approval",
+          "broken_reference_waits_for_human_and_is_refused",
+          "uncovered_step_never_runs",
+          "finished_loop_cannot_be_paused_or_cancelled",
+          "revoked_or_consumed_approval_authorizes_nothing",
+          "restart_persistence",
+          "presence_device_enrolled",
+          "standing_session_cannot_decide",
+          "governed_acceptance_live_cas",
+          "consumed_proof_cannot_be_replayed",
+          "acceptance_persists_after_restart",
+          "governed_acceptance_suite"
+        ]
       }
     },
     "vmware-linux-e2e": {
@@ -61,7 +88,34 @@
         "HYPERVISOR_ATTESTATION"
       ],
       "source": {
-        "format": "e2e-result"
+        "format": "e2e-result",
+        "required_checks": [
+          "postgres_ready",
+          "pados_init_unique_token",
+          "migrations",
+          "pados_doctor",
+          "serve_refuses_default_token",
+          "control_auth",
+          "health_live_and_ready",
+          "project_create",
+          "approval_required_before_route",
+          "human_approval",
+          "plan_visible",
+          "execution_completed",
+          "execution_receipt",
+          "result_candidate_verified_waiting_approval",
+          "broken_reference_waits_for_human_and_is_refused",
+          "uncovered_step_never_runs",
+          "finished_loop_cannot_be_paused_or_cancelled",
+          "revoked_or_consumed_approval_authorizes_nothing",
+          "restart_persistence",
+          "presence_device_enrolled",
+          "standing_session_cannot_decide",
+          "governed_acceptance_live_cas",
+          "consumed_proof_cannot_be_replayed",
+          "acceptance_persists_after_restart",
+          "governed_acceptance_suite"
+        ]
       },
       "notes": "E2E_RESULT.json records the platform string, not the hypervisor; a WSL kernel string is refused, but VMware itself is attested only by the vm-summary of the ci-gates lane."
     },
@@ -153,19 +207,56 @@
           "proof-lane": 24,
           "p6-11": 7,
           "migration": 5
+        },
+        "suite_paths": {
+          "d1-binding": [
+            "tests/integration/test_rc2_approval_binding_postgres.py",
+            "tests/integration/test_sec4_approval_lifecycle_postgres.py",
+            "tests/integration/test_rc2_exec1_no_executor_route_postgres.py",
+            "tests/integration/test_op004_idempotency_postgres.py"
+          ],
+          "d4-handoff": [
+            "tests/integration/test_rc2_loop_model_handoff_postgres.py",
+            "tests/integration/test_sec9_model_call_outside_transaction_postgres.py",
+            "tests/integration/test_op004_lease_model_takeover_postgres.py"
+          ],
+          "residual": [
+            "tests/integration/test_residual_plan_amendment_postgres.py",
+            "tests/integration/test_op001_trace_continuity_postgres.py",
+            "tests/integration/test_op004_lease_postgres.py",
+            "tests/integration/test_op004_create_idempotency_postgres.py",
+            "tests/integration/test_op004_db_deadline_postgres.py"
+          ],
+          "proof-lane": [
+            "tests/integration/test_final_convergence_product_loop_postgres.py",
+            "tests/integration/test_final_closure_approval_binding.py",
+            "tests/integration/test_remote_live_ports.py"
+          ],
+          "p6-11": [
+            "tests/integration/test_p6_11_controller_postgres.py",
+            "tests/integration/test_p6_11_gap_postgres.py",
+            "tests/integration/test_p6_11_human_gate_postgres.py",
+            "tests/integration/test_p6_11_outcome_postgres.py"
+          ],
+          "migration": [
+            "tests/integration/test_rc2_migration_0018.py",
+            "tests/integration/test_final_convergence_migration_0017.py"
+          ]
         }
       }
     },
     "github-ci": {
-      "description": "The required GitHub check runs for the exact commit; evidence is the unmodified GET /repos/{owner}/{repo}/commits/{sha}/check-runs response.",
+      "description": "The required GitHub check runs for the exact commit, each bound to its workflow file, job and required steps; evidence is scripts/release/collect_github_actions_evidence.py output, which keeps the check-runs, jobs, workflow-runs and annotations responses unmodified.",
       "platform": "github",
       "max_age_days": 14,
       "claims": [
         "GITHUB_REQUIRED_CHECKS"
       ],
       "source": {
-        "format": "github-check-runs",
+        "format": "github-actions",
         "app": "github-actions",
+        "app_id": 15368,
+        "repository": "Jimmy0307/Pados",
         "required_checks": [
           "linux (lint, types, tests, build)",
           "windows (native suites)",
@@ -175,9 +266,62 @@
           "codeql (python)",
           "codeql (javascript-typescript)"
         ],
-        "app_id": 15368,
-        "repository": "Jimmy0307/Pados"
-      }
+        "github_checks": {
+          "linux (lint, types, tests, build)": {
+            "workflow": ".github/workflows/ci.yml",
+            "required_steps": [
+              "Ruff",
+              "mypy strict",
+              "D1 regression gate (approval subject binding)",
+              "D4 regression gate (TaskLoop model handoff)",
+              "Tests",
+              "Frontend",
+              "Operability contract gate"
+            ]
+          },
+          "windows (native suites)": {
+            "workflow": ".github/workflows/ci.yml",
+            "required_steps": [
+              "Windows-native suites",
+              "D1/D2/D4 regression gates (Windows-native)"
+            ]
+          },
+          "macos (static and contract)": {
+            "workflow": ".github/workflows/ci.yml",
+            "required_steps": [
+              "Static and contract checks"
+            ]
+          },
+          "secret scan and CI policy": {
+            "workflow": ".github/workflows/security.yml",
+            "required_steps": [
+              "Repository secret scan (values are never printed)",
+              "CI authority boundary policy"
+            ]
+          },
+          "dependency review": {
+            "workflow": ".github/workflows/security.yml",
+            "required_steps": [
+              "Dependency review",
+              "Classify dependency review outcome"
+            ],
+            "blocker_annotation": "DEPENDENCY_REVIEW=ENVIRONMENT_BLOCKER"
+          },
+          "codeql (python)": {
+            "workflow": ".github/workflows/security.yml",
+            "required_steps": [
+              "Analyze"
+            ]
+          },
+          "codeql (javascript-typescript)": {
+            "workflow": ".github/workflows/security.yml",
+            "required_steps": [
+              "Analyze"
+            ]
+          }
+        }
+      },
+      "notes": "A dependency review that reports DEPENDENCY_REVIEW=ENVIRONMENT_BLOCKER (dependency graph disabled) concluded success without reviewing anything: the lane is NOT_VALIDATED, not PASS. The workflow identity is its path at the commit; what that file does stays with code review."
     },
     "windows-full-suite": {
       "description": "pytest tests --ignore=tests/integration on Windows.",

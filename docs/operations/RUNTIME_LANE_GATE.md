@@ -2,10 +2,13 @@
 
 Contract: [`PADOS_SERVICE_ENGINEERING_STANDARD.md`](../PADOS_SERVICE_ENGINEERING_STANDARD.md) §9 (release rule). Code:
 `src/pados/release/runtime_lanes.py`, `scripts/release/runtime_lane_gate.py`. Registry:
-`scripts/release/runtime_lanes.v1.json`. Source reader: `src/pados/release/runtime_lane_sources.py`. Index tool:
+`scripts/release/runtime_lanes.v1.json`. Source readers: `src/pados/release/runtime_lane_sources.py`,
+`src/pados/release/runtime_lane_github.py`. GitHub collector: `scripts/release/collect_github_actions_evidence.py`.
+Index tool:
 `src/pados/release/runtime_lane_index.py`, `scripts/release/runtime_lane_index.py`. Tests:
 `tests/release_supply_chain/test_op002_runtime_lane_gate.py`, `tests/release_supply_chain/test_op002_runtime_lane_index.py`,
-`tests/release_supply_chain/test_op002_lane_source_binding.py`, `tests/release_supply_chain/test_op002_lane_sources.py`.
+`tests/release_supply_chain/test_op002_lane_source_binding.py`, `tests/release_supply_chain/test_op002_lane_sources.py`,
+`tests/release_supply_chain/test_op002_lane_source_identity.py`.
 
 The gate interprets evidence and nothing else. It grants no approval, acceptance or release decision (every report
 says `semantic_authority: NONE`). `promotion_check.py`, the approval paths and the WebAuthn/CAS acceptance path stay
@@ -26,12 +29,12 @@ which is reviewed with the code; neither an evidence index nor an index spec can
 
 | Lane | Source format | Required checks |
 |---|---|---|
-| `windows-native-e2e`, `vmware-linux-e2e` | `e2e-result` (`E2E_RESULT.json`) | `verdict` PASS and every step PASS; the platform string must match (a WSL kernel is refused) |
+| `windows-native-e2e`, `vmware-linux-e2e` | `e2e-result` (`E2E_RESULT.json`, runner contract `pados.local-dogfood-e2e.v1`) | the registry's complete step list (kept equal to the steps the runner records by a test): each step exactly once and PASS, no other step, `run_mode: full`, `verdict` PASS; the platform string must match (a WSL kernel is refused) |
 | `windows-ci-gates` | `gate-summary` (`run_gates.ps1`, which must record its `platform`) | the 18 CI gates, from `ci_policy` to `npm_cli` |
 | `windows-full-suite` | `gate-summary` of its own run (`run_gates.ps1 -Only full_pytest`) | `full_pytest` |
 | `vmware-linux-ci-gates` | `vm-summary` (`virt` must be `vmware`) | the 19 chain gates, including `full_pytest` and `integration_pg` |
-| `postgres-integration` | `postgres-gate` (`postgres-integration.json`, schema v1) | all six suites; each suite report beside it is re-hashed and must be PASS for the same commit with no skips and at least the registry's `min_passed` tests (kept equal to the runner's `MIN_TESTS` by a test) |
-| `github-ci` | `github-check-runs` (the unmodified `GET /repos/{owner}/{repo}/commits/{sha}/check-runs` response) | the seven required checks; every run must belong to `Jimmy0307/Pados` (a fork shares the commit, not the repository), be from the `github-actions` app (slug and id 15368), be completed and `success` |
+| `postgres-integration` | `postgres-gate` (`postgres-integration.json`, schema v1) | all six suites; each suite report beside it is re-hashed and must be that suite's own report (`gate` = `postgres-<suite>`, `paths` exactly the registry's `suite_paths`, none missing or empty), PASS for the same commit with no skips and at least the registry's `min_passed` tests (both kept equal to the runner's `SUITE_PATHS` and `MIN_TESTS` by tests) |
+| `github-ci` | `github-actions` (`collect_github_actions_evidence.py`: the check-runs, jobs, workflow-runs and annotations responses, unmodified) | the seven required checks. Every run must belong to `Jimmy0307/Pados` (a fork shares the commit, not the repository) and the `github-actions` app (slug and id 15368), be backed by its own job in a run of the registry's workflow file for that check (`ci.yml` or `security.yml`), be completed and `success`, and show the registry's required steps as executed (`success`). Freshness counts from the oldest required run |
 | model, REA, OpenMAIC, AI-Scientist-v3 lanes | none | can never PASS today |
 
 A **target** names the lanes it requires:
@@ -50,6 +53,12 @@ Documented limits that stay visible until real evidence exists:
 - `rea-runtime` and `openmaic-runtime` (PR #16) and `ai-scientist-v3-runtime` (PR #17, draft) are `NOT_VALIDATED`.
 - `windows-full-suite` is documented as `FAIL` (R19-3). A run whose failures match the baseline is recorded as `FAIL`
   with its comparison, never as `PASS`.
+- A reduced E2E run (`local_dogfood_e2e.py --skip-acceptance-suite`) records `run_mode: skip-acceptance-suite` and is
+  `NOT_VALIDATED` (`SOURCE_RUN_REDUCED`) for both E2E lanes. No target accepts a reduced run today; if one ever does,
+  it gets its own lane and claim, with the governed acceptance suite in its `does_not_cover`.
+- `dependency review` cannot run while the repository's Dependency graph is disabled. The job then concludes `success`
+  but writes the `DEPENDENCY_REVIEW=ENVIRONMENT_BLOCKER` annotation; the lane is `NOT_VALIDATED`
+  (`SOURCE_CHECK_ENVIRONMENT_BLOCKED`), never PASS. A run where the review step really executed and succeeded passes.
 
 ## Evidence records
 
@@ -79,8 +88,9 @@ the runner's own record is, and let `runtime_lane_index.py build` read the rest 
    "evidence_path": "e2e-windows-<sha>/E2E_RESULT.json"},
   {"lane_id": "postgres-integration", "platform": "windows", "command": "postgres_integration_gate.py --recreate",
    "evidence_path": "windows-postgres-gate-<sha>/postgres-integration.json"},
-  {"lane_id": "github-ci", "platform": "github", "command": "gh api repos/<o>/<r>/commits/<sha>/check-runs?per_page=100",
-   "evidence_path": "github-checks-<sha>.json"},
+  {"lane_id": "github-ci", "platform": "github",
+   "command": "collect_github_actions_evidence.py --repository Jimmy0307/Pados --commit <sha>",
+   "evidence_path": "github-actions-<sha>.json"},
   {"lane_id": "windows-full-suite", "platform": "windows", "command": "pytest -q tests", "exit_code": 1,
    "evidence_path": "windows-<sha>/full_pytest_baseline_compare.json",
    "notes": "126 failures, identical to the recorded Windows baseline"},
@@ -111,8 +121,10 @@ record cannot make it fresh. The finish time inside the record is still only as 
 
 The PostgreSQL record must be the schema v1 aggregate the gate writes from this commit on. Older aggregates (status
 and suite names only) carry no commit, so they are refused (`SOURCE_FORMAT_INVALID`); run the gate again. The GitHub
-record must be the raw API response for the commit, not a summary; a response that holds fewer runs than its
-`total_count` (a truncated page) is refused.
+record must be the collector's bundle for the commit, not a summary; the bare check-runs response used before carries
+no workflow identity and is refused, as is a check-runs page that holds fewer runs than its `total_count` (the
+collector also refuses a full annotations page, since a blocker marker could be on the next one). E2E records written
+before the runner contract (no `runner_contract` or `run_mode`) are refused; run the E2E again.
 
 ## How a lane is judged
 
@@ -134,14 +146,19 @@ as `PASS` / `VERIFIED`. Every other outcome blocks the target:
 | SHA-256 differs | FAIL | `EVIDENCE_HASH_MISMATCH` |
 | The same evidence file cited for two lanes | FAIL (both) | `EVIDENCE_REUSED_ACROSS_LANES` |
 | The runner record is for another commit, or a GitHub check is still running | NOT_VALIDATED | `SOURCE_COMMIT_MISMATCH` / `SOURCE_CHECK_INCOMPLETE` |
+| An E2E run in a reduced mode (`--skip-acceptance-suite`) | NOT_VALIDATED | `SOURCE_RUN_REDUCED` |
+| A required GitHub step was skipped or did not succeed (`continue-on-error`), or the job reported an environment blocker | NOT_VALIDATED | `SOURCE_CHECK_NOT_EXECUTED` / `SOURCE_CHECK_ENVIRONMENT_BLOCKED` |
 | The runner record is not of the lane's format, or lacks its finish time or platform | FAIL | `SOURCE_FORMAT_INVALID` |
 | A GitHub record from another repository | FAIL | `SOURCE_REPOSITORY_MISMATCH` |
-| A required check is absent from the record | FAIL | `SOURCE_GATE_MISSING` |
+| A required check or E2E step is absent from the record | FAIL | `SOURCE_GATE_MISSING` |
+| An E2E step appears twice, or a step outside the registry's list appears | FAIL | `SOURCE_STEP_REPEATED` / `SOURCE_STEP_UNEXPECTED` |
+| A PostgreSQL suite report names another suite or other test paths | FAIL | `SOURCE_SUITE_IDENTITY_MISMATCH` |
+| A GitHub check run without its own job, or from another workflow file, repository or commit | FAIL | `SOURCE_JOB_IDENTITY_MISMATCH` / `SOURCE_WORKFLOW_MISMATCH` |
 | A PostgreSQL suite report is missing or was edited | FAIL | `SOURCE_SUITE_REPORT_MISSING` / `SOURCE_SUITE_REPORT_HASH_MISMATCH` |
 | The record's platform (or hypervisor) is not the lane's | FAIL | `SOURCE_PLATFORM_MISMATCH` |
 | The record itself does not say PASS for every required check | FAIL | `SOURCE_RECORD_NOT_PASS` |
-| The record finished longer ago than `max_age_days` | NOT_VALIDATED | `EVIDENCE_STALE` |
-| The record finished in the future (beyond 5 minutes of clock skew) | FAIL | `EVIDENCE_FROM_THE_FUTURE` |
+| The record (for GitHub: its oldest required run) finished longer ago than `max_age_days` | NOT_VALIDATED | `EVIDENCE_STALE` |
+| The record (for GitHub: any required run) finished in the future (beyond 5 minutes of clock skew) | FAIL | `EVIDENCE_FROM_THE_FUTURE` |
 | A record for a lane the registry does not know | blocks the target | `UNKNOWN_LANE` |
 
 Evidence binds to the exact commit, so a lane measured at an earlier commit, a model measurement included, has to be
@@ -150,8 +167,12 @@ run again for the commit being judged.
 ## What the gate does not prove
 
 The gate and the index prove *binding*: these bytes, unchanged, are a record in the lane's registered format that
-says PASS for every required check, for this commit and platform, recently enough. They do not authenticate who
-wrote the bytes, and they do not prove that the evidence is true, complete or sufficient. A log that says PASS for the wrong test set, a gate
+says PASS for every required check, for this commit and platform, recently enough. A SHA-256 proves that the bytes
+are the ones the index (or the PostgreSQL aggregate) named; it does not authenticate who wrote them, and it does not
+prove that the evidence is true, complete or sufficient. A suite report written by hand with the right gate name and
+paths and re-hashed into the aggregate still reads as PASS (a test pins that limit). The GitHub workflow identity is
+the workflow file's path at the commit; what that file does at the commit is code under review. The saved GitHub
+responses are not signed by GitHub. A log that says PASS for the wrong test set, a gate
 script that skips a check, or an E2E run against a mocked dependency all bind cleanly. Content truth stays with human
 review of the evidence and the existing approval and acceptance paths. A lane's `claims` and `does_not_cover` in the
 registry say what a verified lane may be quoted for; nothing outside `claims` may be quoted.
