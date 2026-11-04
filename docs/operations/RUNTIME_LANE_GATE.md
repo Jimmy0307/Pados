@@ -128,6 +128,16 @@ before the runner contract (no `runner_contract` or `run_mode`) are refused; run
 
 ## How a lane is judged
 
+A failure is never hidden behind a weaker reason. The reader looks at every required part before it picks one: a
+completed required GitHub run that did not succeed, or an E2E record whose verdict or any step failed (reduced run
+or not), is `SOURCE_RECORD_NOT_PASS` (FAIL) even when another check is still running (`SOURCE_CHECK_INCOMPLETE`) or
+the run was reduced (`SOURCE_RUN_REDUCED`). The GitHub collector asks for the latest attempt of each run
+(`filter=latest`), and a bundle that lists one check run id twice is refused. Whether the jobs API reports a
+`continue-on-error` step that failed as `failure` or `success` does not matter here: the first gives
+`SOURCE_CHECK_NOT_EXECUTED`, the second leaves the blocker annotation to give `SOURCE_CHECK_ENVIRONMENT_BLOCKED`;
+both are NOT_VALIDATED.
+
+
 `runtime_lane_gate.py` (report and `--claim`) does not trust the index's PASS, exit code or `recorded_at`. For a PASS
 record it checks the index fields, then re-reads the evidence file under the lane's registry `source`, exactly as the
 builder does. The runner record's own verdict, commit, platform and finish time decide. A required lane counts only

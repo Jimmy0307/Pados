@@ -32,7 +32,6 @@ saved them.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime
 from typing import Any
 
 from pados.release.runtime_lane_sources import GithubCheck, LaneSource, SourceError, SourceReading, aware_time
@@ -55,6 +54,9 @@ def _check_runs(record: Mapping[str, Any], source: LaneSource, commit: str) -> l
         raise SourceError("SOURCE_FORMAT_INVALID")
     if page["total_count"] != len(runs):
         raise SourceError("SOURCE_FORMAT_INVALID", "TRUNCATED_PAGE")
+    ids = [run.get("id") for run in runs]
+    if len(set(map(str, ids))) != len(ids):
+        raise SourceError("SOURCE_FORMAT_INVALID", "DUPLICATE_CHECK_RUN_ID")
     if any(run.get("head_sha") != commit for run in runs):
         raise SourceError("SOURCE_COMMIT_MISMATCH")
     prefix = f"https://api.github.com/repos/{source.repository}/check-runs/"
@@ -103,6 +105,17 @@ def _executed(job: Mapping[str, Any], run: Mapping[str, Any], name: str, check: 
         raise SourceError("SOURCE_CHECK_ENVIRONMENT_BLOCKED", name)
 
 
+def _required_runs(source: LaneSource, runs: Sequence[Mapping[str, Any]]
+                   ) -> list[tuple[str, GithubCheck, Mapping[str, Any]]]:
+    required: list[tuple[str, GithubCheck, Mapping[str, Any]]] = []
+    for name in source.required_checks:
+        named = _by_app(runs, name, source)
+        if not named:
+            raise SourceError("SOURCE_GATE_MISSING", name)
+        required.extend((name, source.github_checks[name], run) for run in named)
+    return required
+
+
 def read_github_actions(source: LaneSource, record: Mapping[str, Any], commit: str) -> SourceReading:
     if record.get("schema_version") != GITHUB_ACTIONS_SCHEMA:
         raise SourceError("SOURCE_FORMAT_INVALID")
@@ -110,29 +123,23 @@ def read_github_actions(source: LaneSource, record: Mapping[str, Any], commit: s
         raise SourceError("SOURCE_REPOSITORY_MISMATCH")
     if record.get("commit") != commit:
         raise SourceError("SOURCE_COMMIT_MISMATCH")
-    runs = _check_runs(record, source, commit)
-    moments: list[datetime] = []
-    failed = False
-    passed: list[tuple[Mapping[str, Any], Mapping[str, Any], str, GithubCheck]] = []
-    for name in source.required_checks:
-        check = source.github_checks[name]
-        named = _by_app(runs, name, source)
-        if not named:
-            raise SourceError("SOURCE_GATE_MISSING", name)
-        if any(run.get("status") != "completed" for run in named):
-            raise SourceError("SOURCE_CHECK_INCOMPLETE", name)
-        for run in named:
-            job = _job_and_workflow(run, name, check, record, source, commit)
-            moment = aware_time(run.get("completed_at"))
-            if moment is None:
-                raise SourceError("SOURCE_FORMAT_INVALID", name)
-            moments.append(moment)
-            if run.get("conclusion") == "success" and job.get("conclusion") == "success":
-                passed.append((job, run, name, check))
-            else:
-                failed = True
-    if failed:  # a failed required check is a FAIL, reported before any not-executed reason
-        return SourceReading(1, min(moments), "github", newest=max(moments))
-    for job, run, name, check in passed:
+    required = _required_runs(source, _check_runs(record, source, commit))
+    completed = [run for _, _, run in required if run.get("status") == "completed"]
+    moments = [aware_time(run.get("completed_at")) for run in completed]
+    if any(moment is None for moment in moments):
+        raise SourceError("SOURCE_FORMAT_INVALID", "COMPLETED_AT")
+    times = [moment for moment in moments if moment is not None]
+    # Every required run is looked at before any reason is chosen, so a completed failure is reported as a FAIL even
+    # when another required check is still running or not bound to its workflow.
+    if any(run.get("conclusion") != "success" for run in completed):
+        return SourceReading(1, min(times), "github", newest=max(times))
+    incomplete = sorted({name for name, _, run in required if run.get("status") != "completed"})
+    if incomplete:
+        raise SourceError("SOURCE_CHECK_INCOMPLETE", ",".join(incomplete))
+    bound = [(_job_and_workflow(run, name, check, record, source, commit), run, name, check)
+             for name, check, run in required]
+    if any(job.get("conclusion") != "success" for job, _, _, _ in bound):
+        return SourceReading(1, min(times), "github", newest=max(times))
+    for job, run, name, check in bound:
         _executed(job, run, name, check, record)
-    return SourceReading(0, min(moments), "github", newest=max(moments))
+    return SourceReading(0, min(times), "github", newest=max(times))

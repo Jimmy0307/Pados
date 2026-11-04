@@ -6,7 +6,8 @@ Usage: collect_github_actions_evidence.py --repository OWNER/REPO --commit SHA -
 Uses the GitHub CLI (``gh api``), already signed in; this script never reads or prints a token. It saves four REST
 responses unmodified inside one JSON file (schema ``pados.github-actions-evidence.v1``):
 
-* ``check_runs``: ``GET /repos/{repo}/commits/{sha}/check-runs?per_page=100`` (refused if it does not fit one page);
+* ``check_runs``: ``GET /repos/{repo}/commits/{sha}/check-runs?filter=latest&per_page=100`` (the latest attempt of
+  each run; refused if it does not fit one page);
 * ``jobs``: ``GET /repos/{repo}/actions/jobs/{id}`` for every GitHub Actions check run;
 * ``workflow_runs``: ``GET /repos/{repo}/actions/runs/{run_id}`` for every job's workflow run;
 * ``annotations``: ``GET /repos/{repo}/check-runs/{id}/annotations?per_page=100`` for every GitHub Actions check
@@ -47,7 +48,8 @@ def gh_api(endpoint: str) -> Any:
 def collect(repository: str, commit: str, fetch: Fetch = gh_api) -> dict[str, Any]:
     if not _REPOSITORY.match(repository) or not _COMMIT.match(commit):
         raise SystemExit("GITHUB_EVIDENCE_BAD_ARGUMENTS")
-    page = fetch(f"repos/{repository}/commits/{commit}/check-runs?per_page=100")
+    # filter=latest (the API default, stated): a re-run attempt replaces the run it supersedes.
+    page = fetch(f"repos/{repository}/commits/{commit}/check-runs?filter=latest&per_page=100")
     runs = page.get("check_runs") if isinstance(page, dict) else None
     if not isinstance(runs, list) or page.get("total_count") != len(runs):
         raise SystemExit("GITHUB_EVIDENCE_CHECK_RUNS_DO_NOT_FIT_ONE_PAGE")

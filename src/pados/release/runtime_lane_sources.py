@@ -227,16 +227,17 @@ def _e2e_result(source: LaneSource, record: Mapping[str, Any], path: Path, commi
     if record.get("runner_contract") != E2E_RUNNER_CONTRACT:
         raise SourceError("SOURCE_FORMAT_INVALID", "RUNNER_CONTRACT")
     _expect_commit(record.get("commit"), commit)
+    finished = _finished(record)
+    platform = _platform_family(record.get("platform"))
+    if record["verdict"] != "PASS" or any(step.get("status") != "PASS" for step in steps):
+        # A failure stays a failure, whatever mode it ran in and whatever steps it recorded.
+        return SourceReading(1, finished, platform)
     if record.get("run_mode") != E2E_FULL_MODE:
         raise SourceError("SOURCE_RUN_REDUCED", str(record.get("run_mode"))[:40])
-    finished = _finished(record)
     names = [step["step"] for step in steps]
     repeated = sorted({name for name in names if names.count(name) > 1})
     if repeated:
         raise SourceError("SOURCE_STEP_REPEATED", ",".join(repeated)[:200])
-    platform = _platform_family(record.get("platform"))
-    if record["verdict"] != "PASS" or any(step.get("status") != "PASS" for step in steps):
-        return SourceReading(1, finished, platform)  # a failure stays a failure, whatever steps it recorded
     missing = [name for name in source.required_checks if name not in names]
     if missing:
         raise SourceError("SOURCE_GATE_MISSING", ",".join(missing)[:200])
