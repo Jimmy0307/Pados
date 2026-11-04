@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""OP-002: the PostgreSQL gate and GitHub check-run records as lane sources, and the wrong, partial or stale ones."""
+"""OP-002: the PostgreSQL gate and GitHub Actions records as lane sources, and the wrong, partial or stale ones."""
 from __future__ import annotations
 
 import hashlib
@@ -13,6 +13,8 @@ import pytest
 
 from pados.release.runtime_lane_sources import SourceError, read_source
 from pados.release.runtime_lanes import LaneStatus, evaluate, load_evidence, load_registry
+from tests.release_supply_chain.lane_fixtures import GithubBundle, stamp
+from tests.release_supply_chain.lane_fixtures import suite_report as _report_body
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = load_registry(ROOT / "scripts" / "release" / "runtime_lanes.v1.json")
@@ -27,8 +29,7 @@ def _now() -> datetime:
 
 
 def _suite_report(root: Path, suite: str, **change: Any) -> str:
-    body = {"gate": f"postgres-{suite}", "status": "PASS", "counts": {"passed": 40}, "skipped": [], "problems": [],
-            "source_commit": SHA} | change
+    body = _report_body(PG, suite, commit=SHA, **change)  # type: ignore[arg-type]
     path = root / f"postgres-{suite}.json"
     path.write_text(json.dumps(body), encoding="utf-8")
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -86,6 +87,7 @@ def test_the_gate_writes_the_record_the_reader_accepts(tmp_path: Path) -> None:
     head = module._summary(tmp_path, {})["source_commit"]  # the checkout's own HEAD
     for suite in PG.required_checks:  # type: ignore[union-attr]
         _suite_report(tmp_path, suite, source_commit=head)
+    module.SUITE_PATHS = PG.suite_paths  # type: ignore[union-attr]  # unchanged; the identity test compares them
     summary = module._summary(tmp_path, dict.fromkeys(PG.required_checks, 0))  # type: ignore[union-attr]
     path = tmp_path / "postgres-integration.json"
     path.write_text(json.dumps(summary), encoding="utf-8")
@@ -93,49 +95,56 @@ def test_the_gate_writes_the_record_the_reader_accepts(tmp_path: Path) -> None:
     assert set(summary) >= {"status", "suites"}  # the existing fields stay for current readers
 
 
-# --- GitHub check runs -------------------------------------------------------------------------------------------
+# --- GitHub Actions (workflow identity and per-check freshness: test_op002_lane_source_identity.py) ----------------
 
 
-def _run(name: str, **change: Any) -> dict[str, Any]:
-    return {"name": name, "head_sha": SHA, "status": "completed", "conclusion": "success",
-            "url": "https://api.github.com/repos/Jimmy0307/Pados/check-runs/1",
-            "completed_at": _now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "app": {"slug": "github-actions", "id": 15368}} | change
-
-
-def _gh(root: Path, runs: list[dict[str, Any]] | None = None, total: int | None = None) -> Path:
-    runs = runs if runs is not None else [_run(name) for name in GH.required_checks]  # type: ignore[union-attr]
-    path = root / "check-runs.json"
-    path.write_text(json.dumps({"total_count": len(runs) if total is None else total, "check_runs": runs}),
-                    encoding="utf-8")
+def _gh(root: Path, bundle: GithubBundle | None = None) -> Path:
+    path = root / "github-actions.json"
+    path.write_text(json.dumps((bundle or GithubBundle(GH, SHA)).record()), encoding="utf-8")  # type: ignore[arg-type]
     return path
 
 
 def test_complete_successful_check_runs_read_as_pass(tmp_path: Path) -> None:
-    extra = _run(GH.required_checks[0])  # type: ignore[union-attr]  # the push and pull_request runs of one job
-    assert read_source(GH, _gh(tmp_path, [*[_run(n) for n in GH.required_checks], extra]),  # type: ignore[arg-type,union-attr]
-                       commit=SHA).exit_code == 0
+    bundle = GithubBundle(GH, SHA)  # type: ignore[arg-type]
+    bundle.add(GH.required_checks[0])  # type: ignore[union-attr]  # the push and pull_request runs of one job
+    assert read_source(GH, _gh(tmp_path, bundle), commit=SHA).exit_code == 0  # type: ignore[arg-type]
 
 
 def test_check_run_defects(tmp_path: Path) -> None:
     names = list(GH.required_checks)  # type: ignore[union-attr]
-    assert _code(_gh(tmp_path, [_run(n) for n in names[1:]]), GH) == "SOURCE_GATE_MISSING"
-    assert _code(_gh(tmp_path, [_run(n, app={"slug": "someone-else"}) for n in names]), GH) == "SOURCE_GATE_MISSING"
-    assert _code(_gh(tmp_path, [_run(n, head_sha="e" * 40) for n in names]), GH) == "SOURCE_COMMIT_MISMATCH"
-    assert _code(_gh(tmp_path, [_run(names[0], status="in_progress", conclusion=None),
-                                *[_run(n) for n in names[1:]]]), GH) == "SOURCE_CHECK_INCOMPLETE"
-    assert _code(_gh(tmp_path, total=len(names) + 30), GH) == "SOURCE_FORMAT_INVALID"  # a truncated first page
+
+    def bundle(change: Any = None) -> GithubBundle:
+        made = GithubBundle(GH, SHA)  # type: ignore[arg-type]
+        if change is not None:
+            for run in made.runs:
+                change(run)
+        return made
+
+    missing = bundle()
+    missing.runs = [run for run in missing.runs if run["name"] != names[0]]
+    assert _code(_gh(tmp_path, missing), GH) == "SOURCE_GATE_MISSING"
+    assert _code(_gh(tmp_path, bundle(lambda r: r.update(app={"slug": "someone-else"}))), GH) == "SOURCE_GATE_MISSING"
+    assert _code(_gh(tmp_path, bundle(lambda r: r.update(head_sha="e" * 40))), GH) == "SOURCE_COMMIT_MISMATCH"
+    running = bundle()
+    running.runs[0].update(status="in_progress", conclusion=None)
+    assert _code(_gh(tmp_path, running), GH) == "SOURCE_CHECK_INCOMPLETE"
+    truncated = GithubBundle(GH, SHA)  # type: ignore[arg-type]
+    path = tmp_path / "truncated.json"
+    record = truncated.record()
+    record["check_runs"]["total_count"] += 30  # a truncated first page
+    path.write_text(json.dumps(record), encoding="utf-8")
+    assert _code(path, GH) == "SOURCE_FORMAT_INVALID"
     fork = "https://api.github.com/repos/someone/Pados/check-runs/9"  # a fork has the same commit SHA
-    assert _code(_gh(tmp_path, [_run(n, url=fork) for n in names]), GH) == "SOURCE_REPOSITORY_MISMATCH"
+    assert _code(_gh(tmp_path, bundle(lambda r: r.update(url=fork))), GH) == "SOURCE_REPOSITORY_MISMATCH"
     other_app = {"slug": "github-actions", "id": 1}  # the right slug from another app id
-    assert _code(_gh(tmp_path, [_run(n, app=other_app) for n in names]), GH) == "SOURCE_GATE_MISSING"
-    failed = [_run(names[0], conclusion="failure"), *[_run(n) for n in names]]  # one run of a name failed
+    assert _code(_gh(tmp_path, bundle(lambda r: r.update(app=other_app))), GH) == "SOURCE_GATE_MISSING"
+    failed = GithubBundle(GH, SHA)  # type: ignore[arg-type]
+    failed.add(names[0], conclusion="failure")  # one run of a name failed
     assert read_source(GH, _gh(tmp_path, failed), commit=SHA).exit_code == 1  # type: ignore[arg-type]
 
 
 def test_check_runs_at_the_gate_bind_commit_and_freshness(tmp_path: Path) -> None:
-    old = (_now() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    names = GH.required_checks  # type: ignore[union-attr]
+    old = _now() - timedelta(days=30)
 
     def verdict(path: Path) -> tuple[LaneStatus, str]:
         record = {"lane_id": "github-ci", "status": "PASS", "commit": SHA, "platform": "github", "command": "gh api",
@@ -147,10 +156,13 @@ def test_check_runs_at_the_gate_bind_commit_and_freshness(tmp_path: Path) -> Non
         return found.status, found.reason
 
     assert verdict(_gh(tmp_path)) == (LaneStatus.PASS, "VERIFIED")
-    assert verdict(_gh(tmp_path, [_run(n, completed_at=old) for n in names])) == (LaneStatus.NOT_VALIDATED,
-                                                                                  "EVIDENCE_STALE")
-    assert verdict(_gh(tmp_path, [_run(n, conclusion="failure") for n in names])) == (LaneStatus.FAIL,
-                                                                                      "SOURCE_RECORD_NOT_PASS")
+    stale = GithubBundle(GH, SHA, completed=old)  # type: ignore[arg-type]
+    assert stamp(old) == stale.runs[0]["completed_at"]
+    assert verdict(_gh(tmp_path, stale)) == (LaneStatus.NOT_VALIDATED, "EVIDENCE_STALE")
+    failed = GithubBundle(GH, SHA)  # type: ignore[arg-type]
+    for run in failed.runs:
+        run["conclusion"] = "failure"
+    assert verdict(_gh(tmp_path, failed)) == (LaneStatus.FAIL, "SOURCE_RECORD_NOT_PASS")
 
 
 def test_a_suite_below_the_registry_minimum_is_not_a_pass(tmp_path: Path) -> None:

@@ -13,6 +13,7 @@ import pytest
 
 from pados.release.runtime_lane_index import IndexBuildError, build_index, load_spec, verify_index
 from pados.release.runtime_lanes import LaneStatus, evaluate, load_registry
+from tests.release_supply_chain.lane_fixtures import e2e_record
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = load_registry(ROOT / "scripts" / "release" / "runtime_lanes.v1.json")
@@ -46,9 +47,10 @@ def _gate_summary(root: Path, *, commit: str = SHA, exits: dict[str, int | None]
 
 def _e2e(root: Path, *, platform: str = "Windows-11", verdict: str = "PASS", name: str = "E2E_RESULT.json") -> Path:
     path = root / name
-    path.write_text(json.dumps({"verdict": verdict, "commit": SHA, "platform": platform,
-                                "finished": datetime.now(UTC).isoformat(),
-                                "steps": [{"step": "one", "status": verdict}]}), encoding="utf-8")
+    record = e2e_record(REGISTRY.lanes["windows-native-e2e"].source, commit=SHA, platform=platform,  # type: ignore[arg-type]
+                        verdict=verdict)
+    record["steps"][-1]["status"] = verdict
+    path.write_text(json.dumps(record), encoding="utf-8")
     return path
 
 

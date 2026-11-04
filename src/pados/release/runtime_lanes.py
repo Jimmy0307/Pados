@@ -223,9 +223,9 @@ def _check_pass(record: EvidenceRecord, lane: LaneDefinition, *, commit: str, no
         return LaneStatus.FAIL, "SOURCE_PLATFORM_MISMATCH"
     if reading.exit_code != 0:
         return LaneStatus.FAIL, "SOURCE_RECORD_NOT_PASS"
-    if reading.finished > now + _CLOCK_SKEW:
+    if max(reading.finished, reading.newest or reading.finished) > now + _CLOCK_SKEW:
         return LaneStatus.FAIL, "EVIDENCE_FROM_THE_FUTURE"
-    if now - reading.finished > timedelta(days=lane.max_age_days):
+    if now - reading.finished > timedelta(days=lane.max_age_days):  # the oldest required part decides
         return LaneStatus.NOT_VALIDATED, "EVIDENCE_STALE"
     return LaneStatus.PASS, "VERIFIED"
 

@@ -40,11 +40,11 @@ def _registry() -> RuntimeLaneRegistry:
         "targets": {"dogfood": {"description": "test target", "required_lanes": ["alpha", "beta"]}},
         "lanes": {
             "alpha": {"description": "alpha lane", "platform": "windows", "max_age_days": 7, "claims": ["A"],
-                      "source": {"format": "e2e-result"}},
+                      "source": {"format": "e2e-result", "required_checks": ["alpha"]}},
             "beta": {"description": "beta lane", "platform": "linux", "max_age_days": 7, "claims": ["B"],
-                     "source": {"format": "e2e-result"}},
+                     "source": {"format": "e2e-result", "required_checks": ["beta"]}},
             "gamma": {"description": "optional lane", "platform": "linux", "max_age_days": 7, "claims": ["C"],
-                      "source": {"format": "e2e-result"}},
+                      "source": {"format": "e2e-result", "required_checks": ["gamma"]}},
         },
     })
 
@@ -52,7 +52,8 @@ def _registry() -> RuntimeLaneRegistry:
 def _record(tmp_path: Path, lane: str, *, finished: datetime | None = None, **overrides: Any) -> dict[str, Any]:
     evidence = tmp_path / f"{lane}.json"
     platform = {"windows": "Windows-11", "linux": "Linux-6.8"}[_registry().lanes[lane].platform]
-    evidence.write_text(json.dumps({"verdict": "PASS", "commit": COMMIT, "platform": platform,
+    evidence.write_text(json.dumps({"runner_contract": "pados.local-dogfood-e2e.v1", "run_mode": "full",
+                                    "verdict": "PASS", "commit": COMMIT, "platform": platform,
                                     "finished": (finished or NOW - timedelta(days=1)).isoformat(),
                                     "steps": [{"step": lane, "status": "PASS"}]}), encoding="utf-8")
     record = {"lane_id": lane, "status": "PASS", "commit": COMMIT, "platform": _registry().lanes[lane].platform,

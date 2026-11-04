@@ -22,6 +22,7 @@ import pytest
 
 from pados.release.runtime_lane_index import IndexBuildError, build_index, load_spec
 from pados.release.runtime_lanes import LaneStatus, evaluate, load_evidence, load_registry
+from tests.release_supply_chain.lane_fixtures import e2e_record
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_PATH = ROOT / "scripts" / "release" / "runtime_lanes.v1.json"
@@ -103,9 +104,8 @@ def test_a_record_for_another_commit_is_not_validated(tmp_path: Path) -> None:
 
 
 def test_a_source_of_the_wrong_format_or_platform_fails(tmp_path: Path) -> None:
-    e2e = _write(tmp_path / "E2E_RESULT.json", {"verdict": "PASS", "commit": SHA, "platform": "Linux-6.8",
-                                                "steps": [{"step": "a", "status": "PASS"}],
-                                                "finished": _now().isoformat()})
+    e2e = _write(tmp_path / "E2E_RESULT.json", e2e_record(REGISTRY.lanes["windows-native-e2e"].source,  # type: ignore[arg-type]
+                                                          commit=SHA, platform="Linux-6.8"))
     assert _verdict(tmp_path, _hand_record("windows-native-e2e", e2e, tmp_path),
                     lane="windows-native-e2e") == (LaneStatus.FAIL, "SOURCE_PLATFORM_MISMATCH")
     # An E2E result offered as the Windows gate summary is not a gate summary.

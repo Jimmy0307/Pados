@@ -30,6 +30,8 @@ The WebAuthn device in steps 8-9 is the software authenticator in tests/remote/p
 key and genuine ES256 assertions checked by the production verifier); it stands in for a phone or browser.
 ``--cluster-only`` starts the private cluster, prints the environment for integration tests and waits.
 Evidence: ``<out>/E2E_RESULT.json`` plus per-step logs. Exit 0 only when every step passed.
+``--skip-acceptance-suite`` records ``run_mode: skip-acceptance-suite``; such a run is NOT_VALIDATED for the E2E
+runtime lanes, which require the registry's complete step list from a ``full`` run.
 """
 from __future__ import annotations
 
@@ -692,7 +694,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
         shutil.rmtree(root, ignore_errors=True)
     passed = all(step["status"] == "PASS" for step in run.steps)
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True).stdout.strip()
+    # The runtime lane reads this record under the registry's step list: a reduced run names its mode and what it
+    # left out, so it can never stand in for the full lane.
     (run.out / "E2E_RESULT.json").write_text(json.dumps({
+        "runner_contract": "pados.local-dogfood-e2e.v1",
+        "run_mode": "skip-acceptance-suite" if args.skip_acceptance_suite else "full",
+        "skipped_steps": ["governed_acceptance_suite"] if args.skip_acceptance_suite else [],
         "verdict": "PASS" if passed else "FAIL", "commit": head, "platform": platform.platform(),
         "python": sys.version.split()[0], "seconds": int(time.time() - started),
         "finished": datetime.now(UTC).isoformat(), "steps": run.steps},
