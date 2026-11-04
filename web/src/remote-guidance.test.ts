@@ -24,3 +24,14 @@ describe("remote failure guidance", () => {
     expect(describeRemoteFailure(new TypeError("Failed to fetch at http://internal:8000"))).toBe("The request failed.");
   });
 });
+
+describe("whether the Home Base answered", () => {
+  it("treats network loss and no answer in time as unreachable, and a refusal as an answer", async () => {
+    const { RemoteApiError: ApiError, homeBaseUnreachable } = await import("./remote-api");
+    expect(homeBaseUnreachable(new ApiError(0, "NETWORK_ERROR", "r1", "NETWORK_ERROR"))).toBe(true);
+    expect(homeBaseUnreachable(new ApiError(0, "REQUEST_TIMEOUT", "r1", "REQUEST_TIMEOUT"))).toBe(true);
+    expect(homeBaseUnreachable(new TypeError("Failed to fetch"))).toBe(true);
+    expect(homeBaseUnreachable(new ApiError(403, "TASK_REFUSED", "r1", "SERVER_ERROR"))).toBe(false);
+    expect(homeBaseUnreachable(new ApiError(0, "WRITE_OUTCOME_UNKNOWN", "r1", "WRITE_OUTCOME_UNKNOWN"))).toBe(false);
+  });
+});
