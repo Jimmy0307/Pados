@@ -46,29 +46,29 @@ function idempotencyKey(prefix: string): string {
 }
 
 /** A /control request with the operator's control token; errors keep the server's pados.error.v1 code. */
-export function controlRequest<T>(path: string, token: string, init: RequestInit = {}, fetcher?: typeof fetch): Promise<T> {
+export function controlRequest<T>(path: string, controlValue: string, init: RequestInit = {}, fetcher?: typeof fetch): Promise<T> {
   // A build of this page served from any other host (a static site) must never carry the token to that host.
   if (!isLocalPage()) return Promise.reject(new Error(`${LOCAL_ONLY}: open the console on this computer (127.0.0.1)`));
-  const headers = { Accept: "application/json", "Content-Type": "application/json", [CONTROL_TOKEN_HEADER]: token };
+  const headers = { Accept: "application/json", "Content-Type": "application/json", [CONTROL_TOKEN_HEADER]: controlValue };
   return requestJson<T>(path, { ...init, headers: { ...headers, ...(init.headers || {}) } }, fetcher ? { fetcher } : {});
 }
 
-export function createWorkRequest(token: string, projectId: string, title: string, body: string,
+export function createWorkRequest(controlValue: string, projectId: string, title: string, body: string,
                                   fetcher?: typeof fetch, key: string = idempotencyKey("web-work"),
 ): Promise<{ work_request: { id: string; status?: string } }> {
-  return controlRequest("/control/work-requests", token, {
+  return controlRequest("/control/work-requests", controlValue, {
     method: "POST",
     body: JSON.stringify({ project_id: projectId, title, body, idempotency_key: key }),
   }, fetcher);
 }
 
-export function getApproval(token: string, approvalId: string, fetcher?: typeof fetch): Promise<{ approval: ControlApproval }> {
-  return controlRequest(`/control/approvals/${encodeURIComponent(approvalId)}`, token, {}, fetcher);
+export function getApproval(controlValue: string, approvalId: string, fetcher?: typeof fetch): Promise<{ approval: ControlApproval }> {
+  return controlRequest(`/control/approvals/${encodeURIComponent(approvalId)}`, controlValue, {}, fetcher);
 }
 
-export function decideApproval(token: string, approval: ControlApproval, verb: ApprovalVerb, reason: string,
+export function decideApproval(controlValue: string, approval: ControlApproval, verb: ApprovalVerb, reason: string,
                                fetcher?: typeof fetch): Promise<{ approval: ControlApproval }> {
-  return controlRequest(`/control/approvals/${encodeURIComponent(approval.id)}/${verb}`, token, {
+  return controlRequest(`/control/approvals/${encodeURIComponent(approval.id)}/${verb}`, controlValue, {
     method: "POST",
     body: JSON.stringify({ version: Number(approval.version), reason, idempotency_key: idempotencyKey(`web-${verb}`) }),
   }, fetcher);
@@ -95,13 +95,13 @@ export function decisionPrompt(approval: ControlApproval, verb: ApprovalVerb): s
   ].join("\n");
 }
 
-export function ControlTokenPanel({ token, onChange, local = isLocalPage() }: { token: string; onChange: (value: string) => void; local?: boolean }): ReactElement {
+export function ControlTokenPanel({ controlValue, onChange, local = isLocalPage() }: { controlValue: string; onChange: (value: string) => void; local?: boolean }): ReactElement {
   const [draft, setDraft] = useState("");
   if (!local) {
     return <p className="control-error" role="alert">Changes are made only from the console on this computer
       (http://127.0.0.1). This page is served from another host, so it does not take the control token.</p>;
   }
-  if (token) {
+  if (controlValue) {
     return <div className="control-row control-token"><span>Control token entered for this page only.</span>
       <button className="control-button" type="button" onClick={() => onChange("")}>Forget token</button></div>;
   }
@@ -112,7 +112,7 @@ export function ControlTokenPanel({ token, onChange, local = isLocalPage() }: { 
   </form>;
 }
 
-export function WorkRequestPage({ token, projects }: { token: string; projects: Project[] }): ReactElement {
+export function WorkRequestPage({ controlValue, projects }: { controlValue: string; projects: Project[] }): ReactElement {
   const [projectId, setProjectId] = useState("");
   // One key per request being written: a retry after an unknown outcome is the same request, not a second one.
   const [requestKey, setRequestKey] = useState(() => idempotencyKey("web-work"));
@@ -126,7 +126,7 @@ export function WorkRequestPage({ token, projects }: { token: string; projects: 
     setBusy(true);
     setNotice("");
     try {
-      const result = await createWorkRequest(token, projectId, String(form.get("title") || ""), String(form.get("body") || ""),
+      const result = await createWorkRequest(controlValue, projectId, String(form.get("title") || ""), String(form.get("body") || ""),
         undefined, requestKey);
       setCreated(result.work_request.id);
       setRequestKey(idempotencyKey("web-work"));
@@ -147,14 +147,14 @@ export function WorkRequestPage({ token, projects }: { token: string; projects: 
       </select></label>
       <label>Title<input className="control-input" name="title" required maxLength={300} /></label>
       <label>What should be done<textarea className="control-input" name="body" required rows={5} /></label>
-      <button className="control-button" type="submit" disabled={!token || busy}>{token ? "Create work request" : "Enter the control token first"}</button>
+      <button className="control-button" type="submit" disabled={!controlValue || busy}>{controlValue ? "Create work request" : "Enter the control token first"}</button>
     </form>
     {created && <p role="status">Created work request {created}.</p>}
     {notice && <p className="control-error" role="alert">{notice}</p>}
   </section>;
 }
 
-export function ApprovalsPage({ token, items, focus }: { token: string; items: DecisionInboxItem[]; focus: string | null }): ReactElement {
+export function ApprovalsPage({ controlValue, items, focus }: { controlValue: string; items: DecisionInboxItem[]; focus: string | null }): ReactElement {
   const approvals = items.filter((item) => item.type === "APPROVAL");
   const [selected, setSelected] = useState<string | null>(focus);
   useEffect(() => setSelected(focus), [focus]);
@@ -168,29 +168,29 @@ export function ApprovalsPage({ token, items, focus }: { token: string; items: D
           {action.kind === "in-console" && <button className="control-button" type="button" onClick={() => setSelected(action.approvalId)}>Review</button>}
         </td></tr>;
       })}</tbody></table></div>
-    {selected && <ApprovalReview key={selected} token={token} approvalId={selected} />}
+    {selected && <ApprovalReview key={selected} controlValue={controlValue} approvalId={selected} />}
   </section>;
 }
 
-function ApprovalReview({ token, approvalId }: { token: string; approvalId: string }): ReactElement {
+function ApprovalReview({ controlValue, approvalId }: { controlValue: string; approvalId: string }): ReactElement {
   const [approval, setApproval] = useState<ControlApproval | null>(null);
   const [notice, setNotice] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    if (!token) return;
+    if (!controlValue) return;
     let current = true;  // a late answer for an earlier selection or token is dropped
-    getApproval(token, approvalId).then((result) => { if (current) setApproval(result.approval); })
+    getApproval(controlValue, approvalId).then((result) => { if (current) setApproval(result.approval); })
       .catch((error) => { if (current) setNotice(describeFailure(error)); });
     return () => { current = false; };
-  }, [token, approvalId]);
-  if (!token) return <p className="control-muted">Enter the control token above to review approval {approvalId}.</p>;
+  }, [controlValue, approvalId]);
+  if (!controlValue) return <p className="control-muted">Enter the control token above to review approval {approvalId}.</p>;
   if (!approval) return <p className="control-muted" role="status">{notice || `Loading approval ${approvalId}…`}</p>;
   async function decide(verb: ApprovalVerb): Promise<void> {
     if (!approval || !window.confirm(decisionPrompt(approval, verb))) return;
     setBusy(true);
     try {
-      const result = await decideApproval(token, approval, verb, reason);
+      const result = await decideApproval(controlValue, approval, verb, reason);
       setApproval(result.approval);
       setNotice(`Recorded: ${result.approval.status}.`);
     } catch (error) {

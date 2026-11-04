@@ -91,7 +91,7 @@ describe("control API actions", () => {
 
 describe("the control token stays in page memory", () => {
   it("is a masked field that the browser is told not to remember", () => {
-    const html = renderToStaticMarkup(createElement(ControlTokenPanel, { token: "", onChange: () => undefined, local: true }));
+    const html = renderToStaticMarkup(createElement(ControlTokenPanel, { controlValue: "", onChange: () => undefined, local: true }));
     expect(html).toContain('type="password"');
     expect(html).toContain('autoComplete="off"');
     expect(html).toMatch(/memory only/);
@@ -122,7 +122,7 @@ describe("the control token is used only on this computer", () => {
   });
 
   it("does not offer the token field on another host", () => {
-    const html = renderToStaticMarkup(createElement(ControlTokenPanel, { token: "", onChange: () => undefined, local: false }));
+    const html = renderToStaticMarkup(createElement(ControlTokenPanel, { controlValue: "", onChange: () => undefined, local: false }));
     expect(html).not.toContain("<input");
     expect(html).toMatch(/this computer/);
   });

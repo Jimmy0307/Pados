@@ -165,25 +165,25 @@ function formatCell(value: unknown): string {
   return String(value);
 }
 
-function ApprovalsSurface({ token, focus }: { token: string; focus: string | null }): ReactElement {
+function ApprovalsSurface({ controlValue, focus }: { controlValue: string; focus: string | null }): ReactElement {
   const inbox = useJson<DecisionInbox>("/api/decision-inbox");
   if (inbox.loading || inbox.error || !inbox.data) return <StatePanel loading={inbox.loading} error={inbox.error} />;
-  return <><Header title="Approvals" detail="Review a pending work package approval and record your decision." /><ApprovalsPage token={token} items={inbox.data.items} focus={focus} /></>;
+  return <><Header title="Approvals" detail="Review a pending work package approval and record your decision." /><ApprovalsPage controlValue={controlValue} items={inbox.data.items} focus={focus} /></>;
 }
 
-function WorkRequestSurface({ token }: { token: string }): ReactElement {
+function WorkRequestSurface({ controlValue }: { controlValue: string }): ReactElement {
   const projects = useJson<{ projects: Project[] }>("/api/projects?page_size=100");
   if (projects.loading || projects.error || !projects.data) return <StatePanel loading={projects.loading} error={projects.error} />;
-  return <><Header title="New work request" detail="Ask PADOS for work in one of your projects." /><WorkRequestPage token={token} projects={projects.data.projects} /></>;
+  return <><Header title="New work request" detail="Ask PADOS for work in one of your projects." /><WorkRequestPage controlValue={controlValue} projects={projects.data.projects} /></>;
 }
 
 export function ControlCenter({ onBack }: { onBack: () => void }): ReactElement {
   const [page, setPage] = useState<Page>("mission");
   // The control token is held in this component's memory only (never in browser storage) and only sent to /control.
-  const [token, setToken] = useState("");
+  const [controlValue, setControlValue] = useState("");
   const [focus, setFocus] = useState<string | null>(null);
   const review = (approvalId: string) => { setFocus(approvalId); setPage("approvals"); };
   const writes = page === "approvals" || page === "work";
-  const content = page === "mission" ? <MissionControlPage /> : page === "inbox" ? <DecisionInboxPage onReview={review} /> : page === "approvals" ? <ApprovalsSurface token={token} focus={focus} /> : page === "work" ? <WorkRequestSurface token={token} /> : page === "dashboard" ? <DashboardPage /> : page === "projects" ? <ProjectsPage /> : page === "memory" ? <MemoryPage /> : page === "database" ? <DatabasePage /> : page === "runs" ? <ActivityPage /> : <SystemPage />;
-  return <div className="control-shell"><aside className="control-sidebar"><div className="control-brand"><strong>PADOS</strong><span>Local Control Center</span></div><nav aria-label="Control center navigation">{pages.map((item) => <button className={page === item.id ? "active" : ""} key={item.id} onClick={() => setPage(item.id)}>{item.label}</button>)}</nav><button className="control-back" onClick={onBack}>← Corpus Operator</button><p className="control-muted">Reads are local-only. A change needs the control token and your confirmation.</p></aside><main className="control-main">{writes && <ControlTokenPanel token={token} onChange={setToken} />}{content}</main></div>;
+  const content = page === "mission" ? <MissionControlPage /> : page === "inbox" ? <DecisionInboxPage onReview={review} /> : page === "approvals" ? <ApprovalsSurface controlValue={controlValue} focus={focus} /> : page === "work" ? <WorkRequestSurface controlValue={controlValue} /> : page === "dashboard" ? <DashboardPage /> : page === "projects" ? <ProjectsPage /> : page === "memory" ? <MemoryPage /> : page === "database" ? <DatabasePage /> : page === "runs" ? <ActivityPage /> : <SystemPage />;
+  return <div className="control-shell"><aside className="control-sidebar"><div className="control-brand"><strong>PADOS</strong><span>Local Control Center</span></div><nav aria-label="Control center navigation">{pages.map((item) => <button className={page === item.id ? "active" : ""} key={item.id} onClick={() => setPage(item.id)}>{item.label}</button>)}</nav><button className="control-back" onClick={onBack}>← Corpus Operator</button><p className="control-muted">Reads are local-only. A change needs the control token and your confirmation.</p></aside><main className="control-main">{writes && <ControlTokenPanel controlValue={controlValue} onChange={setControlValue} />}{content}</main></div>;
 }
