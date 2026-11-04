@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { useCallback, useEffect, useState, type FormEvent, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
-import { RemoteApiError, RemoteClient, describeRemoteFailure, deriveBanner, type AttentionProjection, type ConnectivityProjection, type RemoteNodes, type RemoteRun, type WorkMapProjection } from "./remote-api";
+import { RemoteApiError, RemoteClient, describeRemoteFailure, deriveBanner, homeBaseUnreachable, type AttentionProjection, type ConnectivityProjection, type RemoteNodes, type RemoteRun, type WorkMapProjection } from "./remote-api";
 import { ActionsView, AttentionView, ConnectivityBanner, REMOTE_VIEWS, TaskAssignmentView, WorkMapView, type RemoteView } from "./remote-console";
 import "./remote.css";
 
@@ -38,11 +38,11 @@ function RemoteApp(): ReactElement {
       setNotice("");
       setLastSync(new Date().toLocaleTimeString());
     } catch (error) {
-      if (error instanceof RemoteApiError) {
+      if (homeBaseUnreachable(error)) {
+        setReachable(false);  // OFFLINE / RECONNECTING, never an answer from the Home Base
+      } else {
         setReachable(true);
         setNotice(describeRemoteFailure(error));
-      } else {
-        setReachable(false);
       }
     }
   }, [client]);

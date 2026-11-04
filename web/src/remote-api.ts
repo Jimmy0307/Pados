@@ -177,6 +177,14 @@ export class RemoteApiError extends Error {
 }
 
 /**
+ * Whether a failed request means the Home Base was not reached (network loss or no answer in time). Since OP-007 such
+ * failures also arrive as RemoteApiError, so the type alone no longer says whether the Home Base answered.
+ */
+export function homeBaseUnreachable(error: unknown): boolean {
+  return !(error instanceof RemoteApiError) || error.outcome === "NETWORK_ERROR" || error.outcome === "REQUEST_TIMEOUT";
+}
+
+/**
  * What a remote operator is told about a failed request (OP-007): the outcome, what is safe to do next, the server's
  * code for a refusal, and the request id for support. Raw transport text never reaches the notice.
  */
