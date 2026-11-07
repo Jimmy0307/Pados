@@ -40,7 +40,7 @@ PROOF = "pados_ci_rc2_proof"
 MIGRATION = "pados_fc_migration_ci"   # migration suites require a pados_fc_migration_* database
 DATABASES = (OPS, D4, RESIDUAL, PROOF, MIGRATION)
 # Minimum passing tests per suite (the RC2 acceptance counts), so a silently shrunken suite fails the gate.
-MIN_TESTS = {"d1-binding": 31, "d4-handoff": 18, "residual": 23, "proof-lane": 17, "p6-11": 7, "migration": 5}
+MIN_TESTS = {"d1-binding": 31, "d4-handoff": 18, "residual": 25, "proof-lane": 26, "p6-11": 7, "migration": 5}
 # The pytest paths of each suite. The runtime lane registry repeats them (``suite_paths``) and the lane reader
 # checks every suite report against them, so one suite's report cannot stand in for another's.
 SUITE_PATHS: dict[str, tuple[str, ...]] = {

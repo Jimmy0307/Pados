@@ -109,6 +109,11 @@ def decision_inbox(session: Session) -> dict[str, Any]:
            FROM control_approvals
            WHERE status = 'PENDING' ORDER BY created_at ASC, id ASC""",
     )
+    if session.execute(text("SELECT to_regclass('public.result_acceptance_candidates')")).scalar() is not None:
+        backing = {str(row["approval_id"]) for row in _rows(
+            session, "SELECT approval_id::text AS approval_id FROM result_acceptance_candidates "
+                     "WHERE approval_id IS NOT NULL")}
+        approvals = [{**row, "result_acceptance": row["id"] in backing} for row in approvals]
     items = decision_inbox_projection(projects, decisions, blockers, runs, approvals)
     return {"items": items, "count": len(items), "projection_only": True,
             "authority": "PADOS_PROJECT_RUN_AND_DECISION_STATE"}

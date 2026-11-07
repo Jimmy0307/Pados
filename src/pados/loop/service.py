@@ -658,7 +658,9 @@ def _run_one_iteration(
         ).mappings().first()
         if previous is not None and previous["status"] in {"DECIDED", "FAILED"}:
             return _replay_decided_iteration(session, loop, dict(previous))
-        raise ValueError("loop must be RUNNING to step")
+        # A code-shaped prefix becomes the error envelope's code; the rest tells the operator the state and what to do.
+        raise ValueError(f"LOOP_NOT_RUNNING: the loop is {loop['status']}; only a RUNNING loop can step "
+                         "(resume a PAUSED loop; a finished or cancelled loop needs a new one)")
     active_iteration = session.execute(
         text(
             """

@@ -32,7 +32,7 @@ Use `-NoBrowser` for automation. Override ports with `-BackendPort` and `-Fronte
 - Existing API health: `/health`
 - Web API health: `/api/health`
 
-The browser starts in Corpus Operator. Use the `Control Center` surface switch
+The local console (`/operator.html`) starts in Corpus Operator. Use the `Control Center` surface switch
 to open the read-only Dashboard, Projects, Memory, Database, Runs & Events, and
 System views. Corpus authorization and ingest remain available only in Corpus
 Operator.

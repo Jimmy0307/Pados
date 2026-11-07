@@ -196,6 +196,8 @@ export type MissionControl = {
   authority: string;
 };
 
+import type { InboxOpen } from "./page-links";
+
 export type DecisionInboxItem = {
   id: string;
   project_id: string;
@@ -206,7 +208,10 @@ export type DecisionInboxItem = {
   status: string;
   reason_source: string;
   required_human_action: string;
+  /** The authority (API) route. */
   target: string;
+  /** Where a person acts on it (absent from older servers). */
+  open?: InboxOpen;
   projection_only: true;
 };
 

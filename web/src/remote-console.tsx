@@ -9,8 +9,26 @@ import {
   type RemoteTaskProjection,
   type WorkMapProjection,
 } from "./remote-api";
+import { pageHref } from "./page-links";
 
 export type RemoteView = "map" | "tasks" | "attention" | "actions";
+/** On the Remote sign-in: a local operator on this computer uses the local console, which needs no access proof. */
+export function LocalConsoleHint({ base = import.meta.env.BASE_URL }: { base?: string }): ReactElement {
+  return <p className="rc-note">Using PADOS on this computer? <a href={pageHref("operator", base)}>Open the local operator console</a>.
+    This sign-in is for the Remote console, which needs a Home Base with Remote Operations configured.</p>;
+}
+
+/** On the sign-in, when the operator inbox sent you here to accept or reject a verified result. */
+export function ActionsSignInHint(): ReactElement {
+  return <div className="rc-note" role="note"><strong>After you connect, the Actions view opens.</strong>
+    <ol>
+      <li>Connect with the actor and access proof configured for this Home Base (PADOS_REMOTE_CONFIG). Without Remote
+        Operations configured there is nothing to sign in to; see the local usage guide.</li>
+      <li>Approving or rejecting a result asks your WebAuthn device to verify it is you. If no device is enrolled for
+        your actor, use Register this device in Actions and give the descriptor to the Home Base operator to enrol.</li>
+    </ol></div>;
+}
+
 export const REMOTE_VIEWS: { id: RemoteView; label: string }[] = [
   { id: "map", label: "Map" },
   { id: "tasks", label: "Tasks" },

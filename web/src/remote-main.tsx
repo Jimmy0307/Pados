@@ -2,7 +2,8 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { RemoteApiError, RemoteClient, describeRemoteFailure, deriveBanner, homeBaseUnreachable, type AttentionProjection, type ConnectivityProjection, type RemoteNodes, type RemoteRun, type WorkMapProjection } from "./remote-api";
-import { ActionsView, AttentionView, ConnectivityBanner, REMOTE_VIEWS, TaskAssignmentView, WorkMapView, type RemoteView } from "./remote-console";
+import { ActionsSignInHint, ActionsView, AttentionView, ConnectivityBanner, LocalConsoleHint, REMOTE_VIEWS, TaskAssignmentView, WorkMapView, type RemoteView } from "./remote-console";
+import { remoteInitialView } from "./page-links";
 import "./remote.css";
 
 function RemoteApp(): ReactElement {
@@ -10,7 +11,8 @@ function RemoteApp(): ReactElement {
   const [client, setClient] = useState<RemoteClient | null>(null);
   const [endpoint, setEndpoint] = useState("");
   const [endpointConfirmed, setEndpointConfirmed] = useState(false);
-  const [view, setView] = useState<RemoteView>("map");
+  // ?view=actions (the operator inbox's link for a result waiting for acceptance) opens that view after sign-in.
+  const [view, setView] = useState<RemoteView>(() => remoteInitialView(window.location.search));
   const [attention, setAttention] = useState<AttentionProjection | null>(null);
   const [workMap, setWorkMap] = useState<WorkMapProjection | null>(null);
   const [nodes, setNodes] = useState<RemoteNodes | undefined>();
@@ -114,6 +116,8 @@ function RemoteApp(): ReactElement {
       </form>
       {notice && <p className="rc-notice" role="alert">{notice}</p>}
       <p className="rc-note">Access values stay in memory for this session. The browser sends intent only.</p>
+      {view === "actions" && <ActionsSignInHint />}
+      <LocalConsoleHint />
     </main>;
   }
 

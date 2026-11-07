@@ -148,3 +148,13 @@ def test_start_records_no_owner_that_did_not_get_the_lease(seeded: tuple[Session
                                      "AND event_type = 'LOOP_STARTED'"), {"l": loop_id}).scalar_one())
     assert after == started  # owner-less steps can never come to act as "late-starter"
     assert _lease(session, loop_id)["owner_instance"] == "live-worker"
+
+
+@pytest.mark.parametrize(("transition", "state"), [("pause_loop", "PAUSED"), ("cancel_loop", "CANCELLED")])
+def test_a_step_on_a_stopped_loop_names_the_state(seeded: tuple[Session, str], tmp_path: Path, transition: str,
+                                                   state: str) -> None:
+    """Usability walkthrough: the refusal said only that the request conflicts with the current state."""
+    session, loop_id = seeded
+    getattr(loop_service, transition)(session, loop_id)
+    with pytest.raises(ValueError, match=rf"^LOOP_NOT_RUNNING: the loop is {state}"):
+        _iterate(session, loop_id, tmp_path)

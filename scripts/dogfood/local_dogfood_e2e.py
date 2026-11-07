@@ -572,6 +572,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
         ok, _ = api.call("GET", "/control/projects")
         run.record("control_auth", no_token in (401, 403) and wrong in (401, 403) and ok == 200,
                    no_token=no_token, default_token=wrong, init_token=ok)
+        # OP-003 health contract as a user sees it: liveness claims nothing, readiness reports the required lane.
+        live_http, live = api.call("GET", "/health/live", control=None)
+        ready_http, ready = api.call("GET", "/health/ready", control=None)
+        checks = {c.get("name"): c for c in (ready or {}).get("checks", [])} if isinstance(ready, dict) else {}
+        run.record("health_live_and_ready", live_http == 200 and (live or {}).get("status") == "ALIVE"
+                   and ready_http == 200 and (ready or {}).get("schema_version") == "pados.health.v1"
+                   and (ready or {}).get("status") in ("OK", "DEGRADED")
+                   and (checks.get("operational_database") or {}).get("status") == "OK",
+                   live=live_http, ready=ready_http, status=(ready or {}).get("status") if isinstance(ready, dict)
+                   else None, checks={name: c.get("status") for name, c in checks.items()})
 
         project = create_project(run, api, env, root, "dogfood-synthetic", broken=False)
         broken_project = create_project(run, api, env, root, "dogfood-broken-reference", broken=True)

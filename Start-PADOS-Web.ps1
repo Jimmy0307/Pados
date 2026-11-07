@@ -25,16 +25,31 @@ function Find-FreePort([int]$Candidate) {
     throw "NO_FREE_LOCAL_PORT_FROM_$Candidate"
 }
 
-function Wait-Http([string]$Url, [int]$Attempts = 30) {
+function Get-StartRefusal([string]$ErrorLog) {
+    # `pados serve` prints its refusal as "Domain error: <CODE>: <next step>" on standard error.
+    if (-not (Test-Path -LiteralPath $ErrorLog -PathType Leaf)) { return "no output" }
+    $lines = @(Get-Content -LiteralPath $ErrorLog -Encoding UTF8 -ErrorAction SilentlyContinue)
+    $refusal = $lines | Where-Object { $_ -match "error:" } | Select-Object -Last 1
+    if ($refusal) { return $refusal.Trim() }
+    $last = $lines | Where-Object { $_.Trim() } | Select-Object -Last 1
+    if ($last) { return $last.Trim() }
+    return "no output"
+}
+
+function Wait-Backend([string[]]$Urls, [System.Diagnostics.Process]$Process, [string]$ErrorLog, [int]$Attempts = 60) {
     for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
-        try {
-            $response = Invoke-RestMethod -Uri $Url -Method Get -TimeoutSec 3
-            if ($response) { return $response }
-        } catch {
-            Start-Sleep -Milliseconds 500
+        if ($Process.HasExited) {
+            throw "BACKEND_START_REFUSED (exit $($Process.ExitCode)): $(Get-StartRefusal $ErrorLog)"
         }
+        foreach ($url in $Urls) {
+            try {
+                $response = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 3
+                if ($response) { return $response }
+            } catch { }
+        }
+        Start-Sleep -Milliseconds 500
     }
-    throw "HTTP_HEALTHCHECK_FAILED_$Url"
+    throw "HTTP_HEALTHCHECK_FAILED_$($Urls -join ',')"
 }
 
 function Stop-Child([System.Diagnostics.Process]$Process) {
@@ -44,12 +59,37 @@ function Stop-Child([System.Diagnostics.Process]$Process) {
     }
 }
 
+function Start-PadosBackend([string]$Python, [string]$Root, [int]$Port, [string]$OutLog, [string]$ErrorLog) {
+    # The documented start, `pados serve`, with its own checks: it refuses a non-loopback host and the shipped default
+    # control token before it listens (no second check lives here). The chosen port reaches it as PADOS_API_PORT.
+    $previousPort = $env:PADOS_API_PORT
+    $env:PADOS_API_PORT = "$Port"
+    try {
+        $process = Start-Process -FilePath $Python -ArgumentList @("-m", "pados.cli.main", "serve") `
+            -WorkingDirectory $Root -RedirectStandardOutput $OutLog -RedirectStandardError $ErrorLog -WindowStyle Hidden -PassThru
+    } finally {
+        if ($null -eq $previousPort) { Remove-Item Env:PADOS_API_PORT -ErrorAction SilentlyContinue }
+        else { $env:PADOS_API_PORT = $previousPort }
+    }
+    try {
+        # PADOS_API_HOST may be "localhost", which can resolve to ::1: either loopback answer counts.
+        $null = Wait-Backend @("http://127.0.0.1:$Port/health/live", "http://localhost:$Port/health/live") $process $ErrorLog
+    } catch {
+        Stop-Child $process
+        throw
+    }
+    return $process
+}
+
 function Stop-PortListener([int]$Port) {
     $listeners = Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
     foreach ($listener in $listeners) {
         Stop-Process -Id $listener.OwningProcess -Force -ErrorAction SilentlyContinue
     }
 }
+
+# Dot-sourcing (the Pester tests) defines the functions only.
+if ($MyInvocation.InvocationName -eq ".") { return }
 
 New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
 if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) { throw "PADOS_PYTHON_NOT_FOUND_$Python" }
@@ -72,10 +112,7 @@ try {
     $ErrorActionPreference = $previousErrorActionPreference
     if ($doctorExitCode -ne 0) { throw "PADOS_DOCTOR_FAILED_$doctorExitCode" }
 
-    $BackendProcess = Start-Process -FilePath $Python -ArgumentList @(
-        "-m", "uvicorn", "pados.api.app:app", "--host", "127.0.0.1", "--port", "$BackendPort"
-    ) -WorkingDirectory $Root -RedirectStandardOutput $BackendOut -RedirectStandardError $BackendErr -WindowStyle Hidden -PassThru
-    $null = Wait-Http "$BackendUrl/api/health"
+    $BackendProcess = Start-PadosBackend $Python $Root $BackendPort $BackendOut $BackendErr
 
     $frontendCommand = "`$env:PADOS_WEB_BACKEND_URL='$BackendUrl'; Set-Location -LiteralPath '$WebRoot'; & npm.cmd run dev -- --host 127.0.0.1 --port $FrontendPort"
     $FrontendProcess = Start-Process -FilePath "powershell.exe" -ArgumentList @(
@@ -91,11 +128,12 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if (-not $frontendReady) { throw "FRONTEND_START_FAILED" }
-    if (-not $NoBrowser) { Start-Process $FrontendUrl | Out-Null }
+    # The root page is the Remote console sign-in; the local operator console is /operator.html.
+    if (-not $NoBrowser) { Start-Process "$FrontendUrl/operator.html" | Out-Null }
 
     Write-Host "PADOS Web Control Center is running."
-    Write-Host "Frontend: $FrontendUrl"
-    Write-Host "Backend:  $BackendUrl"
+    Write-Host "Frontend: $FrontendUrl/operator.html (local console)"
+    Write-Host "Backend:  $BackendUrl (pados serve)"
     Write-Host "Press Ctrl+C to stop both child processes."
     while ($true) {
         if ($BackendProcess.HasExited) { throw "BACKEND_EXITED_$($BackendProcess.ExitCode)" }

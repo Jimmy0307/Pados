@@ -241,6 +241,19 @@ def get_approval(session: Session, approval_id: str) -> dict[str, object]:
     return dict(row)
 
 
+RESULT_ACCEPTANCE_REQUIRES_STEP_UP = "RESULT_ACCEPTANCE_REQUIRES_STEP_UP"
+
+
+def _backs_a_result_candidate(session: Session, approval_id: str) -> bool:
+    """Whether a ResultCandidate's acceptance waits on this approval (lanes without the table have none)."""
+    if session.execute(text("SELECT to_regclass('public.result_acceptance_candidates')")).scalar() is None:
+        return False
+    return session.execute(
+        text("SELECT 1 FROM result_acceptance_candidates WHERE approval_id::text = :id LIMIT 1"),
+        {"id": str(approval_id)},
+    ).first() is not None
+
+
 def decide_approval(
     session: Session,
     approval_id: str,
@@ -250,13 +263,26 @@ def decide_approval(
     reason: str,
     idempotency_key: str,
     ttl_seconds: int | None = None,
+    governed_result_decision: bool = False,
 ) -> dict[str, object]:
-    """Decide a PENDING approval. An approved WORK_ROUTE approval authorizes new work only until ``expires_at``."""
+    """Decide a PENDING approval. An approved WORK_ROUTE approval authorizes new work only until ``expires_at``.
+
+    An approval that backs a ResultCandidate is decided only by the governed remote path
+    (``governed_result_decision=True``). That path first consumes a fresh WebAuthn step-up proof, in its own committed
+    transaction, and then decides this approval and records the candidate decision (bound to that proof) together in
+    one later transaction. The two are not atomic: a failure between them leaves the proof spent and nothing decided,
+    and the operator runs a new step-up. Any other caller (the control-token API) is refused with
+    RESULT_ACCEPTANCE_REQUIRES_STEP_UP and the approval stays PENDING: deciding it there would strand the candidate,
+    since the step-up decision then finds the approval no longer pending.
+    """
     if ttl_seconds is None:
         from pados.config import get_settings
 
         ttl_seconds = get_settings().approval_ttl_seconds
     current = get_approval(session, approval_id)
+    if not governed_result_decision and _backs_a_result_candidate(session, approval_id):
+        _LOG.warning("control.approval.refused", outcome="rejected", error_code=RESULT_ACCEPTANCE_REQUIRES_STEP_UP)
+        raise PermissionError(RESULT_ACCEPTANCE_REQUIRES_STEP_UP)
     if current["status"] != "PENDING":
         if current.get("decision_reason") == idempotency_key:
             return current

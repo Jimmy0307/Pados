@@ -429,9 +429,16 @@ class LiveRemotePorts:
                     reason=f"{REMOTE_ACTOR_PREFIX}{binding.actor_id} binding={binding.binding_hash} "
                            f"proof={binding.proof_ref}",
                     idempotency_key=f"remote-{binding.binding_hash[:48]}",
+                    # Only this governed path may decide a result approval. The step-up proof was already verified
+                    # and consumed, in its own committed transaction (StepUpService.consume), before this one.
+                    governed_result_decision=True,
                 )
                 if binding.kind == "RESULT_CANDIDATE":
-                    # Same transaction: one terminal decision per candidate, bound to the consumed proof.
+                    # Same transaction as the approval decision above (not as the proof consumption): one terminal
+                    # decision per candidate, bound to the consumed proof. If this transaction fails, the proof stays
+                    # spent and nothing is decided; a new step-up is needed (test_final_convergence_product_loop_postgres).
+                    # A REJECT then has a third, separate step after this commits (reject_result_candidate below,
+                    # which records the rejection on the proof side); the decision itself is already recorded.
                     result_acceptance.record_candidate_decision(
                         session,
                         candidate_id=binding.candidate_receipt_id,
