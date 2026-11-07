@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pados.compute_node.identity_providers import SecurityProfile
 from pados.compute_node.registry import NodeRegistration
 from pados.connectivity.storage import atomic_write_json, store_lock
+from pados.lifecycle.atomic_replace import replace_with_retry
 from pados.lifecycle.minimization import DataMinimizationViolation, assert_minimized
 from pados.machines.errors import MachineError
 from pados.machines.profile import PROFILE_KEYS, MachineProfile, MachineRole, profile_record, validated
@@ -223,7 +224,7 @@ def write_known_hosts(path: Path, machines: Iterable[MachineProfile]) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
