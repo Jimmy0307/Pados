@@ -25,7 +25,8 @@ function existingInstallation() {
   return { home, pkg };
 }
 
-for (const extra of [[], ['--yes']]) {
+// R19-5: --adopt-runtime is consent for a *missing* runtime record only; it never activates a different version.
+for (const extra of [[], ['--yes'], ['--adopt-runtime'], ['--adopt-runtime', '--yes']]) {
   test(`init ${extra.join(' ') || '(no flags)'} on an existing installation refuses to activate a newer runtime`, () => {
     const { home, pkg } = existingInstallation();
     const result = runCli(['init', '--non-interactive', '--json', ...extra],

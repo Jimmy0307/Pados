@@ -29,6 +29,7 @@ if sys.platform == "win32":
 else:
     import fcntl
 
+from pados.lifecycle.atomic_replace import replace_with_retry
 from pados.lifecycle.minimization import DataMinimizationViolation, assert_minimized
 
 _KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
@@ -118,7 +119,7 @@ def atomic_write_json(path: Path, data: Any) -> None:
             handle.write(json.dumps(data, sort_keys=True).encode("utf-8"))
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise

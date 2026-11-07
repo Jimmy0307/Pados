@@ -1,5 +1,7 @@
 # Public release exclude manifest
 
+<!-- doc-lint: names-absent-paths -->
+
 **Machine-readable source:** `scripts/release/public_export_manifest.json` (`publication_enabled: false`).
 
 **Checker:** `python scripts/release/public_export_check.py OUT.json`. It computes the export set from `git ls-files` and scans it for:

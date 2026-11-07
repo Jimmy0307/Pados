@@ -140,6 +140,10 @@
     {
       "pattern": "tests/connectivity/test_loopback_probe_denied.py",
       "reason": "exercises the connectivity-closure evidence scripts under runtime/** (internal)"
+    },
+    {
+      "pattern": "docs/audits/PADOS_ENGINEERING_OPERABILITY_AUDIT_2026-11-01.md",
+      "reason": "internal operability audit record with a machine-specific checkout path; kept byte-identical to its source commit"
     }
   ],
   "allowed_findings": [

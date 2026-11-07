@@ -46,7 +46,7 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from pados.connectivity.storage import store_lock
-from pados.learning.anchor import replace_with_retry
+from pados.lifecycle.atomic_replace import replace_with_retry
 from pados.lifecycle.fswalk import fsync_directory, is_link
 from pados.lifecycle.locking import ensure_durable_dir
 from pados.lifecycle.minimization import DataMinimizationViolation, assert_minimized

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 from urllib.parse import unquote
@@ -62,8 +63,13 @@ def _resolves(root: Path, source: Path, target: str) -> bool | None:
 
 
 def _read_bounded(source: Path) -> str | None:
-    """Read at most MAX_FILE_BYTES of a regular file, never through a link; None when it cannot be read safely."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    """Read at most MAX_FILE_BYTES of a regular file, never through a link; None when it cannot be read safely.
+
+    The open is non-blocking (a FIFO named ``*.md`` with no writer would otherwise block the probe until its command
+    timeout), and the descriptor must be a regular file by ``fstat`` before anything is read (R19-7 candidate).
+    """
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0))
     if source.is_symlink():
         return None
     try:
@@ -71,6 +77,9 @@ def _read_bounded(source: Path) -> str | None:
     except OSError:
         return None
     with os.fdopen(descriptor, "rb") as handle:
+        status = os.fstat(handle.fileno())
+        if not stat.S_ISREG(status.st_mode) or status.st_size > MAX_FILE_BYTES:
+            return None
         data = handle.read(MAX_FILE_BYTES + 1)
     return None if len(data) > MAX_FILE_BYTES else data.decode("utf-8", errors="replace")
 

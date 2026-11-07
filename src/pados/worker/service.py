@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -36,10 +36,14 @@ from pados.control.approval_subject import (
     scope_version_is_current,
     subject_hash,
 )
+from pados.logging_config import get_logger
 from pados.loop import scope_authority
 from pados.memory import packet as context_packet
 from pados.memory.retrieval import RetrievalRequest
 from pados.memory.security import assert_no_secret
+from pados.operability.context import operation_scope, trace_fields
+from pados.operability.metrics import METRICS
+from pados.operability.resilience import DeadlineExceeded, capped_timeout
 from pados.providers.execution_binding import ExecutionBindingRefused, ExecutionIntent
 from pados.providers.factory import build_chat_provider
 from pados.providers.ollama import MeasuredChatProvider
@@ -58,12 +62,16 @@ from pados.worker.schemas import (
 )
 
 LOGGER = logging.getLogger("pados.worker.service")
+_LOG = get_logger("pados.worker")
 NON_TERMINAL_JOB_STATUSES = frozenset({"ROUTED", "QUEUED", "RUNNING", "VALIDATING"})
 # RC2 EXEC-1: a selected worker this process cannot execute for the route is refused, never left ROUTED.
 ROUTE_HAS_NO_EXECUTOR = "ROUTE_HAS_NO_EXECUTOR"
 
 
 def _event(session: Session, job_id: str, project_id: str, event_type: str, payload: dict[str, Any]) -> None:
+    trace = trace_fields()
+    if trace and "trace" not in payload:
+        payload = {**payload, "trace": trace}  # OP-001: identifiers only; never read as authority
     session.execute(
         text(
             """
@@ -188,7 +196,10 @@ def _record_route_refusal(
         "surface": route.surface,
         "step_sequence": route.step_sequence,
         "subject_hash": subject_hash,
+        **({"trace": trace_fields()} if trace_fields() else {}),
     }
+    _LOG.warning("worker.route.refused", outcome="rejected", error_code=code, capability_id=route.capability_id.value,
+                 surface=route.surface)
     bind = session.get_bind()
     engine = bind if isinstance(bind, Engine) else bind.engine
     try:
@@ -351,7 +362,13 @@ def _direct_operation_already_routed(session: Session, route: RouteRequest) -> b
 
 
 def _idempotent_job(session: Session, request_id: str, route: RouteRequest) -> dict[str, Any] | None:
-    """Return an existing job only when it was routed under the same approval and operation."""
+    """Return an existing job only when it was routed under the same approval and operation.
+
+    The same key under a different approval, capability or command is never a replay. It falls through to the full
+    approval-binding check, which refuses it with its own code and an audited ROUTE_REFUSED record (RC2 D1); the
+    (request_id, idempotency_key) unique constraint backs that up. It is deliberately not short-circuited into a
+    generic conflict here, which would hide the authority's refusal and its audit trail.
+    """
     existing = session.execute(
         text(
             """
@@ -377,6 +394,25 @@ def _idempotent_job(session: Session, request_id: str, route: RouteRequest) -> d
 
 
 def route_work_request(
+    session: Session,
+    *,
+    request_id: str,
+    route: RouteRequest,
+    settings: Any,
+    artifact_root: Path,
+    defer_model_execution: bool = False,
+) -> dict[str, Any]:
+    """``_route_work_request`` traced under the caller's operation as the ``worker`` component (OP-001)."""
+    with operation_scope("worker"):
+        routed = _route_work_request(session, request_id=request_id, route=route, settings=settings,
+                                     artifact_root=artifact_root, defer_model_execution=defer_model_execution)
+        job = routed["job"]
+        _LOG.info("worker.job.routed", outcome="completed", job_id=str(job["id"]), worker_type=job["worker_type"],
+                  job_status=job["status"], idempotent=routed.get("routing", {}).get("status") == "idempotent")
+        return routed
+
+
+def _route_work_request(
     session: Session,
     *,
     request_id: str,
@@ -912,8 +948,19 @@ def _call_model(call: _ModelCall, *, job: Mapping[str, Any], handoff_path: Path,
     """Make the one bounded model call; touches no database. Returns the terminal result to persist."""
     provider = call.provider
     try:
+        # OP-004: the job keeps its own timeout; a caller's remaining budget can only shorten it. The provider takes
+        # whole seconds, so less than one second left is refused rather than rounded past the budget.
+        timeout = int(capped_timeout(call.timeout))
+        if timeout < 1:
+            raise DeadlineExceeded()
+    except DeadlineExceeded:
+        METRICS.inc("pados_deadline_exceeded_total", {"component": "worker"})
+        return {"status": "TIMED_OUT", "error_code": "PARENT_DEADLINE_EXCEEDED", "validation_status": "FAILED",
+                "usage_metadata": {"measured_execution": None},
+                "result_summary": "The caller's deadline had passed; the model was not called."}
+    try:
         prompt = _model_prompt(handoff_path, job)
-        model_text = _run_model_chat(provider, prompt, call.timeout)
+        model_text = _run_model_chat(provider, prompt, timeout)
         evidence = {"measured_execution": getattr(provider, "last_evidence", None)}
         stdout_path = artifact_dir / "stdout.txt"
         stdout_path.write_text(stable_json(_model_stdout_contract(str(model_text))), encoding="utf-8")
@@ -962,7 +1009,17 @@ def _execute_model_once(
     return _finish_model_job(session, job=job, **outcome)
 
 
-def execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any = None) -> dict[str, Any]:
+def execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any = None,
+                             fence: Callable[[Session], str | None] | None = None) -> dict[str, Any]:
+    """``_execute_routed_model_job`` traced under the caller's operation for this job (OP-001)."""
+    with operation_scope("worker", job_id=job_id):
+        result = _execute_routed_model_job(settings, job_id, session_factory=session_factory, fence=fence)
+        _LOG.info("worker.model_job.finished", job_status=result.get("status"), error_code=result.get("error_code"))
+        return result
+
+
+def _execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any = None,
+                              fence: Callable[[Session], str | None] | None = None) -> dict[str, Any]:
     """Run one ROUTED local-model job with no database transaction or row lock held during the call (RC2 SEC-9).
 
     1. A short transaction claims the job (ROUTED -> RUNNING); only one caller can win the claim.
@@ -970,11 +1027,21 @@ def execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any
     3. A short transaction records the result only if the job is still RUNNING. A job that expired or was cancelled
        meanwhile keeps its state.
     A crash between the steps leaves a RUNNING job that ``expire_overdue_jobs`` times out; a repeated call is a no-op.
+
+    ``fence`` (OP-004) is the caller's lease check, run inside the claim transaction and again inside the transaction
+    that records the result; it returns an error code when the caller no longer holds the work. A caller fenced before
+    the claim leaves the job ROUTED for the current holder and never calls the model. A caller fenced after the call
+    writes no result: the job goes back from its own RUNNING claim to ROUTED (a ``JOB_QUEUED`` event with
+    ``result_discarded`` and the reason), the model
+    output is neither recorded nor kept on disk, and the current holder runs the job again under the usual deadline
+    and approval checks. A fenced caller never writes a terminal state onto work it no longer holds.
     """
     from pados.db import session_scope
 
     scope = session_factory or session_scope
     with scope(settings) as session:
+        if fence is not None and fence(session) is not None:
+            return get_job(session, job_id)
         refused = _deferred_claim_refusal(session, job_id)
         if refused is not None:
             return refused
@@ -1006,7 +1073,11 @@ def execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any
     )
     stdout_path = outcome.get("stdout_path")
     with scope(settings) as session:
-        recorded = _finish_model_job(session, job=job, require_running=True, **outcome)
+        lost = fence(session) if fence is not None else None
+        if lost is not None:
+            recorded = _release_fenced_claim(session, job, lost)
+        else:
+            recorded = _finish_model_job(session, job=job, require_running=True, **outcome)
         kept = isinstance(stdout_path, Path) and session.execute(
             text(
                 "SELECT 1 FROM worker_job_artifacts WHERE job_id = CAST(:id AS uuid) "
@@ -1017,6 +1088,20 @@ def execute_routed_model_job(settings: Any, job_id: str, *, session_factory: Any
     if isinstance(stdout_path, Path) and not kept:
         stdout_path.unlink(missing_ok=True)  # an unrecorded late result must not look like evidence later
     return recorded
+
+
+def _release_fenced_claim(session: Session, job: Mapping[str, Any], code: str) -> dict[str, Any]:
+    """Hand a job this caller claimed back to ROUTED without a result (OP-004); a job in any other state is left."""
+    job_id = str(job["id"])
+    released = session.execute(
+        text("UPDATE worker_jobs SET status = 'ROUTED', started_at = NULL "
+             "WHERE id = CAST(:id AS uuid) AND status = 'RUNNING' RETURNING id"), {"id": job_id}).first()
+    _LOG.warning("worker.model_job.fenced", outcome="rejected", error_code=code, released=released is not None)
+    if released is not None:
+        # Queued again for the lease holder; the event type set is fixed by migration 0019, so the reason says why.
+        _event(session, job_id, str(job["project_id"]), "JOB_QUEUED",
+               {"requeued": True, "result_discarded": True, "reason": code})
+    return get_job(session, job_id)
 
 
 def _deferred_claim_refusal(session: Session, job_id: str) -> dict[str, Any] | None:

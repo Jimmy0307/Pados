@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import { actionKey, describeFailure, HttpError, requestJson, singleFlight, type RequestOutcome } from "./http";
+
 export type Project = {
   id: string;
   name?: string;
@@ -299,29 +301,42 @@ export type SearchResult = {
   search_mode: string;
 };
 
-export type ApiError = Error & { code?: string; write_occurred?: boolean };
+export type ApiError = Error & {
+  code?: string;
+  write_occurred?: boolean;
+  request_id?: string;
+  outcome?: RequestOutcome;
+};
+
+// OP-007: keep the existing ApiError shape and add the request id and the distinct outcome from requestJson.
+function toApiError(error: unknown): unknown {
+  if (!(error instanceof HttpError)) return error;
+  const detail = error.detail as { message?: string; code?: string; write_occurred?: boolean } | string | undefined;
+  const message = typeof detail === "string" ? detail : detail?.message || describeFailure(error);
+  const apiError = new Error(message) as ApiError;
+  apiError.code = (typeof detail === "object" && detail?.code) || error.code;
+  apiError.write_occurred = typeof detail === "object" && typeof detail?.write_occurred === "boolean"
+    ? detail.write_occurred
+    : error.writeOccurred === "YES" ? true : error.writeOccurred === "NO" ? false : undefined;
+  apiError.request_id = error.requestId;
+  apiError.outcome = error.outcome;
+  return apiError;
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: { Accept: "application/json", ...(init?.headers || {}) },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const detail = body?.detail;
-    const error = new Error(detail?.message || `API request failed (${response.status})`) as ApiError;
-    error.code = detail?.code;
-    error.write_occurred = detail?.write_occurred;
-    throw error;
-  }
-  return body as T;
+  const method = (init?.method || "GET").toUpperCase();
+  const send = () => requestJson<T>(path, { ...init, headers: { Accept: "application/json", ...(init?.headers || {}) } })
+    .catch((error: unknown) => { throw toApiError(error); });
+  // An identical write already in flight (a double click) is not sent twice; uploads are never merged.
+  return method !== "GET" && typeof init?.body === "string" ? singleFlight(actionKey(method, path, init.body), send) : send();
 }
 
 export async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(path, { headers: { Accept: "application/json" } });
-  const payload = (await response.json().catch(() => ({}))) as { detail?: string };
-  if (!response.ok) throw new Error(payload.detail || `Request failed (${response.status})`);
-  return payload as T;
+  try {
+    return await requestJson<T>(path, { headers: { Accept: "application/json" } });
+  } catch (error) {
+    throw toApiError(error);
+  }
 }
 
 export function queryString(values: Record<string, string | number | undefined | null>): string {

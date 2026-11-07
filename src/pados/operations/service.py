@@ -133,6 +133,8 @@ def _probe_lane(settings: Settings, database: str, lane: str) -> dict[str, Any]:
         detail = str(getattr(exc, "orig", exc))
         # Authentication failure means the server answered: reachable, not authenticated.
         result["reachable"] = "authentication failed" in detail or "password" in detail.casefold()
+        # The server answered that the database is not there: absent, not broken (no driver text is kept).
+        result["missing"] = "does not exist" in detail
         result["error"] = type(exc).__name__
         return result
     finally:
@@ -162,6 +164,12 @@ def system_health(settings: Settings) -> dict[str, Any]:
     proof_name = settings.product_database_name
     separate = bool(proof_name) and proof_name != settings.operational_database_name
     proof = _probe_lane(settings, proof_name if separate else "", "proof")
+    # OP-003: the Corpus lane is probed for /health/ready as an optional check only. It is kept out of ``reasons`` and
+    # ``ready`` so the existing readiness verdict does not change. It is probed only once the operational lane
+    # authenticated (the server answers), so an optional probe never spends the bounded probe budget on a server
+    # that is down and starves the required checks.
+    corpus = (_probe_lane(settings, settings.corpus_database_name, "corpus") if operational["authenticated"]
+              else {"configured": bool(settings.corpus_database_name), "skipped": True, "usable": False})
     configured = bool(
         settings.api_host in {"127.0.0.1", "localhost"}
         and separate
@@ -234,7 +242,7 @@ def system_health(settings: Settings) -> dict[str, Any]:
             "product_loop_configured": configured,
             "provider_configured": provider_ready,
         },
-        "lanes": {"operational": operational, "proof": proof},
+        "lanes": {"operational": operational, "proof": proof, "corpus": corpus},
         "reasons": reasons,
         "provider_live_uat": provider_live_uat,
         "provider_selection": provider_selection,

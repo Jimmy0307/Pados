@@ -29,6 +29,7 @@ from pados.loop.engine import (
     ensure_stop_policy_is_bounded,
 )
 from pados.loop.runtime_bindings import insert_goal_runtime_binding
+from pados.logging_config import get_logger
 from pados.loop.schemas import (
     LoopCreate,
     LoopDecision,
@@ -48,9 +49,10 @@ from pados.worker.service import (
     record_job_event,
     route_work_request,
 )
-
+from pados.operability.context import error_code_of, operation_scope, trace_fields
 
 _MAX_RESIDUAL_DEPTH = 64
+_LOG = get_logger("pados.task_loop")
 
 
 def _stable_json(payload: Any) -> str:
@@ -62,6 +64,10 @@ def _hash(payload: Any) -> str:
 
 
 def _event(session: Session, loop_id: str, project_id: str, event_type: str, payload: dict[str, Any]) -> None:
+    trace = trace_fields()
+    if trace and "trace" not in payload:
+        # OP-001: identifiers only, beside the event and never inside sealed content; never read as authority.
+        payload = {**payload, "trace": trace}
     session.execute(
         text(
             """
@@ -247,6 +253,9 @@ def create_task_goal(session: Session, payload: TaskGoalCreate) -> dict[str, Any
             "idempotency_key": payload.idempotency_key,
         },
     ).mappings().one()
+    # OP-004: a reused key is a replay only for the same content; different content is a conflict, never the old row.
+    if str(row["content_hash"]) != _hash(content):
+        raise ValueError("TASK_GOAL_IDEMPOTENCY_CONTENT_CONFLICT")
     return dict(row)
 
 
@@ -451,6 +460,11 @@ def create_loop(session: Session, payload: LoopCreate) -> dict[str, Any]:
             "idempotency_key": payload.idempotency_key,
         },
     ).mappings().one()
+    # OP-004: a reused key is a replay only for the same loop; checked before anything is bound or consumed.
+    bound = ("active_plan_id", "approval_id", "max_iterations", "max_replans", "max_worker_failures",
+             "max_execution_seconds", "no_progress_limit", "context_token_budget")
+    if any(str(row[field]) != str(getattr(payload, field)) for field in bound):
+        raise ValueError("LOOP_IDEMPOTENCY_CONTENT_CONFLICT")
     conflicting_bindings: Any = session.execute(
         text(
             """
@@ -496,7 +510,7 @@ def start_loop(session: Session, loop_id: str, *, owner_instance: str = "pados-c
         ),
         {"id": loop_id},
     ).mappings().one()
-    session.execute(
+    leased = session.execute(
         text(
             """
             INSERT INTO task_loop_leases(loop_id, owner_instance, lease_expires_at)
@@ -508,12 +522,91 @@ def start_loop(session: Session, loop_id: str, *, owner_instance: str = "pados-c
                 heartbeat_at = now()
             WHERE task_loop_leases.lease_expires_at < now()
                OR task_loop_leases.owner_instance = EXCLUDED.owner_instance
+            RETURNING owner_instance
             """
         ),
         {"loop_id": loop_id, "owner": owner_instance},
-    )
+    ).first()
+    if leased is None:
+        # OP-004: another owner holds a live lease. LOOP_STARTED names the owner owner-less steps act as, so it is
+        # written only for an owner that actually holds the lease; the status change rolls back with this refusal.
+        _LOG.warning("task_loop.lease.refused", outcome="rejected", error_code=LOOP_LEASE_HELD, owner=owner_instance)
+        raise PermissionError(LOOP_LEASE_HELD)
     _event(session, loop_id, str(row["project_id"]), "LOOP_STARTED", {"owner": owner_instance})
     return dict(row)
+
+
+LOOP_LEASE_HELD = "LOOP_LEASE_HELD"
+LOOP_LEASE_LOST = "LOOP_LEASE_LOST"
+LOOP_LEASE_OWNER_UNKNOWN = "LOOP_LEASE_OWNER_UNKNOWN"
+
+
+def _starting_owner(session: Session, loop_id: str) -> str | None:
+    """The owner named when the loop was started (the latest LOOP_STARTED event), or None."""
+    owner = session.execute(text(
+        "SELECT payload_json->>'owner' FROM task_loop_events WHERE loop_id = CAST(:id AS uuid) "
+        "AND event_type = 'LOOP_STARTED' ORDER BY sequence_number DESC LIMIT 1"), {"id": loop_id}).scalar_one_or_none()
+    return None if owner is None else str(owner)
+
+
+def _acting_owner(session: Session, loop_id: str, owner_instance: str | None) -> str:
+    """The owner a step holds the lease as: the named owner, or for an owner-less step the loop's starting owner."""
+    owner = owner_instance or _starting_owner(session, loop_id)
+    if not owner:
+        _LOG.warning("task_loop.lease.refused", outcome="rejected", error_code=LOOP_LEASE_OWNER_UNKNOWN)
+        raise PermissionError(LOOP_LEASE_OWNER_UNKNOWN)
+    return owner
+
+
+def _lease_fence(loop_id: str, owner: str) -> Any:
+    """A check for ``execute_routed_model_job``: None while ``owner`` still holds the lease, else LOOP_LEASE_LOST.
+
+    It locks the lease row, so a takeover cannot land between the check and the commit of the same transaction.
+    """
+    def check(session: Session) -> str | None:
+        holder = session.execute(text(
+            "SELECT owner_instance FROM task_loop_leases WHERE loop_id = CAST(:id AS uuid) FOR UPDATE"),
+            {"id": loop_id}).scalar_one_or_none()
+        return None if holder == owner else LOOP_LEASE_LOST
+
+    return check
+
+
+def _hold_lease(session: Session, loop: dict[str, Any], owner_instance: str | None) -> str:
+    """OP-004: the stepping owner's lease is renewed on every iteration it runs; any other owner is fenced out.
+
+    The lease is taken when it is free, lapsed or already the stepping owner's, and renewed (heartbeat and expiry).
+    While another owner holds a live lease the iteration is refused (LOOP_LEASE_HELD) before anything is selected,
+    routed or published.
+
+    A step without an owner (an operator step from the API, or the CLI without ``--owner``) acts as the owner that
+    started the loop. A single operator who starts and steps a loop therefore keeps one lease, while a named worker
+    that took the lease over is never overridden by an owner-less step. A loop with no recorded starting owner is
+    refused (LOOP_LEASE_OWNER_UNKNOWN). Returns the owner the lease is held as.
+    """
+    loop_id = str(loop["id"])
+    owner_instance = _acting_owner(session, loop_id, owner_instance)
+    row = session.execute(text(
+        """
+        INSERT INTO task_loop_leases(loop_id, owner_instance, lease_expires_at)
+        VALUES (CAST(:id AS uuid), :owner, now() + interval '5 minutes')
+        ON CONFLICT (loop_id) DO UPDATE
+        SET owner_instance = EXCLUDED.owner_instance,
+            lease_acquired_at = CASE WHEN task_loop_leases.owner_instance = EXCLUDED.owner_instance
+                                     THEN task_loop_leases.lease_acquired_at ELSE now() END,
+            lease_expires_at = now() + interval '5 minutes',
+            heartbeat_at = now()
+        WHERE task_loop_leases.lease_expires_at < now() OR task_loop_leases.owner_instance = EXCLUDED.owner_instance
+        RETURNING owner_instance
+        """), {"id": loop_id, "owner": owner_instance}).mappings().first()
+    if row is None:
+        holder = session.execute(text("SELECT owner_instance FROM task_loop_leases WHERE loop_id = CAST(:id AS uuid)"),
+                                 {"id": loop_id}).scalar()
+        _LOG.warning("task_loop.lease.refused", outcome="rejected", error_code=LOOP_LEASE_HELD, owner=owner_instance,
+                     holder=holder)
+        raise PermissionError(LOOP_LEASE_HELD)
+    _LOG.info("task_loop.lease.held", owner=owner_instance)
+    return owner_instance
 
 
 def run_one_iteration(
@@ -524,8 +617,35 @@ def run_one_iteration(
     artifact_root: Path,
     idempotency_key: str,
     defer_model_execution: bool = False,
+    owner_instance: str | None = None,
+) -> dict[str, Any]:
+    """One TaskLoop iteration, traced under the caller's operation (OP-001) and holding the loop lease (OP-004)."""
+    with operation_scope("task_loop", run_id=loop_id):
+        try:
+            result = _run_one_iteration(session, loop_id=loop_id, settings=settings, artifact_root=artifact_root,
+                                        idempotency_key=idempotency_key,
+                                        defer_model_execution=defer_model_execution, owner_instance=owner_instance)
+        except Exception as exc:
+            _LOG.warning("task_loop.iteration.refused", outcome="rejected", error_code=error_code_of(exc))
+            raise
+        _LOG.info("task_loop.iteration.finished", outcome="completed", status=result.get("status"),
+                  decision=result.get("decision"))
+        return result
+
+
+def _run_one_iteration(
+    session: Session,
+    *,
+    loop_id: str,
+    settings: Any,
+    artifact_root: Path,
+    idempotency_key: str,
+    defer_model_execution: bool = False,
+    owner_instance: str | None = None,
 ) -> dict[str, Any]:
     loop = get_loop_for_update(session, loop_id)
+    if loop["status"] == "RUNNING":
+        _hold_lease(session, loop, owner_instance)
     if loop["status"] != "RUNNING":
         previous = session.execute(
             text(
@@ -734,26 +854,44 @@ def _deferred_model_job(session: Session, loop_id: str) -> str | None:
 
 
 def run_step(
-    settings: Any, *, loop_id: str, artifact_root: Path, idempotency_key: str, session_factory: Any = None
+    settings: Any, *, loop_id: str, artifact_root: Path, idempotency_key: str, session_factory: Any = None,
+    owner_instance: str | None = None,
+) -> dict[str, Any]:
+    """``_run_step`` under the caller's operation, so the deferred model call is traced with it (OP-001)."""
+    with operation_scope("task_loop", run_id=loop_id):
+        return _run_step(settings, loop_id=loop_id, artifact_root=artifact_root, idempotency_key=idempotency_key,
+                         session_factory=session_factory, owner_instance=owner_instance)
+
+
+def _run_step(
+    settings: Any, *, loop_id: str, artifact_root: Path, idempotency_key: str, session_factory: Any = None,
+    owner_instance: str | None = None,
 ) -> dict[str, Any]:
     """One TaskLoop step for an operator surface (RC2 SEC-9).
 
     Routing commits first. A local-model job then runs with no transaction or lock held, and the same iteration is
     resumed in a new transaction. A model job left ROUTED by an interrupted step is picked up here as well.
+
+    OP-004: the whole step holds the lease as one owner (the named one, or the loop's starting owner). The model
+    result is recorded only while that owner still holds the lease, and the resumed iteration holds it again, so an
+    owner whose lease was taken over during the model call publishes nothing (LOOP_LEASE_LOST / LOOP_LEASE_HELD).
     """
     from pados.db import session_scope
 
     scope = session_factory or session_scope
     with scope(settings) as session:
         result = run_one_iteration(session, loop_id=loop_id, settings=settings, artifact_root=artifact_root,
-                                   idempotency_key=idempotency_key, defer_model_execution=True)
+                                   idempotency_key=idempotency_key, defer_model_execution=True,
+                                   owner_instance=owner_instance)
         deferred = _deferred_model_job(session, loop_id)
-    if deferred is None:
+        acting = None if deferred is None else _acting_owner(session, loop_id, owner_instance)
+    if deferred is None or acting is None:
         return result
-    execute_routed_model_job(settings, deferred, session_factory=scope)
+    execute_routed_model_job(settings, deferred, session_factory=scope, fence=_lease_fence(loop_id, acting))
     with scope(settings) as session:
         return run_one_iteration(session, loop_id=loop_id, settings=settings, artifact_root=artifact_root,
-                                 idempotency_key=f"{idempotency_key}:model-result", defer_model_execution=True)
+                                 idempotency_key=f"{idempotency_key}:model-result", defer_model_execution=True,
+                                 owner_instance=acting)
 
 
 def _waiting_for_job(

@@ -64,3 +64,10 @@ Attach `pados doctor --json` and `pados version --json`. Both are free of creden
 `PADOS_RUNTIME_PACKAGE_DIR` (use an extracted runtime package) are for PADOS development only. While one is set,
 every command prints `WARNING: <name> is set (development-only override ...)` on stderr. If you see this warning
 and did not set the variable on purpose, unset it and re-run the command.
+
+A home first initialised while `PADOS_CLI_DEV_PYTHON` and `PADOS_CLI_DEV_APP` were set has a configuration but no
+runtime record, because the development override runs the runtime from your app directory and installs none. A later
+`pados init` without the overrides therefore refuses with `RUNTIME_RECORD_MISSING` and changes nothing. If you do want
+this CLI's shipped runtime activated there, run `pados init --adopt-runtime`; existing data still migrates only with
+`--migrate`. `--adopt-runtime` never activates a different runtime version: an installation that records another
+version still refuses with `UPDATE_REQUIRED` and points to `pados update`.

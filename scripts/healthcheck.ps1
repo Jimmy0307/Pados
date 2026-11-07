@@ -19,7 +19,10 @@ try {
   $Python = Initialize-PadosRuntime -ProjectRoot $Root
   Assert-PadosImportPath -Python $Python -ProjectRoot $Root
 
+  # OP-001: one request id for this health check; the API echoes it and the doctor run below carries it.
+  $RequestId = "pados-healthcheck-" + [guid]::NewGuid().ToString("N")
   "runtime_mode=$RuntimeMode" | Out-File -FilePath $Log -Encoding utf8
+  "request_id=$RequestId" | Tee-Object -FilePath $Log -Append
   if ($RuntimeMode -eq "wsl") {
     "PADOS_RUNTIME_MODE=wsl selected. Run this health contract inside WSL with matching PostgreSQL settings." | Tee-Object -FilePath $Log -Append
     exit 2
@@ -28,7 +31,7 @@ try {
   $Health = $null
   for ($Attempt = 0; $Attempt -lt 20; $Attempt++) {
     try {
-      $Health = Invoke-RestMethod -Uri $HealthUrl -Method Get -TimeoutSec 3
+      $Health = Invoke-RestMethod -Uri $HealthUrl -Method Get -TimeoutSec 3 -Headers @{ "X-Request-ID" = $RequestId }
       break
     } catch {
       Start-Sleep -Milliseconds 500
@@ -40,6 +43,7 @@ try {
   }
   "api_health=$($Health.status)" | Tee-Object -FilePath $Log -Append
 
+  $env:PADOS_REQUEST_ID = $RequestId
   cmd /c """$Python"" -m pados.cli.main doctor --json >> ""$Log"" 2>&1"
   exit $LASTEXITCODE
 }

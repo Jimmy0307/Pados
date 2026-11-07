@@ -50,4 +50,7 @@ exclude = ["migrations/"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+  "failure_injection(component): deterministic failure injection with a documented recovery (OP-005)",
+]
 
