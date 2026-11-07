@@ -22,13 +22,13 @@ import re
 import secrets
 import stat
 import sys
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from pados.lifecycle.atomic_replace import replace_with_retry
 from pados.lifecycle.fswalk import fsync_directory, is_link
 from pados.lifecycle.locking import ensure_durable_dir, exclusive_lock
 from pados.lifecycle.minimization import DataMinimizationViolation, assert_minimized
@@ -38,28 +38,6 @@ DEFAULT_MAX_MARKERS = 64
 _STATE_BYTES = 64 * 1024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _STATE_KEYS = frozenset({"schema_version", "latest", "markers"})
-_WINDOWS_REPLACE_RETRIES = 8
-_WINDOWS_REPLACE_RETRYABLE_ERRORS = frozenset({5, 32, 33})
-
-
-def replace_with_retry(source: Path, destination: Path) -> None:
-    """``os.replace``, briefly retrying transient Windows sharing/access failures.
-
-    Windows readers and on-access scanners can temporarily deny replacement of an open target.
-    The retry is bounded and only covers the native sharing/access error codes; every persistent
-    failure still propagates so the caller can fail closed and retain the previous anchor.
-    """
-    for attempt in range(_WINDOWS_REPLACE_RETRIES if sys.platform == "win32" else 1):
-        try:
-            os.replace(source, destination)
-            return
-        except OSError as exc:
-            if (sys.platform != "win32" or getattr(exc, "winerror", None) not in _WINDOWS_REPLACE_RETRYABLE_ERRORS
-                    or attempt + 1 == _WINDOWS_REPLACE_RETRIES):
-                raise
-            time.sleep(min(0.01 * (2 ** attempt), 0.25))
-
-
 _replace_state = replace_with_retry  # the anchor's own state replace (tests substitute it)
 
 

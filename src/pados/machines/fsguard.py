@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from pados.lifecycle.atomic_replace import replace_with_retry
 from pados.lifecycle.fswalk import fsync_directory
 from pados.machines.errors import MachineError
 
@@ -122,7 +123,7 @@ def replace_owner_only(path: Path, content: bytes, prefix: str, root: Path | Non
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise

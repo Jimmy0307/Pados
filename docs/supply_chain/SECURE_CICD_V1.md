@@ -320,6 +320,11 @@ The public repository receives only the export set of an internal commit; nothin
 - The policy checker validates the YAML subset PADOS authors; it is not a general GitHub Actions linter.
 - Private marker checks run only where the untracked marker file exists (local pre-publication builds); a GitHub
   CI pass says nothing about organisation or personal identifiers.
-- On Windows, an atomic `os.replace` in the advisory learning store can fail transiently with access denied when
-  another process (for example an antivirus scanner) briefly holds the target; observed locally about once in five
-  runs of `tests/learning`. Until the store retries, the Windows CI job can be flaky on that suite.
+- On Windows, an atomic `os.replace` fails with access denied (winerror 5) while any other handle (a store reload, a
+  search indexer, an on-access scanner) briefly holds the target. A plain read handle reproduces it every time. The
+  learning store, the advice anchor, the operational stores (`pados.connectivity.storage.atomic_write_json`), the
+  managed known_hosts file and the owner-only machine files replace through
+  `pados.lifecycle.atomic_replace.replace_with_retry`. It retries only winerror 5/32/33, at most 8 attempts (about
+  0.8 s of back-off), and then lets the error through, so a persistent refusal still fails closed. While it backs off, the
+  symlink and parent checks made before the replace are up to 0.8 s old; the replace swaps the directory entry and
+  never writes through a link. The other direct `os.replace` writers do not retry yet.
