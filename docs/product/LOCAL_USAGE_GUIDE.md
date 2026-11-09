@@ -68,8 +68,17 @@ The control API takes a work request, an approval with a WORK_ROUTE subject, a g
 them need the control token (`runtime\local\control.token`). In order:
 
 1. **Work request (web):** Control Center → **New work request**. Paste the control token into the masked field
-   (it stays in that page's memory only; reloading forgets it), choose the project, give a title and what should be
-   done, **Create work request**. Or `POST /control/work-requests`.
+   (it stays in that page's memory only; reloading forgets it), choose the project, give a title, the capability the
+   work needs (for this probe, **Run a static check**) and what should be done, **Create work request**. Or
+   `POST /control/work-requests` with `requested_capability` (for example `RUN_STATIC_ANALYSIS`). Naming the
+   capability makes the server record the request as a task: its body then carries a hashed TaskEnvelope (your text,
+   one pending goal that requires that capability, the project's classification and the current ScopeVersion). A plan
+   step bound to that goal (`product_goal_id` = the envelope's goal id) is what a ResultCandidate needs later. The
+   capability grants nothing; the approval still decides what may run. Without it the request is stored as plain
+   text, and a plan bound to a product goal is refused (`TASK_ENVELOPE_REQUIRED_FOR_RUNTIME_BINDING`). Capture is
+   refused when no ScopeVersion can be read (`TASK_ENVELOPE_SCOPE_VERSION_UNAVAILABLE`) or when the title and text
+   exceed 2000 characters (`TASK_INTENT_TOO_LONG`). The envelope keeps the ScopeVersion it was captured at: if an
+   accepted result moves the scope before you plan, the plan is refused as stale; create a new work request.
 2. **Approval request (API only):** `POST /control/approvals` with a WORK_ROUTE subject naming
    `markdown_reference_check` (the JSON body `task_flow` in `scripts/dogfood/local_dogfood_e2e.py` builds). There is
    no form for this yet: writing the subject (capability, command, worker type, maximum risk) is a product decision.
