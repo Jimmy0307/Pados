@@ -226,10 +226,13 @@ class LiveRemotePorts:
                     "SELECT id::text AS request_id, project_id::text AS project_id, body, status, "
                     "created_at::text AS created_at FROM control_work_requests "
                     "WHERE project_id::text = ANY(:project_ids) "
-                    "AND body LIKE :task_marker "
+                    "AND body LIKE :task_marker AND body LIKE :remote_marker "
                     "ORDER BY created_at DESC LIMIT :limit"
                 ),
-                {"project_ids": list(project_ids), "task_marker": '%"task_envelope"%', "limit": _MAX_RUNS * 2},
+                # Only remote intents are listed; locally captured tasks (control.work_request_capture) also carry
+                # an envelope and must not fill the limit ahead of them.
+                {"project_ids": list(project_ids), "task_marker": '%"task_envelope"%',
+                 "remote_marker": '%"remote_intent"%', "limit": _MAX_RUNS * 2},
             ).mappings().all()
         summaries: list[dict[str, Any]] = []
         for row in rows:
