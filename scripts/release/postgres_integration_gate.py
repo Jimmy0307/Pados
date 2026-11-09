@@ -48,7 +48,8 @@ SUITE_PATHS: dict[str, tuple[str, ...]] = {
     "d1-binding": ("tests/integration/test_rc2_approval_binding_postgres.py",
                    "tests/integration/test_sec4_approval_lifecycle_postgres.py",
                    "tests/integration/test_rc2_exec1_no_executor_route_postgres.py",
-                   "tests/integration/test_op004_idempotency_postgres.py"),
+                   "tests/integration/test_op004_idempotency_postgres.py",
+                   "tests/integration/test_control_work_request_capture_postgres.py"),
     # SEC-9 (model call outside the routing transaction) uses the D4 handoff database.
     "d4-handoff": ("tests/integration/test_rc2_loop_model_handoff_postgres.py",
                    "tests/integration/test_sec9_model_call_outside_transaction_postgres.py",

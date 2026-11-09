@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -12,6 +13,7 @@ from pados.config import artifact_root, get_settings
 from pados.control import projections
 from pados.control import security as control_security
 from pados.control import service as control_service
+from pados.control import work_request_capture
 from pados.control.schemas import (
     ApprovalCreate,
     ApprovalDecision,
@@ -327,8 +329,15 @@ def create_app() -> FastAPI:
         control_security.assert_request_safe(payload.model_dump(), max_bytes=settings.control_request_max_bytes)
 
         def _create() -> dict[str, Any]:
+            if payload.requested_capability is None:
+                with session_scope(settings) as session:
+                    return dict(control_service.create_work_request(
+                        session, payload.model_dump(exclude={"requested_capability"})))
+            # The envelope binds the ScopeVersion the later plan, route and acceptance checks read the same way.
+            scope_version = scope_authority.read_current_scope_version(settings, payload.project_id)
             with session_scope(settings) as session:
-                return dict(control_service.create_work_request(session, payload.model_dump()))
+                return dict(work_request_capture.create_captured_work_request(
+                    session, payload, scope_version=scope_version, now=datetime.now(UTC)))
 
         return guarded(lambda: {"status": "ok", "work_request": _create()})
 

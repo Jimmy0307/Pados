@@ -4,7 +4,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, model_validator
 
 from pados.control.approval_subject import WorkRouteSubject
-from pados.worker.schemas import RouteRequest
+from pados.worker.schemas import CapabilityId, RouteRequest
 
 MAX_WORK_REQUEST_BODY_CHARS = 65_536
 
@@ -21,6 +21,9 @@ class WorkRequestCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     body: str = Field(min_length=1, max_length=MAX_WORK_REQUEST_BODY_CHARS)
     idempotency_key: str = Field(min_length=1, max_length=120)
+    # Opt-in: naming the capability the work needs makes the server capture a TaskEnvelope for the request
+    # (control.work_request_capture). It grants nothing; approval, routing and policy still decide.
+    requested_capability: CapabilityId | None = None
 
 
 class ApprovalCreate(BaseModel):
