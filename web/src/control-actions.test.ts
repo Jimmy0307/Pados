@@ -15,6 +15,8 @@ import {
   decideApproval,
   decisionPrompt,
   getApproval,
+  WORK_CAPABILITIES,
+  workRequestFailure,
   type ControlApproval,
 } from "./control-actions";
 
@@ -55,6 +57,30 @@ describe("control API actions", () => {
     expect(first.idempotency_key).toMatch(/^web-work-[0-9a-f]{24}$/);
     expect(first.idempotency_key).not.toBe(second.idempotency_key);
     expect(JSON.stringify(first)).not.toContain("tok-1");  // the token travels only in its header
+    expect(first).not.toHaveProperty("requested_capability");  // without a capability the request is plain text
+  });
+
+  it("names the capability the work needs, so the server records the request as a task", async () => {
+    const { sent, fetcher } = recorder(200, { status: "ok", work_request: { id: "w1" } });
+    await createWorkRequest("tok-1", "p1", "Check links", "Check the docs links", fetcher, "web-work-key", "RUN_STATIC_ANALYSIS");
+    expect(JSON.parse(String(sent[0].init.body))).toEqual({ project_id: "p1", title: "Check links", body: "Check the docs links",
+      idempotency_key: "web-work-key", requested_capability: "RUN_STATIC_ANALYSIS" });
+  });
+
+  it("says what to do when the server cannot record the request as a task", async () => {
+    const { fetcher } = recorder(409, { error: { schema_version: "pados.error.v1", code: "TASK_ENVELOPE_SCOPE_VERSION_UNAVAILABLE",
+      category: "CONFLICT", message: "conflict", retryable: false, request_id: "r1", write_occurred: "NO" } });
+    const failure = await createWorkRequest("tok-1", "p1", "t", "b", fetcher, "k", "RUN_TESTS").catch((error: unknown) => error);
+    expect(workRequestFailure(failure)).toContain("proof database");
+    expect(workRequestFailure(new Error("boom"))).toBe("boom");
+  });
+
+  it("offers only capabilities the server accepts", () => {
+    const ids = WORK_CAPABILITIES.map((item) => item.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) expect(id).toMatch(/^[A-Z][A-Z_]+$/);
+    expect(ids).toContain("RUN_STATIC_ANALYSIS");
+    expect(ids).not.toContain("DEPLOY");
   });
 
   it.each(["approve", "reject", "revise"] as const)("sends %s with the version the person reviewed", async (verb) => {

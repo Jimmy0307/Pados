@@ -6,7 +6,7 @@
 // in the Remote console with a fresh WebAuthn step-up. A decision is sent only after the person confirms the exact
 // approval, project, summary and version. The token lives in this page's memory only; it is never stored.
 import { useEffect, useState, type FormEvent, type ReactElement } from "react";
-import { describeFailure, requestJson } from "./http";
+import { HttpError, describeFailure, requestJson } from "./http";
 import { inboxAction, pageHref } from "./page-links";
 import type { DecisionInboxItem, Project } from "./api";
 
@@ -53,12 +53,45 @@ export function controlRequest<T>(path: string, controlValue: string, init: Requ
   return requestJson<T>(path, { ...init, headers: { ...headers, ...(init.headers || {}) } }, fetcher ? { fetcher } : {});
 }
 
+// The capabilities a work request may name (pados.worker.schemas.CapabilityId). Naming one makes the server record
+// the request as a task the later plan can bind to; it grants nothing: approval and routing still decide.
+export const WORK_CAPABILITIES: { id: string; label: string }[] = [
+  { id: "RUN_STATIC_ANALYSIS", label: "Run a static check" },
+  { id: "RUN_TESTS", label: "Run tests" },
+  { id: "READ_REPOSITORY", label: "Read the repository" },
+  { id: "SEARCH_CONTEXT", label: "Search context" },
+  { id: "SUMMARIZE", label: "Summarize" },
+  { id: "CLASSIFY_REQUEST", label: "Classify a request" },
+  { id: "GENERATE_DOCUMENT_DRAFT", label: "Draft a document" },
+  { id: "MODIFY_MARKDOWN", label: "Change Markdown" },
+  { id: "MODIFY_CODE", label: "Change code" },
+  { id: "RUN_MIGRATIONS", label: "Run migrations" },
+  { id: "BUILD_RELEASE", label: "Build a release" },
+  { id: "AUDIT_RELEASE", label: "Audit a release" },
+  { id: "CREATE_ARTIFACT", label: "Create an artifact" },
+];
+// The title and text become the task's goal, which holds at most 2000 characters.
+export const WORK_TEXT_MAX_LENGTH = 1600;
+
+// What a person can do about a refused capture (control.work_request_capture); other failures speak for themselves.
+const CAPTURE_HINTS: Record<string, string> = {
+  TASK_ENVELOPE_SCOPE_VERSION_UNAVAILABLE: "The project's current ScopeVersion could not be read. Check that the proof database is running and the project was created with pados project create.",
+  TASK_INTENT_TOO_LONG: "Shorten the title and text (2000 characters together).",
+  WORK_REQUEST_IDEMPOTENCY_CONTENT_CONFLICT: "This request was already created with other content. Reload the page to start a new request.",
+};
+
+export function workRequestFailure(error: unknown): string {
+  const hint = error instanceof HttpError ? CAPTURE_HINTS[error.code] : undefined;
+  return hint ? `${describeFailure(error)} ${hint}` : describeFailure(error);
+}
+
 export function createWorkRequest(controlValue: string, projectId: string, title: string, body: string,
-                                  fetcher?: typeof fetch, key: string = idempotencyKey("web-work"),
+                                  fetcher?: typeof fetch, key: string = idempotencyKey("web-work"), capability?: string,
 ): Promise<{ work_request: { id: string; status?: string } }> {
+  const payload = { project_id: projectId, title, body, idempotency_key: key, ...(capability ? { requested_capability: capability } : {}) };
   return controlRequest("/control/work-requests", controlValue, {
     method: "POST",
-    body: JSON.stringify({ project_id: projectId, title, body, idempotency_key: key }),
+    body: JSON.stringify(payload),
   }, fetcher);
 }
 
@@ -127,18 +160,18 @@ export function WorkRequestPage({ controlValue, projects }: { controlValue: stri
     setNotice("");
     try {
       const result = await createWorkRequest(controlValue, projectId, String(form.get("title") || ""), String(form.get("body") || ""),
-        undefined, requestKey);
+        undefined, requestKey, String(form.get("capability") || ""));
       setCreated(result.work_request.id);
       setRequestKey(idempotencyKey("web-work"));
       formElement.reset();
     } catch (error) {
-      setNotice(`Not created: ${describeFailure(error)}`);
+      setNotice(`Not created: ${workRequestFailure(error)}`);
     } finally {
       setBusy(false);
     }
   }
   return <section className="control-card"><h2>New work request</h2>
-    <p className="control-muted">Records what you want done. It does not run anything: routing it needs an approved work route (see the local usage guide).</p>
+    <p className="control-muted">Records what you want done and the capability it needs, as a task a plan can later carry out. It does not run anything: routing it needs an approved work route (see the local usage guide).</p>
     {!projects.length && <p className="control-muted">No projects yet. Create one with pados project create.</p>}
     <form className="control-form" aria-label="New work request" onSubmit={(event) => void submit(event)}>
       <label>Project<select className="control-input" required value={projectId} onChange={(event) => setProjectId(event.target.value)}>
@@ -146,7 +179,11 @@ export function WorkRequestPage({ controlValue, projects }: { controlValue: stri
         {projects.map((project) => <option key={project.id} value={project.id}>{project.name || project.slug || project.id}</option>)}
       </select></label>
       <label>Title<input className="control-input" name="title" required maxLength={300} /></label>
-      <label>What should be done<textarea className="control-input" name="body" required rows={5} /></label>
+      <label>Capability it needs<select className="control-input" name="capability" required defaultValue="">
+        <option value="">Choose a capability</option>
+        {WORK_CAPABILITIES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+      </select></label>
+      <label>What should be done<textarea className="control-input" name="body" required rows={5} maxLength={WORK_TEXT_MAX_LENGTH} /></label>
       <button className="control-button" type="submit" disabled={!controlValue || busy}>{controlValue ? "Create work request" : "Enter the control token first"}</button>
     </form>
     {created && <p role="status">Created work request {created}.</p>}

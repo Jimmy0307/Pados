@@ -113,9 +113,11 @@ test("a work request is created on the existing control route", async ({ page })
   await page.getByRole("button", { name: "Use token" }).click();
   await page.getByLabel("Project").selectOption(projectId);
   await page.getByLabel("Title").fill("Check the docs links");
+  await page.getByLabel("Capability it needs").selectOption("RUN_STATIC_ANALYSIS");
   await page.getByLabel("What should be done").fill("Run the markdown reference check on docs/.");
   await page.getByRole("button", { name: "Create work request" }).click();
   await expect(page.getByText("Created work request wwwwwwww-0000-4000-8000-000000000003.")).toBeVisible();
-  expect(writes[0].postDataJSON()).toMatchObject({ project_id: projectId, title: "Check the docs links" });
+  expect(writes[0].postDataJSON()).toMatchObject({ project_id: projectId, title: "Check the docs links",
+    requested_capability: "RUN_STATIC_ANALYSIS" });
   expect(writes[0].headers()["x-pados-control-token"]).toBe("synthetic-control-value");
 });
