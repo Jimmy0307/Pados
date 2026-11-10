@@ -125,12 +125,12 @@ class FakeOllama:
                 self.end_headers()
                 self.wfile.write(data)
 
-            def _stream(self, chunks: list[dict[str, Any]], delay: float = 0.0) -> None:
+            def _stream(self, chunks: list[dict[str, Any]], delay: float = 0.0, *, first_at_once: bool = False) -> None:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-ndjson")
                 self.end_headers()
-                for chunk in chunks:
-                    if delay:
+                for index, chunk in enumerate(chunks):
+                    if delay and not (first_at_once and index == 0):
                         time.sleep(delay)
                     self.wfile.write(json.dumps(chunk, ensure_ascii=False).encode() + b"\n")
                     self.wfile.flush()
@@ -166,7 +166,10 @@ class FakeOllama:
                     fake.loaded = True
                     prompt = body["messages"][-1]["content"]
                     if "600-word essay" in prompt:
-                        self._stream([{"message": {"content": "x"}, "done": False}] * 3, delay=1.0)
+                        # One chunk at once, then one a second: every read is short, but the stream (about 3 s)
+                        # outlives the caller's total deadline (1.5-2 s). The first chunk does not wait, so the
+                        # caller always sees at least one before its deadline, however slow the host is.
+                        self._stream([{"message": {"content": "x"}, "done": False}] * 4, delay=1.0, first_at_once=True)
                         return
                     content, calls = fake.answer(body)
                     if body.get("stream") is False:  # non-streamed chat (the compute-node backend's call shape)
