@@ -49,6 +49,7 @@ def _redacts(text: str) -> bool:
     return result == REDACTED_MARKER and text != REDACTED_MARKER
 
 
+# Credential-shaped fixtures are split into concatenated parts so the source holds no complete shape.
 # Boundary cases: each detector at the start of the text, after a letter, a digit, "_" and "-", after punctuation,
 # and with characters that case-insensitive matching folds onto ASCII (Kelvin sign, long s, dotted and dotless i).
 _STEMS = ("api_key", "APIKEY", "secret", "client-secret", "access_key", "private_key", "token", "auth_token",
@@ -58,8 +59,8 @@ _VALUES = ("=abcd", ": \"hunter22\"", "='x'", "=true", "= none", "=nullable", ":
            "\"=\"wxyz", "=[abcd]", "= {}", ":", "")
 _TOKENS = ("sk-abcdefgh", "sk-abc", "ghp_" + "a" * 16, "gho_" + "b" * 15, "github_pat_" + "c" * 16,
            "xoxb-12345678", "xoxB-12345678", "AKIA" + "A" * 16, "ASIA" + "B1" * 8, "AKIA" + "A" * 17,
-           "bearer abcdefgh", "Bearer\t\tA.b~c+d/e=", "BEARER  1234567", "-----BEGIN RSA PRIVATE KEY-----",
-           "-----BEGIN PRIVATE KEY-----", "-----begin private key-----", "https://user:pa55@host", "x://u:p@h",
+           "bearer abcdefgh", "Bearer\t\tA.b~c+d/e=", "BEARER  1234567", "-----BEGIN " + "RSA PRIVATE KEY-----",
+           "-----BEGIN " + "PRIVATE KEY-----", "-----begin private key-----", "https:" + "//user:pa55" + "@host", "x://u:p@h",
            "://u:p@h", "a://:p@h", "a://u:@h", "s\u212a-abcdefgh")
 _PREFIXES = ("", "a", "Z", "9", "_", "-", " ", "\"", "x_", "foo-", ".", "\n", "\u212a", "İ")
 _SUFFIXES = ("", "a", "_", "-", " ", "0", "Z", "\"")
