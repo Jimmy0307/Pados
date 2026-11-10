@@ -36,6 +36,7 @@ runtime lanes, which require the registry's complete step list from a ``full`` r
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import http.client
 import json
@@ -44,6 +45,7 @@ import platform
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -226,12 +228,29 @@ class Api:
 
 
 def start_server(run: Run, env: dict[str, str], port: int, name: str, cwd: Path = REPO) -> subprocess.Popen[str]:
+    refuse_busy_port(port)
     log = open(run.out / f"{name}.log", "w", encoding="utf-8")  # noqa: SIM115 - lives as long as the server
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     server = subprocess.Popen([sys.executable, "-m", "pados.cli.main", "serve"], cwd=cwd, env=env, stdout=log,
                               stderr=subprocess.STDOUT, text=True, creationflags=flags)
-    wait_until_healthy(f"http://127.0.0.1:{port}/api/health", server, name)
+    try:
+        wait_until_healthy(f"http://127.0.0.1:{port}/api/health", server, name)
+    except BaseException:
+        # Never leave a server behind: it would keep the port and answer the next run. A cleanup error (a process
+        # that exited unpolled) must not replace the error that explains the failure.
+        with contextlib.suppress(OSError):
+            stop_server(server)
+        log.close()
+        raise
     return server
+
+
+def refuse_busy_port(port: int) -> None:
+    """A server already listening on the port would answer the health probe in place of the one about to start."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(1.0)
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            raise RuntimeError(f"API port {port} is already in use; stop the server that holds it first")
 
 
 def wait_until_healthy(url: str, server: subprocess.Popen[str], name: str, *,

@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -95,3 +96,57 @@ def test_a_server_that_exited_is_refused_at_once(never_healthy: str) -> None:
     with pytest.raises(RuntimeError, match=r"^pados serve exited early \(3\); see serve_test\.log$"):
         wait_until_healthy(never_healthy, _Server(returncode=3), "serve_test", deadline_s=30.0)  # type: ignore[arg-type]
     assert time.monotonic() - started < 5.0
+
+
+# --- the server a run starts must be the one that answers, and must not outlive a failed start ----------------------
+# (VMware run -claude-20261111 at eb112a3: a server left by the previous failed run still held the port and answered
+# the health probe, so the run talked to a stale server with another token and a removed database.)
+
+
+def test_a_port_that_another_server_holds_is_refused() -> None:
+    import socket
+
+    from scripts.dogfood.local_dogfood_e2e import refuse_busy_port
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        with pytest.raises(RuntimeError, match=rf"^API port {port} is already in use"):
+            refuse_busy_port(port)
+
+
+def test_a_free_port_is_accepted() -> None:
+    import socket
+
+    from scripts.dogfood.local_dogfood_e2e import refuse_busy_port
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserve:
+        reserve.bind(("127.0.0.1", 0))
+        port = reserve.getsockname()[1]
+    refuse_busy_port(port)  # nothing listens there now
+
+
+def test_a_server_that_fails_to_become_healthy_is_stopped_not_left_running(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from scripts.dogfood import local_dogfood_e2e as e2e
+
+    started: list[_Server] = []
+    stopped: list[_Server] = []
+
+    def fake_popen(*_args: object, **_kwargs: object) -> _Server:
+        started.append(_Server())
+        return started[-1]
+
+    def not_healthy(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("pados serve did not become healthy")
+
+    monkeypatch.setattr(e2e, "refuse_busy_port", lambda _port: None)
+    monkeypatch.setattr(e2e.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(e2e, "wait_until_healthy", not_healthy)
+    monkeypatch.setattr(e2e, "stop_server", stopped.append)
+    with pytest.raises(RuntimeError, match="^pados serve did not become healthy$"):
+        e2e.start_server(SimpleNamespace(out=tmp_path), {}, 1, "serve_test")  # type: ignore[arg-type]
+    assert started and stopped == started
