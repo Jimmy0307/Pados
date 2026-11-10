@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import platform
@@ -64,6 +65,10 @@ MIGRATIONS = [("operational", "alembic.ini", "20261101_0020"), ("proof", "alembi
               ("corpus", "alembic.ini", "20260730_0011")]
 SUBJECT_SCHEMA = "pados.approval-subject.v1"
 PROBE = "markdown_reference_check"  # emits pados.capability-outcome.v1 derived from what it checked
+# /api/health opens fresh engines for two databases and reads metrics: one answer takes about 2-3.5 s on the
+# validation hosts, so a probe must be allowed to wait for it; the whole wait stays bounded.
+HEALTH_DEADLINE_SECONDS = 300.0
+HEALTH_PROBE_TIMEOUT_SECONDS = 30.0
 OPS = [{"step_sequence": 1, "capability_id": "RUN_STATIC_ANALYSIS", "command_id": PROBE, "max_risk_level": "LOW"}]
 PRESENCE_ORIGIN = "http://localhost:5173"  # the software authenticator's origin; rp_id localhost
 TERMINAL = {"COMPLETED", "PAUSED", "BLOCKED", "WAITING_HUMAN", "FAILED_TERMINAL", "FAILED_RECOVERABLE", "CANCELLED"}
@@ -225,14 +230,23 @@ def start_server(run: Run, env: dict[str, str], port: int, name: str, cwd: Path 
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     server = subprocess.Popen([sys.executable, "-m", "pados.cli.main", "serve"], cwd=cwd, env=env, stdout=log,
                               stderr=subprocess.STDOUT, text=True, creationflags=flags)
-    for _ in range(120):
+    wait_until_healthy(f"http://127.0.0.1:{port}/api/health", server, name)
+    return server
+
+
+def wait_until_healthy(url: str, server: subprocess.Popen[str], name: str, *,
+                       deadline_s: float = HEALTH_DEADLINE_SECONDS,
+                       probe_timeout_s: float = HEALTH_PROBE_TIMEOUT_SECONDS) -> None:
+    """Return once ``url`` answers 2xx; refuse a server that exits or is not healthy by the deadline."""
+    deadline = time.monotonic() + deadline_s
+    while (remaining := deadline - time.monotonic()) > 0:
+        if server.poll() is not None:
+            raise RuntimeError(f"pados serve exited early ({server.returncode}); see {name}.log")
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2):  # noqa: S310
-                return server
-        except (urllib.error.URLError, OSError):
-            if server.poll() is not None:
-                raise RuntimeError(f"pados serve exited early ({server.returncode}); see {name}.log")
-            time.sleep(1)
+            with urllib.request.urlopen(url, timeout=max(0.1, min(probe_timeout_s, remaining))):  # noqa: S310
+                return
+        except (urllib.error.URLError, http.client.HTTPException, OSError):  # not healthy yet (or not ours): retry
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
     raise RuntimeError("pados serve did not become healthy")
 
 
