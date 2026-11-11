@@ -99,7 +99,7 @@ def test_health_reports_independent_operational_and_corpus_domains(monkeypatch: 
     monkeypatch.setattr(
         service,
         "check_database",
-        lambda active: {"version": "PostgreSQL", "pgvector": "true"},
+        lambda active, engine=None: {"version": "PostgreSQL", "pgvector": "true"},
     )
     monkeypatch.setattr(service, "Session", lambda _engine: _FakeSession())
     monkeypatch.setattr(
