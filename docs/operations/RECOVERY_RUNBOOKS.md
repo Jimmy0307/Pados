@@ -78,9 +78,11 @@ Injected by: the `compute_node` cases in the OP-005 test file and `tests/compute
 | Symptom | Code | Safe recovery | Verify |
 |---|---|---|---|
 | Ingest failed | `INGEST_FAILED` | Use the batch's own retry action (`POST /api/corpus/batches/{id}/retry`); it is state-based and reconciles first | The batch reaches its published state |
-| Not authorized | `BATCH_NOT_AUTHORIZED`, `BATCH_AUTHORIZATION_EXPIRED` | Human approval: authorize the batch again | The batch shows a current authorization |
+| Not authorized | `HUMAN_AUTHORIZATION_REQUIRED`, `UNAUTHORIZED_INGEST`, `AUTHORIZATION_EXPIRED` (Control Center and API); `BATCH_NOT_AUTHORIZED`, `BATCH_AUTHORIZATION_EXPIRED` (the P6.15 milestone launcher) | Human approval: authorize the batch again | The batch shows a current authorization |
 | Corpus lane down | `CORPUS_UNAVAILABLE`, `CORPUS_SCHEMA_INCOMPLETE` | Restore or migrate the corpus database lane (`pados migrate`) | The corpus endpoints answer 200 |
 | `/health/ready` is `DEGRADED` with `corpus_database` not OK | `CORPUS_DB_UNAVAILABLE`, `CORPUS_MIGRATION_STALE` (`CORPUS_DB_UNCONFIGURED` is `NOT_CONFIGURED`) | The core loop keeps working; only retrieval and ingestion are affected. Start the database or run `pados migrate` for the corpus lane | `corpus_database` reads `OK` and readiness returns to `OK` |
+
+The component contract is `docs/operations/CORPUS_CONTRACT.md`.
 
 Injected by: `tests/unit/test_p6_15_corpus.py`, `tests/unit/test_p6_15_corpus_runtime.py` and the web corpus tests. These
 need the corpus database lane; locally they fall into the documented environment baseline (R19-3).
