@@ -201,7 +201,15 @@ Still open for local use (each needs a product or owner decision, not a code fix
   - Still open: text that holds a stem (for example `token`) followed by MiBs of other text reaches the assignment
     pattern itself, which takes about 0.6 s per MiB on Windows. No current test or contract covers that shape.
   - The benchmark fake runtime now sends its first essay chunk at once (`fb59c62`), so the deadline tests no
-    longer depend on a 0.5 s margin. | OPEN | They are not fixed. Each run reports them by comparing failure sets, never as PASS. **Triage (2026-11-11, Windows run at `034fce6`, 165 failing cases):**
+    longer depend on a 0.5 s margin.
+  - That was not the Windows cause. The Windows run at `4212c12` failed
+    `test_total_deadline_is_total_not_per_read` again, with 0 chunks after 1.77 s. httpx builds a CA-verifying
+    TLS context for every `Client`, even for this plain-HTTP loopback endpoint. Loading the CA bundle took
+    1.3-1.7 s on the Windows host, inside the measured request: it used up the 1.5 s deadline and inflated every
+    recorded first-token time. `OllamaClient` now builds that context once per process, at construction, and
+    every client shares it, so verification is unchanged.
+    `test_the_deadline_does_not_count_building_the_tls_context` failed before the fix. Run alone, the deadline
+    test failed 5 of 5 times before the fix and passed 3 of 3 after it. | OPEN | They are not fixed. Each run reports them by comparing failure sets, never as PASS. **Triage (2026-11-11, Windows run at `034fce6`, 165 failing cases):**
   - 135 are OCR isolation: `tests/packs/ocr` and the `tests/pipeline` suites. `_isolated.run_bounded` refuses
     on win32 (`OCR_ISOLATION_UNAVAILABLE`) because no Job Object containment exists, so every isolated
     adapter reports unavailable and plans are `NO_FEASIBLE_CANDIDATE`.
