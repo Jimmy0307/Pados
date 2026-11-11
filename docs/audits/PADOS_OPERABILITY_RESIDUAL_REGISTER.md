@@ -194,7 +194,17 @@ Still open for local use (each needs a product or owner decision, not a code fix
     verbatim as an oracle.
   - Worst cases dropped from 0.5-1.5 s to 0.06-0.2 s on Windows.
   - The benchmark fake runtime now sends its first essay chunk at once (`fb59c62`), so the deadline tests no
-    longer depend on a 0.5 s margin. | OPEN | They are not fixed. Each run reports them by comparing failure sets, never as PASS. **Unblock:** per-test triage on a Windows host (most need POSIX semantics or are fail-closed by design on win32, e.g. CR13d-01 operator issuance). | OP-002: lane `windows-full-suite` (`known_status FAIL`, required for `production`); OP-006 |
+    longer depend on a 0.5 s margin. | OPEN | They are not fixed. Each run reports them by comparing failure sets, never as PASS. **Triage (2026-11-11, Windows run at `034fce6`, 165 failing cases):**
+  - 135 are OCR isolation: `tests/packs/ocr` and the `tests/pipeline` suites. `_isolated.run_bounded` refuses
+    on win32 (`OCR_ISOLATION_UNAVAILABLE`) because no Job Object containment exists, so every isolated
+    adapter reports unavailable and plans are `NO_FEASIBLE_CANDIDATE`.
+  - 28 are operator decision issuance (`tests/capability/test_fabric_cr13*`): `OPERATOR_PLATFORM_UNSUPPORTED`
+    on win32.
+  - 2 are the benchmark timing tests.
+  The first two groups fail closed by design.
+  **Unblock:** an owner decision to build Windows Job Object containment for the isolated runner (process,
+  memory and CPU limits, kill-on-close, and bounded pipe reads without `selectors`) and a Windows operator
+  issuance path. Until then they stay FAIL, never PASS. | OP-002: lane `windows-full-suite` (`known_status FAIL`, required for `production`); OP-006 |
 | R19-4 | `pados init` in a home first initialized with the development-only `PADOS_CLI_DEV_*` overrides refuses with `RUNTIME_RECORD_MISSING`; `--adopt-runtime` is the consent. | RESOLVED IN BRANCH (`3ea37f4`), pending final validation | Documented in `docs/install/TROUBLESHOOTING.md` beside the development overrides. A doc-only change; the behaviour was already fail-closed. | Docs |
 | R19-5 | `--adopt-runtime` combined with a version mismatch still refuses (`UPDATE_REQUIRED`); the behaviour is correct in code but not pinned by a test. | RESOLVED IN BRANCH (`3ea37f4`), pending final validation | `packages/cli/test/inst1-init-consent.test.js` now runs the refusal with `--adopt-runtime` and `--adopt-runtime --yes`. The code was already correct, so the test pins existing behaviour; it did not fail first. | CLI tests |
 | R19-6 | Live local model: measured execution was validated on Ollama 0.40.13. Model output never becomes a ResultCandidate and never reaches the CAS; that path does not exist by design. | OPEN (as a limitation) | MODEL OUTPUT != TRUTH. Report it as `NOT_VALIDATED` for governed acceptance, never as PASS. **Unblock:** a governed acceptance path for model output, approved by the owner. It does not exist by design today. | OP-002: lanes `local-model-governed-acceptance` (`NOT_VALIDATED`, required for `production`) and `local-model-measured-execution` (`does_not_cover` lists ResultCandidate/CAS, REA, OpenMAIC, AI-Scientist-v3) in `scripts/release/runtime_lanes.v1.json` |
