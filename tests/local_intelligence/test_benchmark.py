@@ -129,6 +129,38 @@ def test_total_deadline_is_total_not_per_read():
         assert exceeded.value.elapsed_s < 1.5 + 1.0 and exceeded.value.chunks >= 1
 
 
+def test_the_deadline_does_not_count_building_the_tls_context(monkeypatch):
+    """httpx builds a CA-verifying TLS context for every Client, even for this plain-HTTP loopback endpoint; loading
+    the CA bundle took 1.3-1.7 s on a Windows host, which consumed the whole 1.5 s deadline before the request."""
+    import time
+
+    import httpx
+
+    from pados.local_intelligence import benchmark
+
+    real = httpx.create_ssl_context
+    built = []
+
+    def slow_context(*args, **kwargs):
+        built.append(1)
+        time.sleep(2.0)
+        return real(*args, **kwargs)
+
+    benchmark._tls_context.cache_clear()
+    monkeypatch.setattr(benchmark.httpx, "create_ssl_context", slow_context)
+    try:
+        with FakeOllama(present=True) as fake:
+            client = OllamaClient(fake.url)
+            assert client.get("/api/version")["version"]
+            with pytest.raises(benchmark.TotalDeadlineExceeded) as exceeded:
+                client.chat("qwen3:8b", ({"role": "user", "content": "Write a 600-word essay about cooling pumps."},),
+                            num_ctx=8192, num_predict=900, think=False, deadline_s=1.5)
+        assert exceeded.value.elapsed_s < 1.5 + 1.0 and exceeded.value.chunks >= 1
+        assert len(built) == 1  # one context per process, shared by every client
+    finally:
+        benchmark._tls_context.cache_clear()
+
+
 def test_unreadable_server_state_stays_unknown(monkeypatch):
     from pados.local_intelligence import benchmark
 

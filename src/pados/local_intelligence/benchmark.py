@@ -8,9 +8,11 @@ samples taken while requests run; where a figure cannot be measured it is record
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
+import ssl
 import statistics
 import threading
 import time
@@ -60,6 +62,17 @@ class TotalDeadlineExceeded(RuntimeError):
 CONNECT_TIMEOUT_S = 5.0
 
 
+@functools.cache
+def _tls_context() -> ssl.SSLContext:
+    """httpx's default CA-verifying TLS context, built once per process and shared by every client.
+
+    The endpoint is always plain-HTTP loopback, so no handshake uses it, but httpx builds one for every Client, and
+    loading the CA bundle took 1.3-1.7 s on a Windows host: inside a measured request it counted against the deadline
+    and the first-token time. Verification is unchanged; only the repeated construction is gone.
+    """
+    return httpx.create_ssl_context(trust_env=False)
+
+
 class OllamaClient:
     """Loopback-only measurement client for Ollama's native API (no proxies, no credentials)."""
 
@@ -68,9 +81,11 @@ class OllamaClient:
             raise BenchmarkRefused("BENCHMARK_LOOPBACK_ONLY")
         self.endpoint = endpoint.rstrip("/")
         self.timeout = timeout
+        _tls_context()  # one-time local setup, built here so no request or first-token clock includes it
 
     def _client(self, timeout: float | None = None) -> httpx.Client:
-        return httpx.Client(base_url=self.endpoint, trust_env=False, timeout=timeout or self.timeout)
+        return httpx.Client(base_url=self.endpoint, trust_env=False, timeout=timeout or self.timeout,
+                            verify=_tls_context())
 
     def get(self, path: str) -> dict[str, Any]:
         with self._client(10.0) as client:
@@ -84,6 +99,7 @@ class OllamaClient:
         """Stream NDJSON. ``timeout`` is httpx's per-operation timeout (connect/read/write each); ``deadline_s`` is a
         TOTAL request deadline enforced by a watchdog that closes the response, so a stream that keeps sending
         chunks can still not outlive it (the per-read timeout alone never fires while chunks keep arriving)."""
+        tls = _tls_context()  # cached: built when the client was constructed
         if deadline_s is None:
             with self._client(timeout) as client, client.stream("POST", path, json=body) as response:
                 response.raise_for_status()
@@ -94,7 +110,7 @@ class OllamaClient:
         started = time.perf_counter()
         expired = threading.Event()
         limits = httpx.Timeout(deadline_s, connect=min(CONNECT_TIMEOUT_S, deadline_s))
-        with httpx.Client(base_url=self.endpoint, trust_env=False, timeout=limits) as client:
+        with httpx.Client(base_url=self.endpoint, trust_env=False, timeout=limits, verify=tls) as client:
             with client.stream("POST", path, json=body) as response:
 
                 def expire() -> None:
