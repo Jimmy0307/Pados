@@ -120,7 +120,7 @@
       "notes": "E2E_RESULT.json records the platform string, not the hypervisor; a WSL kernel string is refused, but VMware itself is attested only by the vm-summary of the ci-gates lane."
     },
     "windows-ci-gates": {
-      "description": "The CI-required gates run natively on Windows by run_gates.ps1; evidence is its gate-summary.json. The registry fixes the complete gate list.",
+      "description": "The CI-required gates run natively on Windows by scripts/validation/windows_validate.py; evidence is the gate-summary-lane.json that windows_lane_records.py writes from its run. The registry fixes the complete gate list.",
       "platform": "windows",
       "max_age_days": 14,
       "claims": [
@@ -332,7 +332,7 @@
         "FULL_DETERMINISTIC_SUITE_WINDOWS"
       ],
       "known_status": "FAIL",
-      "notes": "R19-3: 126 environment-dependent failures that are identical on pristine main. A baseline-identical run is recorded as FAIL with its comparison, never as PASS. Evidence is a gate summary of its own (run_gates.ps1 -Only full_pytest, gate-summary-partial.json); the ci-gates summary cannot back two lanes.",
+      "notes": "R19-3: 126 environment-dependent failures that are identical on pristine main. A baseline-identical run is recorded as FAIL with its comparison, never as PASS. Evidence is a gate summary of its own (full-suite-summary.json from scripts/validation/windows_lane_records.py); the ci-gates summary cannot back two lanes.",
       "source": {
         "format": "gate-summary",
         "required_checks": [

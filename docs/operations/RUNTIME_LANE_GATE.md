@@ -30,9 +30,9 @@ which is reviewed with the code; neither an evidence index nor an index spec can
 | Lane | Source format | Required checks |
 |---|---|---|
 | `windows-native-e2e`, `vmware-linux-e2e` | `e2e-result` (`E2E_RESULT.json`, runner contract `pados.local-dogfood-e2e.v1`) | the registry's complete step list (kept equal to the steps the runner records by a test): each step exactly once and PASS, no other step, `run_mode: full`, `verdict` PASS; the platform string must match (a WSL kernel is refused) |
-| `windows-ci-gates` | `gate-summary` (`run_gates.ps1`, which must record its `platform`) | the 18 CI gates, from `ci_policy` to `npm_cli` |
-| `windows-full-suite` | `gate-summary` of its own run (`run_gates.ps1 -Only full_pytest`) | `full_pytest` |
-| `vmware-linux-ci-gates` | `vm-summary` (`virt` must be `vmware`) | the 19 chain gates, including `full_pytest` and `integration_pg` |
+| `windows-ci-gates` | `gate-summary` (`gate-summary-lane.json`, written by `scripts/validation/windows_lane_records.py` from a `windows_validate.py` run; it must record its `platform`) | the 18 CI gates, from `ci_policy` to `npm_cli` |
+| `windows-full-suite` | `gate-summary` of its own (`full-suite-summary.json` from the same converter) | `full_pytest` |
+| `vmware-linux-ci-gates` | `vm-summary` (`summary.json` of `scripts/validation/vm_online_chain.sh`; `virt` must be `vmware`) | the 19 chain gates, including `full_pytest` and `integration_pg` |
 | `postgres-integration` | `postgres-gate` (`postgres-integration.json`, schema v1) | all six suites; each suite report beside it is re-hashed and must be that suite's own report (`gate` = `postgres-<suite>`, `paths` exactly the registry's `suite_paths`, none missing or empty), PASS for the same commit with no skips and at least the registry's `min_passed` tests (both kept equal to the runner's `SUITE_PATHS` and `MIN_TESTS` by tests) |
 | `github-ci` | `github-actions` (`collect_github_actions_evidence.py`: the check-runs, jobs, workflow-runs and annotations responses, unmodified) | the seven required checks. Every run must belong to `Jimmy0307/Pados` (a fork shares the commit, not the repository) and the `github-actions` app (slug and id 15368), be backed by its own job in a run of the registry's workflow file for that check (`ci.yml` or `security.yml`), be completed and `success`, and show the registry's required steps as executed (`success`). Freshness counts from the oldest required run |
 | model, REA, OpenMAIC, AI-Scientist-v3 lanes | none | can never PASS today |
@@ -82,8 +82,8 @@ the runner's own record is, and let `runtime_lane_index.py build` read the rest 
 
 ```json
 {"schema_version": "pados.runtime-lane-spec.v1", "commit": "<40-hex>", "lanes": [
-  {"lane_id": "windows-ci-gates", "platform": "windows", "command": "run_gates.ps1",
-   "evidence_path": "windows-<sha>/gate-summary.json"},
+  {"lane_id": "windows-ci-gates", "platform": "windows", "command": "windows_validate.py",
+   "evidence_path": "windows-<sha>/gate-summary-lane.json"},
   {"lane_id": "windows-native-e2e", "platform": "windows", "command": "local_dogfood_e2e.py",
    "evidence_path": "e2e-windows-<sha>/E2E_RESULT.json"},
   {"lane_id": "postgres-integration", "platform": "windows", "command": "postgres_integration_gate.py --recreate",
@@ -186,6 +186,25 @@ responses are not signed by GitHub. A log that says PASS for the wrong test set,
 script that skips a check, or an E2E run against a mocked dependency all bind cleanly. Content truth stays with human
 review of the evidence and the existing approval and acceptance paths. A lane's `claims` and `does_not_cover` in the
 registry say what a verified lane may be quoted for; nothing outside `claims` may be quoted.
+
+## Running the validation lanes
+
+The Windows and VMware runners are in the repository, and a test (`tests/release_supply_chain/test_validation_runners.py`)
+keeps the gates each one records equal to the registry's `required_checks`. Run them one at a time: the VMware VM
+shares the host's CPU, memory and disk, and the timing-sensitive tests fail under load (R19-3).
+
+```text
+# Windows: a clean worktree at the commit, its .venv installed from requirements.lock, PostgreSQL binaries on the host.
+python scripts/validation/windows_validate.py <worktree> <evidence-dir>/windows-<sha> <free pg port> [--pg-bin <dir>]
+python scripts/validation/windows_lane_records.py <evidence-dir>/windows-<sha> [--baseline <earlier full_pytest.log>]
+
+# VMware Linux VM (never WSL): a fresh clone of the pushed commit; a new run tag for a rerun of the same commit.
+bash scripts/validation/vm_online_chain.sh <sha> <branch> [run tag]
+```
+
+Every run writes a new evidence directory and refuses an existing one. The Windows runner refuses a worktree with
+tracked changes; the VMware chain removes only the containers it created, with their volumes. Copy the VM's `-out`
+directory to the evidence root and check it against its `SHA256SUMS` before building the index.
 
 ## Commands
 
