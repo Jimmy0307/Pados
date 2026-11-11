@@ -192,7 +192,14 @@ Still open for local use (each needs a product or owner decision, not a code fix
   - Every detector now starts on a literal the regex engine can skip to.
   - `tests/consolidation/test_redaction_equivalence.py` requires the same decision as the previous patterns, kept
     verbatim as an oracle.
-  - Worst cases dropped from 0.5-1.5 s to 0.06-0.2 s on Windows.
+  - The Windows run at `74d8e7a` still failed its own 0.5 s check (0.58 s): measured idle afterwards, 2 MiB of
+    whitespace took 0.22-0.5 s on Windows, almost all in the stem gate. A regex over per-letter classes gives the
+    engine nothing to skip to. The gate is now a substring search after folding the four IGNORECASE extras and
+    lower-casing (`_has_credential_stem`). A test checks every code point that IGNORECASE matches against a stem
+    letter folds to that letter. 400,000 generated inputs gave the same decision as the oracle. The same inputs
+    now take 0.03-0.13 s on Windows.
+  - Still open: text that holds a stem (for example `token`) followed by MiBs of other text reaches the assignment
+    pattern itself, which takes about 0.6 s per MiB on Windows. No current test or contract covers that shape.
   - The benchmark fake runtime now sends its first essay chunk at once (`fb59c62`), so the deadline tests no
     longer depend on a 0.5 s margin. | OPEN | They are not fixed. Each run reports them by comparing failure sets, never as PASS. **Triage (2026-11-11, Windows run at `034fce6`, 165 failing cases):**
   - 135 are OCR isolation: `tests/packs/ocr` and the `tests/pipeline` suites. `_isolated.run_bounded` refuses
