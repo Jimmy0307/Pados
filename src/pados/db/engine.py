@@ -112,14 +112,20 @@ def session_scope(settings: Settings | None = None) -> Iterator[Session]:
         engine.dispose()
 
 
-def check_database(settings: Settings | None = None) -> dict[str, str]:
+def check_database(settings: Settings | None = None, *, engine: Engine | None = None) -> dict[str, str]:
+    """Probe the database. A caller that already holds an engine for it passes ``engine``, which stays the caller's;
+    otherwise a short-lived engine is created and disposed here, so a probe never leaves a pool behind."""
     active_settings = settings or get_settings()
-    engine = get_engine(active_settings)
-    with engine.connect() as conn:
-        version = conn.execute(text("select version()")).scalar_one()
-        vector_installed = conn.execute(
-            text("select exists(select 1 from pg_extension where extname = 'vector')")
-        ).scalar_one()
+    probe_engine = engine if engine is not None else get_engine(active_settings)
+    try:
+        with probe_engine.connect() as conn:
+            version = conn.execute(text("select version()")).scalar_one()
+            vector_installed = conn.execute(
+                text("select exists(select 1 from pg_extension where extname = 'vector')")
+            ).scalar_one()
+    finally:
+        if engine is None:
+            probe_engine.dispose()
     return {
         "status": "ok",
         "database_url": active_settings.safe_database_url,
