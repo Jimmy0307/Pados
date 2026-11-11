@@ -114,18 +114,29 @@ def test_redact_on_two_mebibytes_of_whitespace_around_a_token_is_well_inside_its
 # --- the two facts the speed-up rests on -----------------------------------------------------------------------------
 
 
-def test_the_stem_classes_fold_exactly_like_ignorecase() -> None:
-    """Each stem letter's explicit class matches the same characters as the letter under re.IGNORECASE."""
+def test_the_stem_fold_maps_every_ignorecase_match_of_a_stem_letter_onto_that_letter() -> None:
+    """Any character re.IGNORECASE matches against a stem letter folds to exactly that letter, one for one."""
     import sys
 
-    from pados.execution.context import _CREDENTIAL_WORD_STEMS, _caseless
+    from pados.execution.context import _CREDENTIAL_WORD_STEMS, _fold_for_stems
 
-    for letter in sorted(set(_CREDENTIAL_WORD_STEMS) - {"|"}):
-        folded = re.compile(letter, re.IGNORECASE)
-        spelled = re.compile(_caseless(letter))
-        expected = {ch for ch in map(chr, range(sys.maxunicode + 1)) if folded.fullmatch(ch)}
-        actual = {ch for ch in map(chr, range(sys.maxunicode + 1)) if spelled.fullmatch(ch)}
-        assert actual == expected, letter
+    letters = {letter: re.compile(letter, re.IGNORECASE) for letter in sorted(set(_CREDENTIAL_WORD_STEMS) - {"|"})}
+    checked = 0
+    for ch in map(chr, range(sys.maxunicode + 1)):
+        for letter, folded in letters.items():
+            if folded.fullmatch(ch):
+                assert _fold_for_stems(ch) == letter, (letter, hex(ord(ch)))
+                checked += 1
+    assert checked >= 2 * len(letters) + 4  # both cases of each letter, plus the four extras
+
+
+def test_the_stem_gate_finds_stems_spelled_with_the_ignorecase_extras() -> None:
+    from pados.execution.context import _has_credential_stem
+
+    for text in ("TOKEN", "ſecret", "AUTHORİZATıON", "x PwD y", "é Key 中"):
+        assert _has_credential_stem(text), ascii(text)
+    for text in ("", " " * 64, "tokn", "é中", "pass"):
+        assert not _has_credential_stem(text), ascii(text)
 
 
 def test_every_credential_word_contains_a_stem_outside_its_optional_parts() -> None:

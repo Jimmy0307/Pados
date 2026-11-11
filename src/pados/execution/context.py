@@ -51,9 +51,10 @@ _CREDENTIAL_WORDS = (
 )
 # Every keyword alternative above contains one of these stems. The regex engine
 # matches IGNORECASE text one character at a time, so any text the assignment
-# pattern matches also matches a stem under the same rules; text without a stem
-# cannot hold an assignment and skips the slower assignment scan. Keep the two
-# in step: tests/consolidation/test_redaction_equivalence.py checks each word.
+# pattern matches also holds a stem under the same folding; text without a stem
+# cannot hold an assignment and skips the slower assignment scan
+# (_has_credential_stem). Keep the two in step:
+# tests/consolidation/test_redaction_equivalence.py checks each word.
 _CREDENTIAL_WORD_STEMS = r"key|secret|token|passw|pwd|authorization"
 # URL user-info detection, assembled from named parts: the scheme separator, a
 # bounded user part, the user/password separator, a bounded password part and
@@ -81,17 +82,37 @@ _ASSIGNMENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 # Besides upper and lower case, re.IGNORECASE folds these characters onto the
-# stems' letters (dotted and dotless i, the Kelvin sign, the long s). Spelling
-# the stems out as explicit classes keeps exactly the same matches without the
-# IGNORECASE flag, which lets the engine skip to candidate first characters.
+# stems' letters (dotted and dotless i, the Kelvin sign, the long s).
 _IGNORECASE_EXTRAS = {"i": "İı", "k": "K", "s": "ſ"}
+_STEM_FOLDS = tuple((extra, letter) for letter, extras in _IGNORECASE_EXTRAS.items() for extra in extras)
+_STEMS = tuple(_CREDENTIAL_WORD_STEMS.split("|"))
 
 
-def _caseless(word: str) -> str:
-    return "".join(f"[{ch}{ch.upper()}{_IGNORECASE_EXTRAS.get(ch, '')}]" for ch in word)
+def _fold_for_stems(text: str) -> str:
+    """Lower-case text after mapping the IGNORECASE extras onto their stem letters.
+
+    Every character that re.IGNORECASE matches against a stem letter becomes
+    exactly that letter, one for one, so a stem the assignment pattern could
+    match survives as a plain substring. Characters lower() maps elsewhere or
+    expands (U+0130 would become two) are never part of a stem: the extras are
+    replaced first, and no other character folds onto a stem letter.
+    """
+    if not text.isascii():
+        for extra, letter in _STEM_FOLDS:
+            text = text.replace(extra, letter)
+    return text.lower()
 
 
-_ASSIGNMENT_STEMS = re.compile("|".join(_caseless(stem) for stem in _CREDENTIAL_WORD_STEMS.split("|")))
+def _has_credential_stem(text: str) -> bool:
+    """A cheap superset gate for _ASSIGNMENT_PATTERN: substring search after folding.
+
+    A regex over per-letter classes cannot skip ahead to candidate positions and
+    costs 0.2-0.5 s on 2 MiB of text; this costs a few hundredths of a second.
+    """
+    folded = _fold_for_stems(text)
+    return any(stem in folded for stem in _STEMS)
+
+
 # Every pattern starts with a literal so the engine can skip ahead to candidate
 # positions, and uses only bounded repetition, so each search runs in time
 # linear in the input length. "Not glued to a preceding letter or digit" is
@@ -114,7 +135,7 @@ _CREDENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 def redact(text: str) -> str:
     """Replace the whole text with a marker if it holds credential-shaped material."""
-    if _ASSIGNMENT_STEMS.search(text) and _ASSIGNMENT_PATTERN.search(text):
+    if _has_credential_stem(text) and _ASSIGNMENT_PATTERN.search(text):
         return REDACTED_MARKER
     if any(pattern.search(text) for pattern in _CREDENTIAL_PATTERNS):
         return REDACTED_MARKER
