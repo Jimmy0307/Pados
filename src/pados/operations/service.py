@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from pados.config import PROOF_REVISION_HEAD, Settings, lane_revisions_accepted, lane_settings
 from pados.db import get_engine
+from pados.db.relations import relation_visible
 from pados.execution.context import redact
 from pados.operations.live_evidence import live_provider_evidence
 from pados.operations.projections import decision_inbox_projection, mission_control_projection
@@ -109,7 +110,7 @@ def decision_inbox(session: Session) -> dict[str, Any]:
            FROM control_approvals
            WHERE status = 'PENDING' ORDER BY created_at ASC, id ASC""",
     )
-    if session.execute(text("SELECT to_regclass('public.result_acceptance_candidates')")).scalar() is not None:
+    if relation_visible(session, "result_acceptance_candidates"):
         backing = {str(row["approval_id"]) for row in _rows(
             session, "SELECT approval_id::text AS approval_id FROM result_acceptance_candidates "
                      "WHERE approval_id IS NOT NULL")}
@@ -158,7 +159,7 @@ def _probe_lane(settings: Settings, database: str, lane: str) -> dict[str, Any]:
 def _versions(connection: Any, table_name: str) -> list[str]:
     if table_name not in {"alembic_version", "p6_19b_alembic_version"}:
         raise ValueError("UNREGISTERED_MIGRATION_TABLE")
-    if connection.execute(text(f"SELECT to_regclass('public.{table_name}')")).scalar() is None:
+    if not relation_visible(connection, table_name):
         return []
     return sorted(str(v) for v in connection.execute(text(f"SELECT version_num FROM {table_name}")).scalars())
 
