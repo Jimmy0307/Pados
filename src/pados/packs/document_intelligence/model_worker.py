@@ -538,18 +538,21 @@ def _enter_job(job: WindowsJob, pid: int) -> None:
 def _kill(process: subprocess.Popen[str]) -> None:
     import psutil
 
-    try:
-        parent = psutil.Process(process.pid)
-        for child in parent.children(recursive=True):
-            child.kill()
-        parent.kill()
-    except psutil.Error:
-        pass
-    if sys.platform != "win32":  # start_new_session: the group id is the worker's pid; reaches re-parented orphans
+    # Signal by pid only while the worker is still our unreaped child: once reaped, its pid (and, when its group is
+    # empty, its group id) may already belong to an unrelated process, and a SIGKILL would land there.
+    if process.poll() is None:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+            parent = psutil.Process(process.pid)
+            for child in parent.children(recursive=True):
+                child.kill()
+            parent.kill()
+        except psutil.Error:
             pass
+        if sys.platform != "win32":  # start_new_session: the group id is the worker's pid; reaches re-parented orphans
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:

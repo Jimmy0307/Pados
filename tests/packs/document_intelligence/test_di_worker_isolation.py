@@ -298,3 +298,25 @@ def test_a_production_engine_never_answers_a_probe(tmp_path: Path) -> None:
     assert 'request["op"] == "probe" and engine == "hashing-test-engine"' in source
     assert model_worker.ENGINES[0] == "fastembed"
     assert worker_isolation.ISOLATION_FAILED in model_worker.__dict__.values()
+
+
+def test_a_reaped_worker_is_never_signalled_by_pid_or_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review P2-1: after the worker is reaped its pid (or empty group id) may be recycled; no SIGKILL may follow."""
+    import os as os_module
+    import subprocess as subprocess_module
+
+    import psutil
+
+    from pados.packs.document_intelligence import model_worker
+
+    finished = subprocess_module.Popen([sys.executable, "-c", "pass"], stdin=subprocess_module.PIPE,
+                                       stdout=subprocess_module.PIPE, text=True)
+    finished.wait(timeout=30)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a reaped worker must not be signalled")
+
+    monkeypatch.setattr(psutil, "Process", forbidden)
+    monkeypatch.setattr(os_module, "killpg", forbidden, raising=False)
+    model_worker._kill(finished)  # returns quietly: nothing signalled, streams closed
+    assert finished.stdin is not None and finished.stdin.closed
