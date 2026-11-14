@@ -98,7 +98,11 @@ class ObjectStoreArtifacts:
         except OSError as exc:
             raise ArtifactIntegrityError("ARTIFACT_MISSING") from exc
         with os.fdopen(descriptor, "rb") as handle:
-            payload = handle.read(MAX_READ_BYTES + 1)
+            # Ask for the file's own size plus one byte (a grown file still reads one byte too many and fails the
+            # size/hash check below), never MAX_READ_BYTES + 1: CPython allocates the requested buffer up front,
+            # which on Windows costs ~64 ms per read for the 256 MiB bound (DI-9).
+            size = os.fstat(handle.fileno()).st_size
+            payload = handle.read(min(size, MAX_READ_BYTES) + 1)
         if len(payload) > MAX_READ_BYTES:
             raise ArtifactIntegrityError("ARTIFACT_TOO_LARGE")
         if hashlib.sha256(payload).hexdigest() != ref.sha256 or len(payload) != ref.size_bytes:
