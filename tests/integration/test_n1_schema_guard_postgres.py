@@ -28,6 +28,8 @@ TABLE = "result_acceptance_candidates"
 def _hide_public_copy(session: Session) -> None:
     """Rename any real ``public`` table out of the way for this transaction only (DDL rolls back in PostgreSQL)."""
     hidden = f"{TABLE}_n1_{uuid4().hex[:8]}"
+    # The rename takes an ACCESS EXCLUSIVE lock until the rollback: fail fast rather than wait on another session.
+    session.execute(text("SET LOCAL lock_timeout = '5s'"))
     session.execute(text(f"ALTER TABLE IF EXISTS public.{TABLE} RENAME TO {hidden}"))
 
 
