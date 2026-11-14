@@ -100,11 +100,11 @@ def test_force_replaces_a_hard_linked_control_token_instead_of_writing_through_i
 def test_force_does_not_write_the_control_token_into_a_world_readable_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    token = _token_path(tmp_path)
-    token.write_text("old\n", encoding="utf-8")
-    os.chmod(token, 0o644)
+    credential_file = _token_path(tmp_path)
+    credential_file.write_text("old\n", encoding="utf-8")
+    os.chmod(credential_file, 0o644)
     (tmp_path / ".env").write_text("PADOS_ENV=local\n", encoding="utf-8")
     monkeypatch.setattr(os, "chmod", lambda *_args, **_kwargs: None)
     assert _init(tmp_path, "--force") == 0
-    assert token.read_text(encoding="utf-8").strip() != "old"
-    assert stat.S_IMODE(os.stat(token).st_mode) & 0o077 == 0
+    assert credential_file.read_text(encoding="utf-8").strip() != "old"
+    assert stat.S_IMODE(os.stat(credential_file).st_mode) & 0o077 == 0
