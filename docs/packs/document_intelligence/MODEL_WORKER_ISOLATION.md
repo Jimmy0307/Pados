@@ -191,7 +191,8 @@ resolved, and the owner accepts the residual table.
     seen from outside fails closed.
   - fail-closed paths: an unsupported platform fails closed. A malformed isolation setting is refused before
     anything applies.
-  - the filter program's shape on x86_64 and aarch64.
+  - the filter program's shape on x86_64 and aarch64 (including the process-reaching denials), and the exact
+    tree allowed at READY (a pre-READY helper, a READY from a non-child, a fake or second console host all fail).
   - network probe, with OS isolation on and off. The environment is exact (a proxy, a token and a user variable
     set in the parent do not reach the worker), and the offline variables are set. Python-level connect and
     resolve are refused in-process. On Linux a raw socket and a child's socket fail with `EACCES`. On Windows the
@@ -205,8 +206,8 @@ resolved, and the owner accepts the residual table.
   - the fetch script imports the hub client only inside its operator action, which requires `--approve`.
   - the governed Document Intelligence workflow runs end to end with `subprocess.Popen` forbidden.
 - Results:
-  - Windows 11 host: all Document Intelligence worker tests pass. The four Linux-only tests are skipped, each
-    with its reason.
-  - Ubuntu 24.04 VM, offline venv with this branch: 135 passed and 4 skipped (the Windows-only tests) in
+  - Windows 11 host: 138 passed and 8 skipped in `tests/packs/document_intelligence`. The skips are the two
+    Linux-only isolation tests, the OCR pack (R19-3) and a symlink test, each with its reason.
+  - Ubuntu 24.04 VM, offline venv with this branch: 142 passed and 4 skipped (the Windows-only tests) in
     `tests/packs/document_intelligence`. This includes live parity of the isolated worker with the in-process
     engines over the real pinned models.
