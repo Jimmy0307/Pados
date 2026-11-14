@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import http.client
 import ipaddress
-import multiprocessing as mp
 import re
 import socket
 import ssl
@@ -16,14 +15,18 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from html.parser import HTMLParser
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 import httpx
 
-from pados.corpus.pdf import parse_pdf
+from pados.corpus.pdf import ParsedPdf, failure_code, parse_pdf_bytes
+from pados.corpus.pdf_isolation import (
+    PDF_PARSE_BUDGET,
+    PDF_PARSE_BUSY,
+    PDF_PARSE_TIMEOUT,
+    RESOURCE_FAILURE_CODES,
+)
 
 MAX_RESPONSE_BYTES = 5_000_000
 MAX_REDIRECTS = 3
@@ -57,6 +60,8 @@ _CREDENTIAL_FRAGMENTS = (
 )
 Resolver = Callable[..., list[tuple[Any, ...]]]
 _PDF_WORKER_LIMIT = threading.BoundedSemaphore(1)
+# A fetched PDF is at most MAX_RESPONSE_BYTES; the wall clock is set per call from the remaining deadline.
+URL_PDF_PARSE_BUDGET = replace(PDF_PARSE_BUDGET, max_input_bytes=MAX_RESPONSE_BYTES, wall_seconds=PDF_PARSE_TIMEOUT_SECONDS)
 
 
 class UrlIngestError(RuntimeError):
@@ -533,84 +538,70 @@ def extract_html(content: bytes, encoding: str) -> dict[str, Any]:
     }
 
 
-def _parse_pdf_worker(path_value: str, output: Any) -> None:
-    try:
-        parsed = parse_pdf(Path(path_value))
-        text_parts: list[str] = []
-        text_length = 0
-        truncated = False
-        for page in parsed.pages:
-            if not page.normalized_text:
-                continue
-            separator = 1 if text_parts else 0
-            remaining = MAX_EXTRACTED_TEXT_CHARS - text_length - separator
-            if remaining <= 0:
-                truncated = True
-                break
-            value = page.normalized_text[:remaining]
-            text_parts.append(value)
-            text_length += len(value) + separator
-            if len(value) < len(page.normalized_text):
-                truncated = True
-                break
-        text = "\n".join(text_parts)
-        if parsed.extraction_status == "PARSED":
-            status = "EXTRACTION_PARTIAL" if truncated else "FETCHED"
-        elif parsed.extraction_status in {"OCR_REQUIRED", "PARSE_FAILED"}:
-            status = "EXTRACTION_PARTIAL"
-        else:
-            status = "UNSUPPORTED"
-        output.send(("ok", {
-            "title": str(parsed.title)[:500] if parsed.title else None,
-            "author": (", ".join(parsed.authors)[:500] or None),
-            "publication_date": str(parsed.publication_year) if parsed.publication_year else None,
-            "text": text,
-            "status": status,
-            "metadata": {
-                "pages": len(parsed.pages),
-                "parser": str(parsed.parser_version)[:200],
-                "warnings": [str(value)[:500] for value in list(parsed.warnings)[:100]],
-                "extraction_status": parsed.extraction_status,
-                "text_truncated": truncated,
-            },
-        }))
-    except Exception as exc:  # noqa: BLE001 - process boundary must convert parser failures.
-        output.send(("error", type(exc).__name__))
-    finally:
-        output.close()
+def _pdf_payload(parsed: ParsedPdf) -> dict[str, Any]:
+    """The URL-ingest view of a parse (unchanged shape): text capped at ``MAX_EXTRACTED_TEXT_CHARS``."""
+    text_parts: list[str] = []
+    text_length = 0
+    truncated = False
+    for page in parsed.pages:
+        if not page.normalized_text:
+            continue
+        separator = 1 if text_parts else 0
+        remaining = MAX_EXTRACTED_TEXT_CHARS - text_length - separator
+        if remaining <= 0:
+            truncated = True
+            break
+        value = page.normalized_text[:remaining]
+        text_parts.append(value)
+        text_length += len(value) + separator
+        if len(value) < len(page.normalized_text):
+            truncated = True
+            break
+    text = "\n".join(text_parts)
+    if parsed.extraction_status == "PARSED":
+        status = "EXTRACTION_PARTIAL" if truncated else "FETCHED"
+    elif parsed.extraction_status in {"OCR_REQUIRED", "PARSE_FAILED"}:
+        status = "EXTRACTION_PARTIAL"
+    else:
+        status = "UNSUPPORTED"
+    return {
+        "title": str(parsed.title)[:500] if parsed.title else None,
+        "author": (", ".join(parsed.authors)[:500] or None),
+        "publication_date": str(parsed.publication_year) if parsed.publication_year else None,
+        "text": text,
+        "status": status,
+        "metadata": {
+            "pages": len(parsed.pages),
+            "parser": str(parsed.parser_version)[:200],
+            "warnings": [str(value)[:500] for value in list(parsed.warnings)[:100]],
+            "extraction_status": parsed.extraction_status,
+            "text_truncated": truncated,
+        },
+    }
 
 
 def extract_pdf(content: bytes, timeout_seconds: float = PDF_PARSE_TIMEOUT_SECONDS) -> dict[str, Any]:
+    """Parse a fetched PDF in the bounded isolated worker (``corpus.pdf_isolation``, P2-11).
+
+    pypdf never runs in the API process. A bound that was hit (deadline, memory, decode/page/text budget,
+    worker failure) raises a closed ``UrlIngestError`` and nothing is admitted; a malformed document keeps
+    its former outcome (``EXTRACTION_PARTIAL`` with no text and a closed warning code).
+    """
     active_timeout = max(0.1, min(PDF_PARSE_TIMEOUT_SECONDS, timeout_seconds))
     if not _PDF_WORKER_LIMIT.acquire(timeout=active_timeout):
         raise UrlIngestError("PDF_EXTRACTION_BUSY", "PDF extraction capacity is busy", status="FAILED")
     try:
-        with TemporaryDirectory(prefix="pados-url-pdf-") as temp_root:
-            path = Path(temp_root) / "source.pdf"
-            path.write_bytes(content)
-            context = mp.get_context("spawn")
-            receiver, sender = context.Pipe(duplex=False)
-            process = context.Process(target=_parse_pdf_worker, args=(str(path), sender), daemon=True)
-            process.start()
-            sender.close()
-            if not receiver.poll(active_timeout):
-                process.terminate()
-                process.join(1.0)
-                if process.is_alive():
-                    process.kill()
-                    process.join(1.0)
-                raise UrlIngestError("PDF_EXTRACTION_TIMEOUT", "PDF extraction exceeded its deadline", status="FAILED")
-            outcome, payload = receiver.recv()
-            process.join(1.0)
-            if process.is_alive():
-                process.terminate()
-                process.join(1.0)
-            receiver.close()
+        parsed = parse_pdf_bytes(content, budget=replace(URL_PDF_PARSE_BUDGET, wall_seconds=active_timeout))
     finally:
         _PDF_WORKER_LIMIT.release()
-    if outcome != "ok" or not isinstance(payload, dict):
+    failed = failure_code(parsed)
+    if failed == PDF_PARSE_TIMEOUT:
+        raise UrlIngestError("PDF_EXTRACTION_TIMEOUT", "PDF extraction exceeded its deadline", status="FAILED")
+    if failed == PDF_PARSE_BUSY:
+        raise UrlIngestError("PDF_EXTRACTION_BUSY", "PDF extraction capacity is busy", status="FAILED")
+    if failed is not None and failed in RESOURCE_FAILURE_CODES:
         raise UrlIngestError("PDF_EXTRACTION_FAILED", "PDF extraction failed safely", status="FAILED")
-    return payload
+    return _pdf_payload(parsed)
 
 
 def fetch_url(
