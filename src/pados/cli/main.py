@@ -26,6 +26,7 @@ from pados.config import (
     lane_settings,
 )
 from pados.db import check_database, get_engine, session_scope
+from pados.db.relations import relation_visible
 from pados.logging_config import configure_logging, get_logger, resolve_log_level
 from pados.operability.context import bind_context, context_from_headers
 from pados.loop import service as loop_service
@@ -212,7 +213,7 @@ def _check_migrations(settings: Settings) -> dict[str, Any]:
                 proof_rows: Any = (
                     conn.execute(text(
                         "select version_num from p6_19b_alembic_version"
-                        if conn.execute(text("select to_regclass('public.p6_19b_alembic_version')")).scalar()
+                        if relation_visible(conn, "p6_19b_alembic_version")
                         else "select null::text as version_num where false"
                     )).scalars().all()
                 )
