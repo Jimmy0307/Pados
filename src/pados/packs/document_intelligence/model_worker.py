@@ -31,6 +31,7 @@ Protocol: one JSON object per line on stdin and stdout. Requests ``{"op": "embed
 from __future__ import annotations
 
 import atexit
+import errno
 import json
 import os
 import queue
@@ -39,29 +40,56 @@ import sys
 import threading
 import time
 import weakref
+from functools import partial
 from pathlib import Path
 from typing import IO, Any, Final
 
 from pados.packs.document_intelligence.local_models import LocalModelError
 from pados.packs.document_intelligence.materialize import MaterializeError, discard, materialize_verified
 from pados.packs.document_intelligence.model_pin import ModelPin, ModelRole
+from pados.packs.document_intelligence.worker_isolation import (
+    CONSOLE_HOST_IMAGE,
+    CREATE_SUSPENDED,
+    ISOLATION_FAILED,
+    MEMORY_REFUSED,
+    IsolationError,
+    WindowsJob,
+    apply_worker_limits,
+    effective_address_space,
+    linux_isolation_observed,
+    memory_cap_bytes,
+    resume,
+    starting_processes,
+    supported,
+)
 
 MAX_LINE_BYTES: Final = 32 * 1024 * 1024
 WATCHDOG_INTERVAL: Final = 0.1
 ENGINES: Final = ("fastembed", "hashing-test-engine")
 _LIVE: weakref.WeakSet[SubprocessModelBackend] = weakref.WeakSet()
+_WORKER_EXITS: Final = (MEMORY_REFUSED, ISOLATION_FAILED, "MODEL_WORKER_IDENTITY_REFUSED")
 
 
 # --------------------------------------------------------------------------------------------- worker side
+NETWORK_REFUSAL: Final = "network disabled in the PADOS model worker"
+_REFUSED_METHODS: Final = ("connect", "connect_ex", "sendto", "sendmsg")
+_REFUSED_FUNCTIONS: Final = ("create_connection", "getaddrinfo", "gethostbyname", "gethostbyname_ex",
+                             "gethostbyaddr")
+
+
 def _deny_network() -> None:
+    """In-process refusal (defense in depth): Python-level connect, send-to and name resolution. Native code and
+    the ``_socket`` type are NOT covered; on Linux the seccomp filter refuses ``socket()`` itself."""
     import socket
 
     def refuse(*_args: object, **_kwargs: object) -> None:
-        raise OSError("network disabled in the PADOS model worker")
+        raise OSError(NETWORK_REFUSAL)
 
-    socket.socket.connect = refuse  # type: ignore[method-assign]
-    socket.socket.connect_ex = refuse  # type: ignore[method-assign,assignment]
-    socket.create_connection = refuse  # type: ignore[assignment]
+    for name in _REFUSED_METHODS:
+        if hasattr(socket.socket, name):
+            setattr(socket.socket, name, refuse)
+    for name in _REFUSED_FUNCTIONS:
+        setattr(socket, name, refuse)
 
 
 class _HashingEngine:
@@ -100,6 +128,55 @@ class _HashingEngine:
 _hold: list[bytes] = []
 
 
+def _attempt(action: Any) -> str:
+    try:
+        action()
+    except OSError as exc:
+        if NETWORK_REFUSAL in str(exc):
+            return "REFUSED_IN_PROCESS"
+        winerror = getattr(exc, "winerror", None)
+        if winerror:
+            return f"REFUSED_BY_OS:WINERROR_{winerror}"
+        return f"REFUSED_BY_OS:{errno.errorcode.get(exc.errno or 0, 'UNKNOWN')}"
+    return "ALLOWED"
+
+
+def _probe(port: int) -> dict[str, Any]:
+    """Test engine only: what the worker can see and reach. Never reachable with a production engine."""
+    import socket
+
+    import _socket
+
+    def raw_connect() -> None:
+        handle = _socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # the C type: no in-process refusal
+        try:
+            handle.settimeout(2)
+            handle.connect(("127.0.0.1", port))
+        finally:
+            handle.close()
+
+    def spawn() -> str:
+        """Start a child (no in-process refusal there) that opens a socket: exit 0 opened, 10 refused."""
+        code = "import _socket, sys\ntry:\n    _socket.socket(2, 1).close()\nexcept OSError:\n    sys.exit(10)"
+        try:
+            completed = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, timeout=30,
+                                       check=False)
+        except OSError as exc:
+            return _attempt(partial(_raise, exc))
+        return {0: "CHILD_SOCKET_ALLOWED", 10: "CHILD_SOCKET_REFUSED"}.get(completed.returncode,
+                                                                          f"CHILD_FAILED:{completed.returncode}")
+
+    return {"environment": sorted(os.environ),
+            "offline": {name: os.environ.get(name) for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")},
+            "connect": _attempt(lambda: socket.create_connection(("127.0.0.1", port), timeout=2).close()),
+            "resolve": _attempt(lambda: socket.getaddrinfo("localhost", port)),
+            "raw_connect": _attempt(raw_connect), "spawn": spawn()}
+
+
+def _raise(exc: BaseException) -> None:
+    raise exc
+
+
 def _load(engine: str, role: str, model_name: str, directory: Path, threads: int, dimension: int) -> Any:
     if engine == "hashing-test-engine":
         return _HashingEngine(dimension or 8)
@@ -117,8 +194,25 @@ def _reply(stream: IO[str], payload: dict[str, Any]) -> None:
     stream.flush()
 
 
+def _enter_isolation(token: str) -> bool:
+    """POSIX: the worker limits itself before it reads anything (no ``preexec_fn`` in the parent). ``token`` is
+    ``off`` or the address-space limit in bytes (which also installs the socket filter)."""
+    if token != "off" and not (token.isdigit() and len(token) <= 15 and int(token) > 0):
+        return False
+    if sys.platform == "win32":
+        return token == "off"  # the parent placed this process in its Job Object before it ran
+    try:
+        apply_worker_limits(None if token == "off" else int(token))
+    except IsolationError:
+        return False
+    return True
+
+
 def worker_main(argv: list[str]) -> int:
-    """``python -I -m pados.packs.document_intelligence.model_worker <pin.json> <model dir> <engine>``."""
+    """``python -I -m pados.packs.document_intelligence.model_worker <pin.json> <model dir> <engine> <isolation>``."""
+    if len(argv) != 4 or not _enter_isolation(argv[3]):
+        _reply(sys.stdout, {"ok": False, "code": ISOLATION_FAILED})
+        return 4
     _deny_network()
     pin = ModelPin.model_validate_json(Path(argv[0]).read_text(encoding="utf-8"))
     directory, engine = Path(argv[1]), argv[2]
@@ -129,6 +223,9 @@ def worker_main(argv: list[str]) -> int:
         return 2
     try:
         backend = _load(engine, pin.role.value, pin.model_name, directory, pin.threads, pin.dimension or 0)
+    except MemoryError:
+        _reply(sys.stdout, {"ok": False, "code": MEMORY_REFUSED})
+        return 5
     except Exception:  # noqa: BLE001 - closed code, no engine text
         _reply(sys.stdout, {"ok": False, "code": "LOCAL_MODEL_FAILED"})
         return 3
@@ -141,8 +238,14 @@ def worker_main(argv: list[str]) -> int:
                 result: Any = [[float(v) for v in vector] for vector in backend.embed(texts, batch_size=len(texts))]
             elif request["op"] == "rerank":
                 result = [float(s) for s in backend.rerank(str(request["query"]), texts, batch_size=len(texts))]
+            elif request["op"] == "probe" and engine == "hashing-test-engine":
+                result = _probe(int(request["port"]))
             else:
                 raise ValueError
+        except MemoryError:  # the kernel cap refused an allocation: report it, then exit (state is suspect)
+            _hold.clear()
+            _reply(sys.stdout, {"ok": False, "code": MEMORY_REFUSED})
+            return 5
         except Exception:  # noqa: BLE001 - closed code, no input or engine text
             _reply(sys.stdout, {"ok": False, "code": "LOCAL_MODEL_FAILED"})
             continue
@@ -160,22 +263,18 @@ def _worker_environment(threads: int) -> dict[str, str]:
     return environment
 
 
-def _limits(max_open_files: int) -> None:  # POSIX preexec: no core dumps, bounded descriptors
-    if sys.platform != "win32":
-        import resource
-
-        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-        resource.setrlimit(resource.RLIMIT_NOFILE, (max_open_files, max_open_files))
-
-
 class SubprocessModelBackend:
     """Parent handle of one model worker. Not thread-safe: the pinned engines already serialize calls."""
 
     def __init__(self, pin: ModelPin, source: Path, *, engine: str = "fastembed", deadline: float | None = None,
-                 scratch: Path | None = None) -> None:
+                 scratch: Path | None = None, os_isolation: bool = True) -> None:
         if engine not in ENGINES:
             raise LocalModelError("MODEL_WORKER_ENGINE_UNKNOWN")
+        if os_isolation and not supported():
+            raise LocalModelError(ISOLATION_FAILED)
         self.pin, self.source, self.engine = pin, source, engine
+        self.os_isolation = os_isolation  # False only for diagnosis: the RSS watchdog alone remains
+        self._job: WindowsJob | None = None
         self.deadline = deadline if deadline is not None else max(0.5, pin.timeout_seconds * 0.9)
         self._scratch = scratch
         self._process: subprocess.Popen[str] | None = None
@@ -187,7 +286,7 @@ class SubprocessModelBackend:
         self._start()  # eagerly: the engine's factory call runs under its (longer) load deadline
 
     def _state(self) -> dict[str, Any]:
-        self._holder: dict[str, Any] = {"process": None, "copy": None}
+        self._holder: dict[str, Any] = {"process": None, "copy": None, "job": None}
         return self._holder
 
     @staticmethod
@@ -195,6 +294,8 @@ class SubprocessModelBackend:
         process = holder.get("process")
         if process is not None and process.poll() is None:
             _kill(process)
+        if holder.get("job") is not None:
+            holder["job"].close()
         if holder.get("copy") is not None:
             discard(holder["copy"])
 
@@ -206,6 +307,18 @@ class SubprocessModelBackend:
     def model_dir(self) -> Path | None:
         return self._copy
 
+    @property
+    def job(self) -> WindowsJob | None:
+        """The worker's Job Object (Windows with OS isolation), for inspection."""
+        return self._job
+
+    @property
+    def address_space(self) -> int | None:
+        """The ``RLIMIT_AS`` the worker runs under (Linux with OS isolation)."""
+        if self.os_isolation and sys.platform.startswith("linux"):
+            return effective_address_space(self.pin.max_ram_mb)
+        return None
+
     def _start(self) -> None:
         try:
             self._copy = materialize_verified(self.pin, self.source, parent=self._scratch)
@@ -214,27 +327,63 @@ class SubprocessModelBackend:
         self._holder["copy"] = self._copy
         pin_file = self._copy.parent / f"{self._copy.name}.pin.json"
         pin_file.write_text(self.pin.model_dump_json(by_alias=True), encoding="utf-8")
+        address_space = self.address_space
         argv = [sys.executable, "-I", "-m", "pados.packs.document_intelligence.model_worker", str(pin_file),
-                str(self._copy), self.engine]
+                str(self._copy), self.engine, "off" if address_space is None else str(address_space)]
         options: dict[str, Any] = {}
         if sys.platform == "win32":
             options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            if self.os_isolation:
+                options["creationflags"] |= CREATE_SUSPENDED  # nothing runs before it is inside the job
+                self._job = self._isolated(lambda: WindowsJob(memory_cap_bytes(self.pin.max_ram_mb),
+                                                              starting_processes()))
+                self._holder["job"] = self._job
         else:
-            options["start_new_session"] = True
-            options["preexec_fn"] = lambda: _limits(256)
+            options["start_new_session"] = True  # no preexec_fn: the worker applies its limits itself
         self._process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=subprocess.DEVNULL, env=_worker_environment(self.pin.threads),
                                          cwd=str(self._copy), text=True, encoding="utf-8", bufsize=1, **options)
         self._holder["process"] = self._process
+        if self._job is not None:
+            self._isolated(partial(_enter_job, self._job, self._process.pid))
         self._lines = queue.Queue()
         threading.Thread(target=self._read, args=(self._process.stdout, self._lines), daemon=True,
                          name=f"pados-model-worker-reader-{self.pin.pin_id}").start()
         threading.Thread(target=self._watch, args=(self._process,), daemon=True,
                          name=f"pados-model-worker-watchdog-{self.pin.pin_id}").start()
-        ready = self._receive(max(self.deadline, self.pin.timeout_seconds * 5))
+        try:
+            ready = self._receive(max(self.deadline, self.pin.timeout_seconds * 5))
+        except LocalModelError:
+            self.close()
+            raise
         if ready != "READY":
             self.close()
             raise LocalModelError("MODEL_WORKER_START_FAILED")
+        self._isolated(self._confirm_isolation)
+
+    def _isolated(self, step: Any) -> Any:
+        """Run an isolation step; any failure closes the worker and is ``MODEL_WORKER_ISOLATION_FAILED``."""
+        try:
+            return step()
+        except (IsolationError, OSError):
+            self.close()
+            raise LocalModelError(ISOLATION_FAILED) from None
+
+    def _confirm_isolation(self) -> None:
+        """After READY, re-read from outside what the kernel enforces on the worker; refuse any shortfall."""
+        process = self._process
+        if not self.os_isolation or process is None:
+            return
+        if self._job is not None:
+            import psutil  # type: ignore[import-untyped]  # declared runtime dependency; no stubs are pinned
+
+            root = psutil.Process(process.pid)
+            tree = [root, *root.children(recursive=True)]
+            if not all(self._job.contains(member.pid) for member in tree):
+                raise IsolationError("PROCESS_OUTSIDE_JOB")
+            self._job.seal(sum(member.name().lower() != CONSOLE_HOST_IMAGE for member in tree))
+        elif linux_isolation_observed(process.pid) != (self.address_space, "2"):
+            raise IsolationError("LINUX_LIMITS_NOT_OBSERVED")
 
     @staticmethod
     def _read(stream: IO[str] | None, sink: queue.Queue[str | None]) -> None:
@@ -249,7 +398,7 @@ class SubprocessModelBackend:
             sink.put(line)
 
     def _watch(self, process: subprocess.Popen[str]) -> None:
-        import psutil  # type: ignore[import-untyped]  # declared runtime dependency; no stubs are pinned
+        import psutil
 
         limit = self.pin.max_ram_mb * 1024 * 1024
         try:
@@ -288,6 +437,8 @@ class SubprocessModelBackend:
             raise LocalModelError("MODEL_WORKER_PROTOCOL_INVALID")
         if reply["ok"] is not True:
             code = str(reply.get("code", "LOCAL_MODEL_FAILED"))
+            if code in _WORKER_EXITS:
+                self.close()  # the worker exits after these: reap it now, the next call starts a fresh one
             raise LocalModelError(code if code.isupper() and len(code) <= 64 else "LOCAL_MODEL_FAILED")
         return reply.get("result")
 
@@ -327,12 +478,22 @@ class SubprocessModelBackend:
         self._holder["process"] = None
         if process is not None:
             _kill(process)
+        job, self._job = self._job, None
+        self._holder["job"] = None
+        if job is not None:
+            job.close()  # kill-on-close: nothing of the worker outlives its job
         if self._copy is not None:
             discard(self._copy)
             pin_file = self._copy.parent / f"{self._copy.name}.pin.json"
             pin_file.unlink(missing_ok=True)
             self._copy = None
             self._holder["copy"] = None
+
+
+def _enter_job(job: WindowsJob, pid: int) -> None:
+    """Assign a worker created suspended to its job, then let it run (Windows)."""
+    job.assign(pid)
+    resume(pid)
 
 
 def _kill(process: subprocess.Popen[str]) -> None:
@@ -363,10 +524,11 @@ def _close_all() -> None:
         backend.close()
 
 
-def subprocess_factory(engine: str = "fastembed", *, scratch: Path | None = None) -> Any:
-    """A ``factory`` for ``PinnedTextEmbedder`` / ``PinnedCrossEncoder`` that runs the model in a worker process."""
+def subprocess_factory(engine: str = "fastembed", *, scratch: Path | None = None, os_isolation: bool = True) -> Any:
+    """A ``factory`` for ``PinnedTextEmbedder`` / ``PinnedCrossEncoder`` that runs the model in a worker process.
+    Nothing in PADOS calls this by default: an operator opts in by passing it as the engine's ``factory``."""
     def factory(pin: ModelPin, directory: Path) -> SubprocessModelBackend:
-        return SubprocessModelBackend(pin, directory, engine=engine, scratch=scratch)
+        return SubprocessModelBackend(pin, directory, engine=engine, scratch=scratch, os_isolation=os_isolation)
     return factory
 
 
