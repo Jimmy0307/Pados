@@ -201,13 +201,23 @@ def register_production_adapter(registry: CapabilityRegistry, adapter: Capabilit
     return adapter_id
 
 
+WiringExtension = Callable[[CapabilityRegistry, TemplateRegistry, ValidatorRegistry, ValidatorRegistry],
+                           Mapping[str, CapabilityAdapter]]
+
+
 def wire_pipeline(provenance: InputProvenance, *, operator: str, clock: Callable[[], datetime] | None = None,
                   include_model_explanation: bool = True, advice_enabled: bool = False,
-                  ledger: ExecutionLedgerReader | None = None) -> PipelineWiring:
+                  ledger: ExecutionLedgerReader | None = None,
+                  extensions: Sequence[WiringExtension] = ()) -> PipelineWiring:
     """``ledger`` is a READ-ONLY, anchored reader (``FileExecutionLedger.reader()``) of the ledger the
     operator's executor writes (``CapabilityExecutor(..., ledger=<the writer>)``); the report adapter reads it.
     The writer itself is refused (``EXECUTION_LEDGER_READER_REQUIRED``). Without an anchored reader the report
-    capability is unavailable."""
+    capability is unavailable.
+
+    ``extensions`` are further operator registrations (for example a Capability Pack such as Document
+    Intelligence): each receives the same registry, template registry and SCHEMA / REFERENCE_CHECK validator
+    registries before the verifier is built, registers through them only, and returns the adapters it installed.
+    An extension grants nothing and cannot replace a registration made here (the registries refuse overrides)."""
     registry = CapabilityRegistry(clock=clock)
     for descriptor in capability_catalog(include_model_explanation=include_model_explanation):
         registry.register_capability(descriptor, operator=operator)
@@ -229,6 +239,11 @@ def wire_pipeline(provenance: InputProvenance, *, operator: str, clock: Callable
     invocations = InvocationScope()
     references.register(OCR_DOCUMENT_CONTRACT, REFERENCE_CHECKER, document_reference_check(provenance, invocations))
     references.register(DRSA_CONTRACT, REFERENCE_CHECKER, algorithm_reference_check())
+    for extension in extensions:
+        installed = extension(registry, templates, schemas, references)
+        if set(installed) & set(adapters):
+            raise WiringError("PIPELINE_EXTENSION_ADAPTER_CONFLICT")
+        adapters.update(installed)
     config = PlannerConfig(preferences={DOCUMENT_OCR: (TEXT_LAYER_ADAPTER_ID,)}, advice_enabled=advice_enabled)
     return PipelineWiring(registry, templates, VerificationEngine(schemas=schemas, references=references), config,
                           MappingProxyType(adapters), invocations)

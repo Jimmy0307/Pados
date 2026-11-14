@@ -6,6 +6,7 @@ import pytest
 
 from pados.capability.pack import CapabilityPackManifest, CheckerSpec, FailureCodeSpec
 from pados.capability.pack_operability import adapter_health, check, profile
+from pados.packs.document_intelligence import deterministic_stages as document_intelligence
 from pados.packs.problem_solving import pack as problem_solving
 from pados.packs.reference import pack as reference
 
@@ -13,6 +14,8 @@ from pados.packs.reference import pack as reference
 PACKS: dict[str, CapabilityPackManifest] = {
     "reference": reference.MANIFEST,
     "problem_solving": problem_solving.MANIFEST,
+    # The model-backed manifests of this package are built per pin; tests/packs/document_intelligence checks them.
+    "document_intelligence": document_intelligence.MANIFEST,
 }
 
 

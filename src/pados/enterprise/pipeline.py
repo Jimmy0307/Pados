@@ -11,7 +11,7 @@ never writes PADOS semantic state.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -236,15 +236,24 @@ class KnowledgePipeline:
         return presentation_filter(candidates, access, scope).withheld_texts
 
 
+def reciprocal_rank_fusion(ranked: Sequence[tuple[str, Sequence[tuple[str, float]]]], *,
+                           k: int = 60) -> dict[str, dict[str, float]]:
+    """Reciprocal-rank fusion of named hit lists (each in rank order): ``fused = sum(1 / (k + rank))`` rounded to
+    8 decimals, with every component score kept under its list's name for provenance. Shared by this pipeline and
+    the Document Intelligence fusion stage, so both fuse with one formula."""
+    scores: dict[str, dict[str, float]] = {}
+    for name, hits in ranked:
+        for rank, (item_id, score) in enumerate(hits):
+            entry = scores.setdefault(item_id, {"fused": 0.0})
+            entry[name] = score
+            entry["fused"] = round(entry["fused"] + 1.0 / (k + rank + 1), 8)
+    return scores
+
+
 def _fuse(exact: list[tuple[str, float]], vector: list[tuple[str, float]],
           expanded: list[str], *, k: int = 60) -> list[tuple[str, dict[str, float]]]:
     """Reciprocal-rank fusion; every component score is kept for provenance."""
-    scores: dict[str, dict[str, float]] = {}
-    for name, hits in (("exact", exact), ("vector", vector)):
-        for rank, (chunk_id, score) in enumerate(hits):
-            entry = scores.setdefault(chunk_id, {"fused": 0.0})
-            entry[name] = score
-            entry["fused"] = round(entry["fused"] + 1.0 / (k + rank + 1), 8)
+    scores = reciprocal_rank_fusion((("exact", exact), ("vector", vector)), k=k)
     for chunk_id in expanded:
         entry = scores.setdefault(chunk_id, {"fused": 0.0})
         entry["graph"] = 1.0
