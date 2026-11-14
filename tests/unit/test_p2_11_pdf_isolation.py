@@ -478,3 +478,47 @@ def test_only_the_isolated_workers_import_pypdf() -> None:
                        if path.relative_to(ROOT) not in workers
                        and ("pypdf" in _imports(path) or "PdfReader(" in path.read_text(encoding="utf-8-sig")))
     assert offenders == []
+
+
+# --- Review follow-ups: a transient outcome is retryable, never "malformed", and a backlog answers BUSY quickly ---
+
+
+def test_transient_codes_are_resource_codes_and_never_content_codes() -> None:
+    assert pdf_isolation.TRANSIENT_FAILURE_CODES <= pdf_isolation.RESOURCE_FAILURE_CODES
+    assert not pdf_isolation.TRANSIENT_FAILURE_CODES & pdf_isolation.CONTENT_FAILURE_CODES
+
+
+@pytest.mark.parametrize("code", sorted(pdf_isolation.TRANSIENT_FAILURE_CODES))
+def test_corpus_pipeline_never_records_a_transient_failure_as_malformed_or_duplicate(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str) -> None:
+    """Two good documents parsed while the worker is busy (or cut short) stay retryable (UNSUPPORTED).
+
+    Before: both became FAILED_MALFORMED, and the second could even be marked DUPLICATE of the first, because a
+    failed parse has empty text and reached the normalized-text duplicate check.
+    """
+    monkeypatch.setattr(corpus_pdf, "run_pdf_parse", lambda _data, _budget: PdfParseOutcome(code))
+    root = tmp_path / "papers"
+    root.mkdir()
+    (root / "a.pdf").write_bytes(text_pdf(["Alpha text."]))
+    (root / "b.pdf").write_bytes(text_pdf(["Beta text."]))
+    result = run_fixture_pilot(root)
+    assert [document["status"] for document in result["documents"]] == ["UNSUPPORTED", "UNSUPPORTED"]
+    for document in result["documents"]:
+        assert document["warnings"] == [code] and document["events"][-1]["detail"] == code
+        assert "chunks" not in document and "duplicate_of" not in document
+
+
+def test_a_full_worker_pool_answers_busy_after_the_short_queue_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller queues for a slot at most QUEUE_WAIT_SECONDS, not for the whole parse budget."""
+    monkeypatch.setattr(pdf_isolation, "QUEUE_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr(pdf_isolation, "_start", lambda _budget: pytest.fail("no worker may start while busy"))
+    held = [pdf_isolation._SLOTS.acquire(timeout=5) for _ in range(pdf_isolation.MAX_CONCURRENT_WORKERS)]
+    try:
+        assert all(held)
+        started = time.monotonic()
+        outcome = pdf_isolation.run_pdf_parse(text_pdf(["x"]), replace(PDF_PARSE_BUDGET, wall_seconds=60))
+        assert outcome == PdfParseOutcome(pdf_isolation.PDF_PARSE_BUSY)
+        assert time.monotonic() - started < 5
+    finally:
+        for _ in held:
+            pdf_isolation._SLOTS.release()

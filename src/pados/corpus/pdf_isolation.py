@@ -44,6 +44,9 @@ _POLL_SECONDS = 0.05
 _TREE_EVERY = 10  # re-walk the worker's process tree every 10 polls (0.5 s)
 REAP_SECONDS = 5.0
 MAX_CONCURRENT_WORKERS = 2
+# How long a caller may queue for a worker slot. Short on purpose: a caller is often a request thread, so a backlog
+# answers PDF_PARSE_BUSY quickly (a retryable outcome) instead of pinning threads for the whole parse budget.
+QUEUE_WAIT_SECONDS = 5.0
 _OUTPUT_OVERHEAD = 64 * 1024  # JSON structure around the measured text
 
 PDF_SOURCE_TOO_LARGE = "PDF_SOURCE_TOO_LARGE"
@@ -64,6 +67,13 @@ RESOURCE_FAILURE_CODES = frozenset({
     PDF_PARSE_CPU_EXCEEDED, PDF_PARSE_OUTPUT_EXCEEDED, PDF_PARSE_WORKER_FAILED, PDF_ISOLATION_UNAVAILABLE,
 })
 FAILURE_CODES = CONTENT_FAILURE_CODES | RESOURCE_FAILURE_CODES
+# The resource failures that do not judge the document: the run itself was refused or cut short (load, a deadline,
+# the worker). Retrying later can succeed, so callers must not record the document as malformed. The budget codes
+# (decode, page count, text, source size) are deterministic for a given document and stay terminal.
+TRANSIENT_FAILURE_CODES = frozenset({
+    PDF_PARSE_BUSY, PDF_PARSE_TIMEOUT, PDF_PARSE_MEMORY_EXCEEDED, PDF_PARSE_CPU_EXCEEDED, PDF_PARSE_WORKER_FAILED,
+    PDF_ISOLATION_UNAVAILABLE, PDF_SOURCE_UNREADABLE,
+})
 
 _SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_WORKERS)
 
@@ -335,7 +345,7 @@ def run_pdf_parse(payload: bytes, budget: PdfParseBudget = PDF_PARSE_BUDGET) -> 
     if len(payload) > budget.max_input_bytes:
         return PdfParseOutcome(PDF_SOURCE_TOO_LARGE)
     deadline = time.monotonic() + budget.wall_seconds  # BEFORE the spawn: waiting and startup count
-    if not _SLOTS.acquire(timeout=max(0.0, deadline - time.monotonic())):
+    if not _SLOTS.acquire(timeout=max(0.0, min(QUEUE_WAIT_SECONDS, deadline - time.monotonic()))):
         return PdfParseOutcome(PDF_PARSE_BUSY)
     try:
         return _run(_header(budget) + b"\n" + payload, budget, deadline)
@@ -344,4 +354,4 @@ def run_pdf_parse(payload: bytes, budget: PdfParseBudget = PDF_PARSE_BUDGET) -> 
 
 
 __all__ = ["CONTENT_FAILURE_CODES", "FAILURE_CODES", "PDF_PARSE_BUDGET", "RESOURCE_FAILURE_CODES",
-           "PdfParseBudget", "PdfParseOutcome", "run_pdf_parse", "worker_command", "worker_environment"]
+           "TRANSIENT_FAILURE_CODES", "PdfParseBudget", "PdfParseOutcome", "run_pdf_parse", "worker_command", "worker_environment"]
