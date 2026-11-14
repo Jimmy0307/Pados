@@ -119,8 +119,8 @@ class PdfParseOutcome:
 
 
 def worker_command(budget: PdfParseBudget) -> list[str]:
-    token = worker.encode_limits(budget.memory_bytes, budget.cpu_seconds, budget.max_open_files)
-    return [sys.executable, "-I", "-B", "-m", WORKER_MODULE, token]
+    limits = worker.encode_limits(budget.memory_bytes, budget.cpu_seconds, budget.max_open_files)
+    return [sys.executable, "-I", "-B", "-m", WORKER_MODULE, limits]
 
 
 def worker_environment() -> dict[str, str]:

@@ -308,7 +308,7 @@ def test_worker_that_cannot_start_fails_closed(monkeypatch: pytest.MonkeyPatch) 
     _assert_closed_failure(parse_pdf_bytes(text_pdf(["x"])), "PDF_ISOLATION_UNAVAILABLE")
 
 
-@pytest.mark.parametrize("stdout", [b"", b"not json", b'{"ok":false,"code":"C:\\\\Users\\\\secret.pdf"}',
+@pytest.mark.parametrize("stdout", [b"", b"not json", b'{"ok":false,"code":"/srv/upload/private.pdf: PdfReadError"}',
                                     b'{"ok":true,"result":[]}', b'{"ok":true,"result":{},"extra":1}'])
 def test_reply_validation_never_passes_worker_text_through(stdout: bytes) -> None:
     outcome = pdf_isolation._decode(stdout)
