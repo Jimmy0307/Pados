@@ -12,7 +12,6 @@ no exception text leaves the process.
 """
 from __future__ import annotations
 
-import importlib
 import json
 import struct
 import sys
@@ -52,7 +51,7 @@ def _render(stream: bytes) -> int:
     except (ValueError, KeyError, TypeError):
         return _fail("RASTER_REQUEST_INVALID")
     try:
-        pdfium = importlib.import_module("pypdfium2")  # optional engine; imported dynamically (no stubs pinned)
+        import pypdfium2 as pdfium  # type: ignore[import-not-found, import-untyped, unused-ignore]  # optional
     except ImportError:
         return _fail("RASTER_ENGINE_NOT_INSTALLED")
     try:
