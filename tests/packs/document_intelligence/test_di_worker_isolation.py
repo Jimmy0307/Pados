@@ -35,6 +35,7 @@ from pados.packs.document_intelligence.worker_isolation import (
     MIB,
     WINDOWS_COMMIT_HEADROOM_MB,
     IsolationError,
+    expected_workers,
     linux_isolation_observed,
     memory_cap_bytes,
     seccomp_program,
@@ -100,6 +101,26 @@ def test_the_seccomp_program_checks_the_arch_first_and_allows_by_default(machine
     index = rows.index((0x15, 0, 1, socket_nr))
     assert rows[index + 1] == (0x06, 0, 0, 0x00050000 | 13)  # socket(): EACCES, every family
     assert ((0x35, 0, 1, 0x40000000) in rows) is (machine == "x86_64")  # x32 system calls: kill
+    foreign = (101, 310, 311) if machine == "x86_64" else (117, 270, 271)  # ptrace, process_vm_readv/writev
+    for nr in (*foreign, 434, 438):  # and pidfd_open / pidfd_getfd: no reaching another process's sockets
+        assert rows[rows.index((0x15, 0, 1, nr)) + 1] == (0x06, 0, 0, 0x00050000 | 1)  # EPERM
+
+
+CONHOST = r"C:\Windows\System32\conhost.exe"
+
+
+@pytest.mark.parametrize(("interpreter", "members", "expected"), [
+    (10, [(10, 1, "python.exe", "py"), (11, 10, "conhost.exe", CONHOST)], 1),  # the worker and its console host
+    (12, [(10, 1, "python.exe", "venv"), (11, 10, "conhost.exe", CONHOST), (12, 10, "python.exe", "py")], 2),
+    (10, [(10, 1, "python.exe", "py"), (13, 10, "python.exe", "py")], None),  # a helper started before READY
+    (12, [(10, 1, "python.exe", "venv"), (12, 10, "python.exe", "py"), (13, 12, "cmd.exe", "cmd")], None),
+    (12, [(10, 1, "python.exe", "venv"), (12, 99, "python.exe", "py")], None),  # READY from a non-child
+    (10, [(10, 1, "python.exe", "py"), (11, 10, "conhost.exe", r"D:\tools\conhost.exe")], None),  # fake host
+    (10, [(10, 1, "python.exe", "py"), (11, 10, "conhost.exe", CONHOST), (14, 10, "conhost.exe", CONHOST)], None),
+])
+def test_the_tree_at_ready_must_be_exactly_a_worker(interpreter: int, members: list[tuple[int, int, str, str]],
+                                                    expected: int | None) -> None:
+    assert expected_workers(10, interpreter, members, r"C:\Windows") == expected
 
 
 def test_an_unknown_arch_has_no_filter() -> None:

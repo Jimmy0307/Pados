@@ -18,7 +18,9 @@ headroom constants and what remains an owner decision.
   worker sets ``RLIMIT_AS`` (address space), ``RLIMIT_CORE = 0`` and ``RLIMIT_NOFILE``, reads them back, and
   installs a seccomp filter (``PR_SET_NO_NEW_PRIVS`` + ``SECCOMP_MODE_FILTER``, a fixed BPF program; no
   libseccomp) that makes ``socket()`` fail with ``EACCES`` for every address family and ``io_uring_setup`` fail
-  with ``ENOSYS`` (an io_uring could open sockets without the syscall). Threads and children inherit it. A
+  with ``ENOSYS`` (an io_uring could open sockets without the syscall), and refuses ``ptrace``,
+  ``process_vm_readv/writev`` and ``pidfd_open/getfd`` (no borrowing another process's sockets). Threads and
+  children inherit it. A
   foreign-architecture or x32 system call kills the process. No Python code runs between fork and exec in the
   parent (no ``preexec_fn``). After READY the parent re-reads ``/proc/<pid>`` to confirm the address-space limit
   and the filter from outside.
@@ -62,6 +64,28 @@ def starting_processes(executable: str = sys.executable,
 CONSOLE_HOSTS: Final = 1  # the conhost.exe of a console worker: counted in ActiveProcesses, never against the limit
 CONSOLE_HOST_IMAGE: Final = "conhost.exe"
 
+
+def expected_workers(root: int, interpreter: int, members: list[tuple[int, int, str, str]],
+                     system_root: str) -> int | None:
+    """How many processes the job may hold from now on, or ``None`` when the tree at READY is not exactly what a
+    worker consists of (pure; Windows). ``members`` are (pid, parent pid, image name, image path) of the tree.
+
+    Allowed: the worker itself, or a venv launcher plus the interpreter it started (its only child, the process
+    that answered READY), and at most one console host whose image is the system's own conhost.exe. Anything
+    else (a helper started before READY) fails closed."""
+    pids = {pid for pid, _, _, _ in members}
+    system_conhost = str(Path(system_root, "System32", CONSOLE_HOST_IMAGE)).lower() if system_root else None
+    consoles = [pid for pid, parent, name, image in members
+                if name.lower() == CONSOLE_HOST_IMAGE and image.lower() == system_conhost and parent in pids]
+    workers = {pid: parent for pid, parent, _, _ in members if pid not in consoles}
+    if len(consoles) > CONSOLE_HOSTS:
+        return None
+    if interpreter == root and set(workers) == {root}:
+        return 1
+    if set(workers) == {root, interpreter} and workers[interpreter] == root:
+        return VENV_LAUNCHER_PROCESSES
+    return None
+
 # -- Linux: seccomp -----------------------------------------------------------------------------------------
 _PR_SET_NO_NEW_PRIVS: Final = 38
 _PR_SET_SECCOMP: Final = 22
@@ -75,7 +99,11 @@ _RET_ERRNO: Final = 0x00050000
 _RET_KILL_PROCESS: Final = 0x80000000
 _X32_SYSCALL_BIT: Final = 0x40000000
 _NR_IO_URING_SETUP: Final = 425  # the same number on x86_64 and aarch64
+_NR_PIDFD_OPEN: Final = 434
+_NR_PIDFD_GETFD: Final = 438
 _ARCHES: Final = {"x86_64": (0xC000003E, 41), "aarch64": (0xC00000B7, 198)}  # (AUDIT_ARCH_*, __NR_socket)
+# Reaching another process's sockets: ptrace, process_vm_readv / process_vm_writev (per arch), pidfd_open/getfd.
+_FOREIGN_PROCESS_CALLS: Final = {"x86_64": (101, 310, 311), "aarch64": (117, 270, 271)}
 
 
 class IsolationError(RuntimeError):
@@ -108,10 +136,11 @@ def seccomp_program(machine: str) -> list[tuple[int, int, int, int]]:
             (_BPF_LD_W_ABS, 0, 0, 0)]
     if machine == "x86_64":
         rows += [(_BPF_JGE_K, 0, 1, _X32_SYSCALL_BIT), (_BPF_RET_K, 0, 0, _RET_KILL_PROCESS)]
-    rows += [(_BPF_JEQ_K, 0, 1, socket_nr), (_BPF_RET_K, 0, 0, _RET_ERRNO | errno.EACCES),
-             (_BPF_JEQ_K, 0, 1, _NR_IO_URING_SETUP), (_BPF_RET_K, 0, 0, _RET_ERRNO | errno.ENOSYS),
-             (_BPF_RET_K, 0, 0, _RET_ALLOW)]
-    return rows
+    denials = [(socket_nr, errno.EACCES), (_NR_IO_URING_SETUP, errno.ENOSYS),
+               *((nr, errno.EPERM) for nr in (*_FOREIGN_PROCESS_CALLS[machine], _NR_PIDFD_OPEN, _NR_PIDFD_GETFD))]
+    for nr, code in denials:
+        rows += [(_BPF_JEQ_K, 0, 1, nr), (_BPF_RET_K, 0, 0, _RET_ERRNO | code)]
+    return [*rows, (_BPF_RET_K, 0, 0, _RET_ALLOW)]
 
 
 class _SockFilter(ctypes.Structure):

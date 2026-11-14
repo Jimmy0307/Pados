@@ -46,6 +46,7 @@ import errno
 import json
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -59,7 +60,6 @@ from pados.packs.document_intelligence.local_models import LocalModelError
 from pados.packs.document_intelligence.materialize import MaterializeError, discard, materialize_verified
 from pados.packs.document_intelligence.model_pin import ModelPin, ModelRole
 from pados.packs.document_intelligence.worker_isolation import (
-    CONSOLE_HOST_IMAGE,
     CREATE_SUSPENDED,
     ISOLATION_FAILED,
     MEMORY_REFUSED,
@@ -68,6 +68,7 @@ from pados.packs.document_intelligence.worker_isolation import (
     WindowsJob,
     apply_worker_limits,
     effective_address_space,
+    expected_workers,
     linux_isolation_observed,
     memory_cap_bytes,
     resume,
@@ -241,7 +242,7 @@ def worker_main(argv: list[str]) -> int:
     except Exception:  # noqa: BLE001 - closed code, no engine text
         _reply(sys.stdout, {"ok": False, "code": "LOCAL_MODEL_FAILED"})
         return 3
-    _reply(sys.stdout, {"ok": True, "result": "READY"})
+    _reply(sys.stdout, {"ok": True, "result": {"status": "READY", "pid": os.getpid()}})
     for line in sys.stdin:
         try:
             request = json.loads(line)
@@ -339,11 +340,18 @@ class SubprocessModelBackend:
         except MaterializeError as exc:
             raise LocalModelError(exc.code) from None
         self._holder["copy"] = self._copy
-        pin_file = self._copy.parent / f"{self._copy.name}.pin.json"
+        try:
+            self._launch(self._copy)
+        except BaseException:
+            self.close()  # idempotent: job handle, process and private copy never outlive a failed start
+            raise
+
+    def _launch(self, copy: Path) -> None:
+        pin_file = copy.parent / f"{copy.name}.pin.json"
         pin_file.write_text(self.pin.model_dump_json(by_alias=True), encoding="utf-8")
         address_space = self.address_space
         argv = [sys.executable, "-I", "-m", "pados.packs.document_intelligence.model_worker", str(pin_file),
-                str(self._copy), self.engine, "off" if address_space is None else str(address_space)]
+                str(copy), self.engine, "off" if address_space is None else str(address_space)]
         options: dict[str, Any] = {}
         if sys.platform == "win32":
             options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
@@ -354,9 +362,12 @@ class SubprocessModelBackend:
                 self._holder["job"] = self._job
         else:
             options["start_new_session"] = True  # no preexec_fn: the worker applies its limits itself
-        self._process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                         stderr=subprocess.DEVNULL, env=_worker_environment(self.pin.threads),
-                                         cwd=str(self._copy), text=True, encoding="utf-8", bufsize=1, **options)
+        try:
+            self._process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                             stderr=subprocess.DEVNULL, env=_worker_environment(self.pin.threads),
+                                             cwd=str(copy), text=True, encoding="utf-8", bufsize=1, **options)
+        except OSError:
+            raise LocalModelError("MODEL_WORKER_START_FAILED") from None
         self._holder["process"] = self._process
         if self._job is not None:
             self._isolated(partial(_enter_job, self._job, self._process.pid))
@@ -365,38 +376,40 @@ class SubprocessModelBackend:
                          name=f"pados-model-worker-reader-{self.pin.pin_id}").start()
         threading.Thread(target=self._watch, args=(self._process,), daemon=True,
                          name=f"pados-model-worker-watchdog-{self.pin.pin_id}").start()
-        try:
-            ready = self._receive(max(self.deadline, self.pin.timeout_seconds * 5))
-        except LocalModelError:
-            self.close()
-            raise
-        if ready != "READY":
-            self.close()
+        ready = self._receive(max(self.deadline, self.pin.timeout_seconds * 5))
+        if not (isinstance(ready, dict) and ready.get("status") == "READY" and isinstance(ready.get("pid"), int)):
             raise LocalModelError("MODEL_WORKER_START_FAILED")
-        self._isolated(self._confirm_isolation)
+        self._isolated(partial(self._confirm_isolation, ready["pid"]))
 
     def _isolated(self, step: Any) -> Any:
         """Run an isolation step; any failure closes the worker and is ``MODEL_WORKER_ISOLATION_FAILED``."""
+        import psutil  # type: ignore[import-untyped]  # declared runtime dependency; no stubs are pinned
+
         try:
             return step()
-        except (IsolationError, OSError):
+        except (IsolationError, OSError, psutil.Error):
             self.close()
             raise LocalModelError(ISOLATION_FAILED) from None
 
-    def _confirm_isolation(self) -> None:
-        """After READY, re-read from outside what the kernel enforces on the worker; refuse any shortfall."""
+    def _confirm_isolation(self, interpreter: int) -> None:
+        """After READY, re-read from outside what the kernel enforces on the worker; refuse any shortfall.
+        ``interpreter`` is the pid the worker reported: the process itself, or a venv launcher's only child."""
         process = self._process
         if not self.os_isolation or process is None:
             return
         if self._job is not None:
-            import psutil  # type: ignore[import-untyped]  # declared runtime dependency; no stubs are pinned
+            import psutil
 
             root = psutil.Process(process.pid)
             tree = [root, *root.children(recursive=True)]
             if not all(self._job.contains(member.pid) for member in tree):
                 raise IsolationError("PROCESS_OUTSIDE_JOB")
-            self._job.seal(sum(member.name().lower() != CONSOLE_HOST_IMAGE for member in tree))
-        elif linux_isolation_observed(process.pid) != (self.address_space, "2"):
+            members = [(member.pid, member.ppid(), member.name(), member.exe()) for member in tree]
+            workers = expected_workers(root.pid, interpreter, members, os.environ.get("SYSTEMROOT", ""))
+            if workers is None:
+                raise IsolationError("UNEXPECTED_PROCESS_AT_READY")
+            self._job.seal(workers)
+        elif interpreter != process.pid or linux_isolation_observed(process.pid) != (self.address_space, "2"):
             raise IsolationError("LINUX_LIMITS_NOT_OBSERVED")
 
     @staticmethod
@@ -419,8 +432,7 @@ class SubprocessModelBackend:
             handle = psutil.Process(process.pid)
             while process.poll() is None:
                 # The whole tree: on Windows a venv python.exe is a launcher whose child is the real interpreter.
-                tree = [handle, *handle.children(recursive=True)]
-                if sum(member.memory_info().rss for member in tree) > limit:
+                if _tree_rss(handle) > limit:
                     self._killed_for = "MODEL_WORKER_MEMORY_LIMIT"
                     _kill(process)
                     return
@@ -504,6 +516,19 @@ class SubprocessModelBackend:
             self._holder["copy"] = None
 
 
+def _tree_rss(root: Any) -> int:
+    """Resident memory of ``root`` and its descendants; a member that exits meanwhile counts as zero."""
+    import psutil
+
+    total = root.memory_info().rss  # the root's own exit ends the watchdog (psutil.Error in the caller)
+    for member in root.children(recursive=True):
+        try:
+            total += member.memory_info().rss
+        except psutil.NoSuchProcess:
+            continue
+    return int(total)
+
+
 def _enter_job(job: WindowsJob, pid: int) -> None:
     """Assign a worker created suspended to its job, then let it run (Windows)."""
     job.assign(pid)
@@ -520,6 +545,11 @@ def _kill(process: subprocess.Popen[str]) -> None:
         parent.kill()
     except psutil.Error:
         pass
+    if sys.platform != "win32":  # start_new_session: the group id is the worker's pid; reaches re-parented orphans
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:

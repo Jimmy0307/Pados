@@ -17,7 +17,7 @@ without an implementation (anything other than Windows or Linux on x86_64 or aar
 | Memory ceiling | Job Object `JOB_OBJECT_LIMIT_JOB_MEMORY` = `max_ram_mb` + 512 MiB of committed memory, for every process in the job together | `RLIMIT_AS` = `max_ram_mb` + 1024 MiB of address space | kernel: the allocation is **refused** |
 | Memory bound (`max_ram_mb`) | RSS watchdog, polled every 100 ms, kills the tree | same | PADOS parent (unchanged) |
 | No new process | `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`: 1, or 2 behind a venv launcher, while starting; sealed at READY to the processes then alive | not limited (Linux counts `RLIMIT_NPROC` per user, so it cannot bound one worker that needs threads). A child inherits the seccomp filter and `RLIMIT_AS` | kernel |
-| No socket | **not enforced** (residual, see below) | seccomp: `socket()` fails with `EACCES` for **every** family (IP, Unix, netlink, packet); `io_uring_setup` fails with `ENOSYS`; a foreign-arch or x32 system call kills the process. Inherited by threads and children | kernel |
+| No socket | **not enforced** (residual, see below) | seccomp: `socket()` fails with `EACCES` for **every** family (IP, Unix, netlink, packet); `io_uring_setup` fails with `ENOSYS`; `ptrace`, `process_vm_*` and `pidfd_open`/`pidfd_getfd` fail with `EPERM`; a foreign-arch or x32 system call kills the process. Inherited by threads and children | kernel |
 | In-process network refusal | `connect`, `connect_ex`, `sendto`, `sendmsg`, `create_connection`, `getaddrinfo` and `gethostby*` raise | same | the worker (defense in depth; native code and the `_socket` type bypass it) |
 | Environment | empty, plus `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE`, `OMP_NUM_THREADS`, `RAYON_NUM_THREADS`, `PYTHONIOENCODING`, `PYTHONUTF8` and the variables the interpreter needs to start (`SYSTEMROOT`, `WINDIR`, `TEMP`, `TMP`, `PATH`); Linux adds `MALLOC_ARENA_MAX=2` | same | the parent |
 | Worker dies with the parent | `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`: the parent holds the only job handle | not enforced (the existing kill on close, garbage collection and exit remains) | kernel (Windows) |
@@ -39,19 +39,23 @@ allocation, so the worker replies and exits), `MODEL_WORKER_MEMORY_LIMIT` (the w
 4. Anything the worker starts from then on is created inside the job. A venv `python.exe` is a launcher whose
    child is the real interpreter, and that child is in the job too (PR #25 found the launcher; the sealed-job
    test checks every member of the tree).
-5. After READY, the parent confirms from outside that every process of the tree is in the job
-   (`IsProcessInJob`). It then seals the active-process limit to the processes alive. Windows attaches a
-   `conhost.exe` to a console process. That process is counted in `ActiveProcesses` but is never held against
-   the limit, so the seal leaves it out. Without that, one extra process could have started; the probe test
-   found this.
+5. READY carries the pid of the interpreter that answered. After READY, the parent confirms from outside that
+   every process of the tree is in the job (`IsProcessInJob`), and that the tree is exactly a worker. That means
+   either the process itself, or a launcher whose only child is the interpreter that answered, plus at most one
+   console host whose image is the system's `System32\conhost.exe`. Any other process (for example a helper
+   started before READY) fails closed. The parent then seals the active-process limit to the worker processes.
+   Windows attaches a `conhost.exe` to a console process. That process is counted in `ActiveProcesses` but is
+   never held against the limit, so the seal leaves it out. Without that, one extra process could have started;
+   the probe test found this.
 
 Race: none between `Popen` and assignment, because the process is suspended until it is in the job.
 
 What remains:
 
-- The process count is decided by `starting_processes()`: 2 when `sys.executable` is a venv launcher, otherwise 1.
-  An undercount fails closed, because the interpreter cannot start. An overcount (a symlinked venv) would allow
-  one helper process before READY.
+- The limit while starting is decided by `starting_processes()`: 2 when `sys.executable` is a venv launcher,
+  otherwise 1. An undercount fails closed, because the interpreter cannot start. An overcount (for example a
+  symlinked venv) would let one helper process start before READY. The tree check at READY then finds the helper
+  and fails closed, but the helper has already run until that check.
 - The job memory limit counts **commit**, not RSS. An allocation inside native code that the limit refuses
   surfaces as `LOCAL_MODEL_FAILED` (ONNX Runtime raises) or `MODEL_WORKER_EXITED` (an abort). Both are closed
   codes, but neither names the cap.
@@ -74,8 +78,11 @@ If any step fails, the worker replies `MODEL_WORKER_ISOLATION_FAILED` and exits.
 `Seccomp: 2`.
 
 The filter program has this order: check the architecture (`AUDIT_ARCH_X86_64` or `AUDIT_ARCH_AARCH64`,
-otherwise kill), kill x32 system calls (x86_64), make `socket` return `EACCES`, make `io_uring_setup` return
-`ENOSYS`, and allow everything else. `socketcall` does not exist on these two architectures.
+otherwise kill), kill x32 system calls (x86_64), make `socket` return `EACCES` and `io_uring_setup` return
+`ENOSYS`, and make the calls that reach into another process return `EPERM`. Those calls are `ptrace`,
+`process_vm_readv`, `process_vm_writev`, `pidfd_open` and `pidfd_getfd`; without the denial the worker could
+borrow a socket from, or drive, another process of the same user. Everything else is allowed. `socketcall` does
+not exist on these two architectures, and `socketpair` stays allowed (an unconnected local pair only).
 
 What remains:
 
@@ -83,6 +90,13 @@ What remains:
   file, the pin and the input are read only afterwards.
 - `RLIMIT_AS` bounds address space, not resident memory, so the watchdog stays the `max_ram_mb` bound. As on
   Windows, an allocation refused inside native code is a closed code that does not name the cap.
+- `RLIMIT_AS` applies to each process, and the worker may still `fork`. The cap therefore does not bound a tree,
+  and a child bypasses it until the watchdog, which sums the whole tree, kills everything. A child inherits the
+  socket filter. Kill on close also signals the worker's whole process group, which reaches re-parented
+  children. A double-forked process that leaves the group is not reached. Denying `fork`/`clone` would also
+  forbid the engine's threads, so this is left to a cgroup (see Headroom).
+- The filter is a denylist for the network-reaching calls named above. The filesystem is not confined, so the
+  worker can write anything its user can (Landlock is the proposed next step).
 
 ## Headroom (measured, both platforms)
 
@@ -137,7 +151,7 @@ capability.
 | Option | Platform | Privilege | Status here | Residual risk |
 | --- | --- | --- | --- | --- |
 | In-process socket refusal (existing, extended) | both | none | implemented | Native code (ONNX Runtime, tokenizers) and the `_socket` type bypass it. Pinned by the probe test: on Windows a raw `_socket` connection to a local listener still **succeeds** |
-| seccomp filter on `socket()` (raw BPF with ctypes) | Linux | none (`no_new_privs`) | **implemented**, tested on the VM | No new socket of any family, so no Unix-socket broker either (D-Bus, resolved). Remaining: filesystem writes and `ptrace` of the user's own processes when Yama `ptrace_scope` is 0 (Ubuntu's default is 1: descendants only, which inherit the filter). Those are not network |
+| seccomp filter on `socket()` (raw BPF with ctypes) | Linux | none (`no_new_privs`) | **implemented**, tested on the VM | No new socket of any family, so no Unix-socket broker either (D-Bus, resolved). `ptrace`, `process_vm_readv`/`process_vm_writev` and `pidfd_open`/`pidfd_getfd` are denied too, so no other process's sockets can be borrowed. Remaining: filesystem writes, and no memory bound across a forked tree beyond the watchdog. Neither is network |
 | libseccomp / `python3-seccomp` | Linux | none | `libseccomp.so.2` is present but the Python binding is not, so it would be a new dependency | same as above |
 | Network namespace through a user namespace (`unshare(CLONE_NEWUSER\|CLONE_NEWNET)`) | Linux | none, if policy allows | `unshare -Un` succeeded on the VM. `unshare -rn` failed (`write /proc/self/uid_map: Operation not permitted`) under `apparmor_restrict_unprivileged_userns=1` | Depends on AppArmor and sysctl policy and on container seccomp profiles. Unix sockets remain reachable, so a D-Bus broker can still reach the network. Could be layered on the filter; adds little |
 | bubblewrap | Linux | none (user namespaces) or setuid | not installed on the VM | new system dependency; same namespace policy |
