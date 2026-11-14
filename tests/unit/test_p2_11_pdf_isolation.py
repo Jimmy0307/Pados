@@ -437,7 +437,9 @@ def test_corpus_pipeline_quarantines_a_hostile_pdf_with_a_closed_code(
     (document,) = result["documents"]
     assert document["status"] == "FAILED_MALFORMED" and document["warnings"] == ["PDF_DECODE_BUDGET_EXCEEDED"]
     assert "chunks" not in document and len(calls) == 1
-    assert json.dumps(result).count(str(tmp_path)) == 0
+    # The parse outcome carries no path or parser text (the batch-level approved "root" is pre-existing).
+    assert tmp_path.as_posix() not in json.dumps(document).replace("\\\\", "/")
+    assert [event["detail"] for event in document["events"]][-1] == "PDF_DECODE_BUDGET_EXCEEDED"
 
 
 def test_the_api_process_never_imports_pypdf_when_parsing() -> None:
