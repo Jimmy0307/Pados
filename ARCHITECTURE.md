@@ -100,6 +100,14 @@ Invariants:
 - **PACK INSTALLED != AUTHORIZED**
 - **PACK EXECUTION SUCCESS != SEMANTIC ACCEPTANCE**
 
+Document Intelligence packs (EXPERIMENTAL; PR #24, stacked on #22): the dense retrieval, fusion, rerank and
+evidence-pack stages are Pack V1 manifests. They run through the existing executor, with local embedding and
+cross-encoder models that load only from an operator directory matching an audited pin. A verified evidence pack
+reaches the existing Structured Problem Solving pack, and from there a `ResultCandidate`, only when a second task
+pins its digest. Rerank runs in SHADOW mode by default; ACTIVE fails closed. Design, failure semantics and residuals
+are in `docs/packs/document_intelligence/README.md`. The 2026-11-14 snapshot of state and diagrams is
+`docs/architecture/PADOS_ARCHITECTURE_AND_PROGRESS_2026-11-14.md`.
+
 An optional provider being unavailable does not block the platform. REA (capability discovery) and OpenMAIC (adaptive learning) are optional external runtimes behind `pados.capability_loop`. When one is absent, unhealthy, incompatible, or returns malformed data, the dependent capability reports unavailable or degraded, fails closed, and leaves PADOS state unchanged.
 
 ## Implementation State

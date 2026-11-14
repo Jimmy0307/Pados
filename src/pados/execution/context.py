@@ -49,10 +49,18 @@ _CREDENTIAL_WORDS = (
     r"|token|auth[_-]?token|access[_-]?token|refresh[_-]?token|password|passwd|pwd"
     r"|authorization"
 )
-# URL user-info detection, assembled from named parts: the scheme separator
-# (anchored after one alphanumeric character), a bounded user part, the
-# user/password separator, a bounded password part and the host delimiter.
-_URL_SCHEME_SEPARATOR = r"(?<=[A-Za-z0-9])" + ":" + "//"
+# Every keyword alternative above contains one of these stems. The regex engine
+# matches IGNORECASE text one character at a time, so any text the assignment
+# pattern matches also holds a stem under the same folding; text without a stem
+# cannot hold an assignment and skips the slower assignment scan
+# (_has_credential_stem). Keep the two in step:
+# tests/consolidation/test_redaction_equivalence.py checks each word.
+_CREDENTIAL_WORD_STEMS = r"key|secret|token|passw|pwd|authorization"
+# URL user-info detection, assembled from named parts: the scheme separator, a
+# bounded user part, the user/password separator, a bounded password part and
+# the host delimiter. The separator must follow one alphanumeric character,
+# checked after the literal (see _CREDENTIAL_PATTERNS).
+_URL_SCHEME_SEPARATOR = ":" + "//" + r"(?<=[A-Za-z0-9]://)"
 _URL_USER_PART = r"[^\s/:@]{1,256}"
 _URL_PASSWORD_SEPARATOR = ":"
 _URL_PASSWORD_PART = r"[^\s/@]{1,256}"
@@ -64,26 +72,60 @@ _URL_USERINFO = (
     + _URL_PASSWORD_PART
     + _URL_HOST_DELIMITER
 )
-# Every pattern starts with a literal keyword, prefix or fixed-width
-# lookbehind and uses only bounded repetition afterwards, so each search runs
-# in time linear in the input length (no rescanning of long runs).
+# name = value / "name": "value" style assignments of a non-trivial value.
+# The keyword may be the tail of an identifier joined by "_" or "-"
+# (e.g. client_secret), but not glued to a longer word.
+_ASSIGNMENT_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:" + _CREDENTIAL_WORDS + r")(?![A-Za-z0-9_])"
+    r"[\"']?\s{0,16}[:=]\s{0,16}[\"']?(?!(?:true|false|null|none)(?![A-Za-z0-9]))"
+    r"[^\s\"',;{}\[\]()<>]{4}",
+    re.IGNORECASE,
+)
+# Besides upper and lower case, re.IGNORECASE folds these characters onto the
+# stems' letters (dotted and dotless i, the Kelvin sign, the long s).
+_IGNORECASE_EXTRAS = {"i": "İı", "k": "K", "s": "ſ"}
+_STEM_FOLDS = tuple((extra, letter) for letter, extras in _IGNORECASE_EXTRAS.items() for extra in extras)
+_STEMS = tuple(_CREDENTIAL_WORD_STEMS.split("|"))
+
+
+def _fold_for_stems(text: str) -> str:
+    """Lower-case text after mapping the IGNORECASE extras onto their stem letters.
+
+    Every character that re.IGNORECASE matches against a stem letter becomes
+    exactly that letter, one for one, so a stem the assignment pattern could
+    match survives as a plain substring. Characters lower() maps elsewhere or
+    expands (U+0130 would become two) are never part of a stem: the extras are
+    replaced first, and no other character folds onto a stem letter.
+    """
+    if not text.isascii():
+        for extra, letter in _STEM_FOLDS:
+            text = text.replace(extra, letter)
+    return text.lower()
+
+
+def _has_credential_stem(text: str) -> bool:
+    """A cheap superset gate for _ASSIGNMENT_PATTERN: substring search after folding.
+
+    A regex over per-letter classes cannot skip ahead to candidate positions and
+    costs 0.2-0.5 s on 2 MiB of text; this costs a few hundredths of a second.
+    """
+    folded = _fold_for_stems(text)
+    return any(stem in folded for stem in _STEMS)
+
+
+# Every pattern starts with a literal so the engine can skip ahead to candidate
+# positions, and uses only bounded repetition, so each search runs in time
+# linear in the input length. "Not glued to a preceding letter or digit" is
+# checked after the literal: for a fixed-width literal P, (?<!X)P matches
+# exactly where P(?<!XP) does.
 _CREDENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # name = value / "name": "value" style assignments of a non-trivial value.
-    # The keyword may be the tail of an identifier joined by "_" or "-"
-    # (e.g. client_secret), but not glued to a longer word.
-    re.compile(
-        r"(?<![A-Za-z0-9])(?:" + _CREDENTIAL_WORDS + r")(?![A-Za-z0-9_])"
-        r"[\"']?\s{0,16}[:=]\s{0,16}[\"']?(?!(?:true|false|null|none)(?![A-Za-z0-9]))"
-        r"[^\s\"',;{}\[\]()<>]{4}",
-        re.IGNORECASE,
-    ),
     # A bearer token is detected even when glued to preceding text.
     re.compile(r"bearer\s{1,16}[A-Za-z0-9._~+/=-]{8}", re.IGNORECASE),
-    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{8}"),
-    re.compile(r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{16}"),
-    re.compile(r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{16}"),
-    re.compile(r"(?<![A-Za-z0-9])xox[a-z]-[A-Za-z0-9-]{8}"),
-    re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Z0-9])"),
+    re.compile(r"sk-(?<![A-Za-z0-9]sk-)[A-Za-z0-9_-]{8}"),
+    re.compile(r"gh[pousr]_(?<![A-Za-z0-9]gh[pousr]_)[A-Za-z0-9]{16}"),
+    re.compile(r"github_pat_(?<![A-Za-z0-9]github_pat_)[A-Za-z0-9_]{16}"),
+    re.compile(r"xox[a-z]-(?<![A-Za-z0-9]xox[a-z]-)[A-Za-z0-9-]{8}"),
+    re.compile(r"(?:AKIA|ASIA)(?<![A-Z0-9]AKIA)(?<![A-Z0-9]ASIA)[0-9A-Z]{16}(?![A-Z0-9])"),
     re.compile(r"-----BEGIN[A-Z0-9 ]{0,40}PRIVATE KEY-----"),
     # A URL whose authority embeds a user name and a password; the scheme
     # itself is not needed to detect it.
@@ -93,6 +135,8 @@ _CREDENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 def redact(text: str) -> str:
     """Replace the whole text with a marker if it holds credential-shaped material."""
+    if _has_credential_stem(text) and _ASSIGNMENT_PATTERN.search(text):
+        return REDACTED_MARKER
     if any(pattern.search(text) for pattern in _CREDENTIAL_PATTERNS):
         return REDACTED_MARKER
     return text

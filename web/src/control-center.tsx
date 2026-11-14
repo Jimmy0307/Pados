@@ -3,6 +3,8 @@ import { useResource } from "./useResource";
 import { EnterprisePanel } from "./enterprise-panel";
 import { ComputeNodesPanel } from "./compute-nodes-panel";
 import { useState, type ReactElement } from "react";
+import { ApprovalsPage, ControlTokenPanel, WorkRequestPage } from "./control-actions";
+import { inboxAction } from "./page-links";
 import {
   formatDate,
   getJson,
@@ -19,11 +21,13 @@ import {
   type Project,
 } from "./api";
 
-type Page = "mission" | "inbox" | "dashboard" | "projects" | "memory" | "database" | "runs" | "system";
+type Page = "mission" | "inbox" | "approvals" | "work" | "dashboard" | "projects" | "memory" | "database" | "runs" | "system";
 
 const pages: Array<{ id: Page; label: string }> = [
   { id: "mission", label: "Mission Control" },
   { id: "inbox", label: "Decision / Action Inbox" },
+  { id: "approvals", label: "Approvals" },
+  { id: "work", label: "New work request" },
   { id: "dashboard", label: "Dashboard" },
   { id: "projects", label: "Projects" },
   { id: "memory", label: "Memory" },
@@ -95,12 +99,19 @@ function MissionControlPage(): ReactElement {
   </>;
 }
 
-function DecisionInboxPage(): ReactElement {
+function InboxOpenCell({ item, onReview }: { item: DecisionInbox["items"][number]; onReview: (approvalId: string) => void }): ReactElement {
+  const action = inboxAction(item.open, item.target, import.meta.env.BASE_URL);
+  if (action.kind === "link") return <><a href={action.href}>{action.label}</a>{action.hint && <small>{action.hint}</small>}</>;
+  if (action.kind === "in-console") return <><button className="control-button" type="button" onClick={() => onReview(action.approvalId)}>{action.label}</button>{action.hint && <small>{action.hint}</small>}</>;
+  return <><code>{action.path}</code><small>{action.hint}</small></>;
+}
+
+function DecisionInboxPage({ onReview }: { onReview: (approvalId: string) => void }): ReactElement {
   const result = useJson<DecisionInbox>("/api/decision-inbox");
   if (result.loading || result.error || !result.data) return <StatePanel loading={result.loading} error={result.error} />;
   return <>
     <Header title="Decision / Action Inbox" detail={`${result.data.count} human actions derived from project, run, and decision state`} />
-    {result.data.items.length === 0 ? <StatePanel loading={false} error={null} empty="No pending human actions in PADOS authority." /> : <section className="control-card"><div className="control-table-wrap"><table className="control-table"><thead><tr><th>Project</th><th>Item</th><th>Type</th><th>Priority</th><th>Status</th><th>Reason / source</th><th>Required action</th><th>Target</th></tr></thead><tbody>{result.data.items.map((item) => <tr key={item.id}><td>{item.project}</td><td>{item.item}</td><td>{item.type}</td><td>{item.priority}</td><td><StatusTag status={item.status} /></td><td>{item.reason_source}</td><td>{item.required_human_action}</td><td><a href={item.target}>Open</a></td></tr>)}</tbody></table></div></section>}
+    {result.data.items.length === 0 ? <StatePanel loading={false} error={null} empty="No pending human actions in PADOS authority." /> : <section className="control-card"><div className="control-table-wrap"><table className="control-table"><thead><tr><th>Project</th><th>Item</th><th>Type</th><th>Priority</th><th>Status</th><th>Reason / source</th><th>Required action</th><th>Target</th></tr></thead><tbody>{result.data.items.map((item) => <tr key={item.id}><td>{item.project}</td><td>{item.item}</td><td>{item.type}</td><td>{item.priority}</td><td><StatusTag status={item.status} /></td><td>{item.reason_source}</td><td>{item.required_human_action}</td><td><InboxOpenCell item={item} onReview={onReview} /></td></tr>)}</tbody></table></div></section>}
   </>;
 }
 
@@ -154,8 +165,25 @@ function formatCell(value: unknown): string {
   return String(value);
 }
 
+function ApprovalsSurface({ controlValue, focus }: { controlValue: string; focus: string | null }): ReactElement {
+  const inbox = useJson<DecisionInbox>("/api/decision-inbox");
+  if (inbox.loading || inbox.error || !inbox.data) return <StatePanel loading={inbox.loading} error={inbox.error} />;
+  return <><Header title="Approvals" detail="Review a pending work package approval and record your decision." /><ApprovalsPage controlValue={controlValue} items={inbox.data.items} focus={focus} /></>;
+}
+
+function WorkRequestSurface({ controlValue }: { controlValue: string }): ReactElement {
+  const projects = useJson<{ projects: Project[] }>("/api/projects?page_size=100");
+  if (projects.loading || projects.error || !projects.data) return <StatePanel loading={projects.loading} error={projects.error} />;
+  return <><Header title="New work request" detail="Ask PADOS for work in one of your projects." /><WorkRequestPage controlValue={controlValue} projects={projects.data.projects} /></>;
+}
+
 export function ControlCenter({ onBack }: { onBack: () => void }): ReactElement {
   const [page, setPage] = useState<Page>("mission");
-  const content = page === "mission" ? <MissionControlPage /> : page === "inbox" ? <DecisionInboxPage /> : page === "dashboard" ? <DashboardPage /> : page === "projects" ? <ProjectsPage /> : page === "memory" ? <MemoryPage /> : page === "database" ? <DatabasePage /> : page === "runs" ? <ActivityPage /> : <SystemPage />;
-  return <div className="control-shell"><aside className="control-sidebar"><div className="control-brand"><strong>PADOS</strong><span>Local Control Center</span></div><nav aria-label="Control center navigation">{pages.map((item) => <button className={page === item.id ? "active" : ""} key={item.id} onClick={() => setPage(item.id)}>{item.label}</button>)}</nav><button className="control-back" onClick={onBack}>← Corpus Operator</button><p className="control-muted">Local-only, read-only surface.</p></aside><main className="control-main">{content}</main></div>;
+  // The control token is held in this component's memory only (never in browser storage) and only sent to /control.
+  const [controlValue, setControlValue] = useState("");
+  const [focus, setFocus] = useState<string | null>(null);
+  const review = (approvalId: string) => { setFocus(approvalId); setPage("approvals"); };
+  const writes = page === "approvals" || page === "work";
+  const content = page === "mission" ? <MissionControlPage /> : page === "inbox" ? <DecisionInboxPage onReview={review} /> : page === "approvals" ? <ApprovalsSurface controlValue={controlValue} focus={focus} /> : page === "work" ? <WorkRequestSurface controlValue={controlValue} /> : page === "dashboard" ? <DashboardPage /> : page === "projects" ? <ProjectsPage /> : page === "memory" ? <MemoryPage /> : page === "database" ? <DatabasePage /> : page === "runs" ? <ActivityPage /> : <SystemPage />;
+  return <div className="control-shell"><aside className="control-sidebar"><div className="control-brand"><strong>PADOS</strong><span>Local Control Center</span></div><nav aria-label="Control center navigation">{pages.map((item) => <button className={page === item.id ? "active" : ""} key={item.id} onClick={() => setPage(item.id)}>{item.label}</button>)}</nav><button className="control-back" onClick={onBack}>← Corpus Operator</button><p className="control-muted">Reads are local-only. A change needs the control token and your confirmation.</p></aside><main className="control-main">{writes && <ControlTokenPanel controlValue={controlValue} onChange={setControlValue} />}{content}</main></div>;
 }

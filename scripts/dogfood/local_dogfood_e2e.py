@@ -30,17 +30,22 @@ The WebAuthn device in steps 8-9 is the software authenticator in tests/remote/p
 key and genuine ES256 assertions checked by the production verifier); it stands in for a phone or browser.
 ``--cluster-only`` starts the private cluster, prints the environment for integration tests and waits.
 Evidence: ``<out>/E2E_RESULT.json`` plus per-step logs. Exit 0 only when every step passed.
+``--skip-acceptance-suite`` records ``run_mode: skip-acceptance-suite``; such a run is NOT_VALIDATED for the E2E
+runtime lanes, which require the registry's complete step list from a ``full`` run.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import http.client
 import json
 import os
 import platform
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -62,6 +67,10 @@ MIGRATIONS = [("operational", "alembic.ini", "20261101_0020"), ("proof", "alembi
               ("corpus", "alembic.ini", "20260730_0011")]
 SUBJECT_SCHEMA = "pados.approval-subject.v1"
 PROBE = "markdown_reference_check"  # emits pados.capability-outcome.v1 derived from what it checked
+# /api/health opens fresh engines for two databases and reads metrics: one answer takes about 2-3.5 s on the
+# validation hosts, so a probe must be allowed to wait for it; the whole wait stays bounded.
+HEALTH_DEADLINE_SECONDS = 300.0
+HEALTH_PROBE_TIMEOUT_SECONDS = 30.0
 OPS = [{"step_sequence": 1, "capability_id": "RUN_STATIC_ANALYSIS", "command_id": PROBE, "max_risk_level": "LOW"}]
 PRESENCE_ORIGIN = "http://localhost:5173"  # the software authenticator's origin; rp_id localhost
 TERMINAL = {"COMPLETED", "PAUSED", "BLOCKED", "WAITING_HUMAN", "FAILED_TERMINAL", "FAILED_RECOVERABLE", "CANCELLED"}
@@ -219,18 +228,44 @@ class Api:
 
 
 def start_server(run: Run, env: dict[str, str], port: int, name: str, cwd: Path = REPO) -> subprocess.Popen[str]:
+    refuse_busy_port(port)
     log = open(run.out / f"{name}.log", "w", encoding="utf-8")  # noqa: SIM115 - lives as long as the server
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     server = subprocess.Popen([sys.executable, "-m", "pados.cli.main", "serve"], cwd=cwd, env=env, stdout=log,
                               stderr=subprocess.STDOUT, text=True, creationflags=flags)
-    for _ in range(120):
+    try:
+        wait_until_healthy(f"http://127.0.0.1:{port}/api/health", server, name)
+    except BaseException:
+        # Never leave a server behind: it would keep the port and answer the next run. A cleanup error (a process
+        # that exited unpolled) must not replace the error that explains the failure.
+        with contextlib.suppress(OSError):
+            stop_server(server)
+        log.close()
+        raise
+    return server
+
+
+def refuse_busy_port(port: int) -> None:
+    """A server already listening on the port would answer the health probe in place of the one about to start."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(1.0)
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            raise RuntimeError(f"API port {port} is already in use; stop the server that holds it first")
+
+
+def wait_until_healthy(url: str, server: subprocess.Popen[str], name: str, *,
+                       deadline_s: float = HEALTH_DEADLINE_SECONDS,
+                       probe_timeout_s: float = HEALTH_PROBE_TIMEOUT_SECONDS) -> None:
+    """Return once ``url`` answers 2xx; refuse a server that exits or is not healthy by the deadline."""
+    deadline = time.monotonic() + deadline_s
+    while (remaining := deadline - time.monotonic()) > 0:
+        if server.poll() is not None:
+            raise RuntimeError(f"pados serve exited early ({server.returncode}); see {name}.log")
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2):  # noqa: S310
-                return server
-        except (urllib.error.URLError, OSError):
-            if server.poll() is not None:
-                raise RuntimeError(f"pados serve exited early ({server.returncode}); see {name}.log")
-            time.sleep(1)
+            with urllib.request.urlopen(url, timeout=max(0.1, min(probe_timeout_s, remaining))):  # noqa: S310
+                return
+        except (urllib.error.URLError, http.client.HTTPException, OSError):  # not healthy yet (or not ours): retry
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
     raise RuntimeError("pados serve did not become healthy")
 
 
@@ -570,6 +605,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
         ok, _ = api.call("GET", "/control/projects")
         run.record("control_auth", no_token in (401, 403) and wrong in (401, 403) and ok == 200,
                    no_token=no_token, default_token=wrong, init_token=ok)
+        # OP-003 health contract as a user sees it: liveness claims nothing, readiness reports the required lane.
+        live_http, live = api.call("GET", "/health/live", control=None)
+        ready_http, ready = api.call("GET", "/health/ready", control=None)
+        checks = {c.get("name"): c for c in (ready or {}).get("checks", [])} if isinstance(ready, dict) else {}
+        run.record("health_live_and_ready", live_http == 200 and (live or {}).get("status") == "ALIVE"
+                   and ready_http == 200 and (ready or {}).get("schema_version") == "pados.health.v1"
+                   and (ready or {}).get("status") in ("OK", "DEGRADED")
+                   and (checks.get("operational_database") or {}).get("status") == "OK",
+                   live=live_http, ready=ready_http, status=(ready or {}).get("status") if isinstance(ready, dict)
+                   else None, checks={name: c.get("status") for name, c in checks.items()})
 
         project = create_project(run, api, env, root, "dogfood-synthetic", broken=False)
         broken_project = create_project(run, api, env, root, "dogfood-broken-reference", broken=True)
@@ -692,9 +737,15 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0915 - a linea
         shutil.rmtree(root, ignore_errors=True)
     passed = all(step["status"] == "PASS" for step in run.steps)
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True).stdout.strip()
+    # The runtime lane reads this record under the registry's step list: a reduced run names its mode and what it
+    # left out, so it can never stand in for the full lane.
     (run.out / "E2E_RESULT.json").write_text(json.dumps({
+        "runner_contract": "pados.local-dogfood-e2e.v1",
+        "run_mode": "skip-acceptance-suite" if args.skip_acceptance_suite else "full",
+        "skipped_steps": ["governed_acceptance_suite"] if args.skip_acceptance_suite else [],
         "verdict": "PASS" if passed else "FAIL", "commit": head, "platform": platform.platform(),
-        "python": sys.version.split()[0], "seconds": int(time.time() - started), "steps": run.steps},
+        "python": sys.version.split()[0], "seconds": int(time.time() - started),
+        "finished": datetime.now(UTC).isoformat(), "steps": run.steps},
         indent=2, default=str), encoding="utf-8")
     print(f"E2E {'PASS' if passed else 'FAIL'} -> {run.out / 'E2E_RESULT.json'}", flush=True)
     return 0 if passed else 1

@@ -30,6 +30,9 @@ from pados.compute_node.identity_providers import (
 )
 from pados.compute_node.manifest import ModelAvailability, NodeCapability, NodeDescriptor, NodeState
 from pados.enterprise import observability
+from pados.operability.context import downstream_headers
+from pados.operability.metrics import METRICS
+from pados.operability.resilience import DeadlineExceeded, RetryPolicy, capped_timeout, retry_call
 from pados.enterprise.classification import DataClassification
 from pados.enterprise.secrets import (
     EnvironmentSecretResolver,
@@ -175,6 +178,13 @@ def local_reasons(descriptor: NodeDescriptor) -> list[str]:
     return mapped
 
 
+_READ_RETRY = RetryPolicy(max_attempts=2, base_delay_s=0.1, max_delay_s=0.5)
+
+
+def _transient_node_failure(exc: BaseException) -> bool:
+    return isinstance(exc, NodeClientError) and exc.code in {"NODE_TIMEOUT", "NODE_OFFLINE"}
+
+
 class NodeClient:
     """Authenticated client for one registered node; the credential never leaves it."""
 
@@ -188,9 +198,17 @@ class NodeClient:
     def _request(self, method: str, path: str, *, json_body: dict[str, Any] | None = None,
                  params: dict[str, str] | None = None, raw: bool = False, timeout: float | None = None) -> Any:
         try:
+            # OP-004: never wait past the caller's remaining budget; a spent budget refuses before any network call.
+            bounded_timeout = capped_timeout(timeout or self._timeout)
+        except DeadlineExceeded:
+            METRICS.inc("pados_deadline_exceeded_total", {"component": "compute_node"})
+            raise NodeClientError("NODE_DEADLINE_EXCEEDED") from None
+        try:
+            # OP-001: the caller's request context travels with the call; it never replaces the credential.
             response = self._http.request(method, path, json=json_body, params=params,
-                                          headers={"authorization": f"Bearer {self._credential}"},
-                                          timeout=timeout or self._timeout)
+                                          headers={**downstream_headers(),
+                                                   "authorization": f"Bearer {self._credential}"},
+                                          timeout=bounded_timeout)
         except httpx.TimeoutException:
             raise NodeClientError("NODE_TIMEOUT") from None
         except httpx.HTTPError:
@@ -235,7 +253,10 @@ class NodeClient:
         return dict(self._request("POST", "/execute", json_body=request))
 
     def job(self, job_id: str) -> dict[str, Any]:
-        return dict(self._request("GET", f"/jobs/{job_id}"))
+        # OP-004: an idempotent status read; only a transient timeout or offline answer is retried, inside the
+        # caller's budget. execute() and cancel() are mutations and are never retried here.
+        return dict(retry_call(lambda: self._request("GET", f"/jobs/{job_id}"), operation="compute_node.job_status",
+                               policy=_READ_RETRY, retryable=_transient_node_failure))
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         return dict(self._request("POST", f"/jobs/{job_id}/cancel"))

@@ -19,6 +19,7 @@ from pados.execution.receipts import execution_receipt
 from pados.loop import scope_authority
 from pados.loop.runtime_bindings import insert_goal_runtime_binding
 from pados.loop.schemas import LoopStatus
+from pados.operability.context import trace_fields
 from pados.work_protocol.coverage import build_coverage
 from pados.work_protocol.graph import RuntimeLineageProjection
 from pados.work_protocol.models import (
@@ -390,6 +391,11 @@ def record_p6_10_execution_result(
         "residual_id": binding["residual_id"],
         "step_status": str(job["status"]),
     }
+    trace = trace_fields()
+    if trace:
+        # OP-001: beside the sealed receipt and capability result, never inside them. Their hashes, the evidence
+        # and every acceptance check stay exactly what they were; the trace is not read as authority anywhere.
+        payload["trace"] = trace
     session.execute(
         text(
             """

@@ -24,10 +24,12 @@ import {
 } from "./api";
 import { getAuthorizationEligibility } from "./authorization";
 import { ControlCenter } from "./control-center";
+import { projectPlaceholder } from "./project-placeholder";
 import "./styles.css";
 
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsState, setProjectsState] = useState({ loaded: false, failed: false });
   const [projectId, setProjectId] = useState("");
   const [status, setStatus] = useState<CorpusStatus | null>(null);
   const [batches, setBatches] = useState<Batch[]>([]);
@@ -47,9 +49,13 @@ function App() {
     listProjects()
       .then((response) => {
         setProjects(response.projects);
+        setProjectsState({ loaded: true, failed: false });
         if (response.projects.length) setProjectId(response.projects[0].id);
       })
-      .catch(setError);
+      .catch((failure) => {
+        setProjectsState({ loaded: true, failed: true });
+        setError(failure);
+      });
   }, []);
 
   async function refresh() {
@@ -152,7 +158,7 @@ function App() {
         <aside className="sidebar panel">
           <label className="field-label" htmlFor="project">Project context</label>
           <select id="project" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
-            {!projects.length && <option value="">Loading projects…</option>}
+            {!projects.length && <option value="">{projectPlaceholder({ ...projectsState, count: 0 })}</option>}
             {projects.map((project) => <option key={project.id} value={project.id}>{project.name || project.slug || project.id}</option>)}
           </select>
           <div className="side-note">
@@ -165,7 +171,7 @@ function App() {
         </aside>
 
         <section className="content">
-          {error && <div className="alert error" role="alert"><strong>{error.code || "Request failed"}</strong> {error.message}</div>}
+          {error && <div className="alert error" role="alert"><strong>{error.code || "Request failed"}</strong> {error.message}{error.request_id && <small> Request {error.request_id}</small>}</div>}
           {busy && <div className="alert progress" role="status">{busy}</div>}
           <section className="hero panel">
             <div>

@@ -12,6 +12,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import MetaData, Table, func, inspect, or_, select, text
+from sqlalchemy import table as sql_table
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -127,11 +128,10 @@ def _expected_revision_for_database(settings: Settings) -> str:
     return settings.operational_revision
 
 
-def _count_table(session: Session, engine: Engine, table_name: str) -> int | None:
-    if table_name not in _public_tables(engine):
-        return None
-    table = _reflect_table(engine, PUBLIC_SCHEMA, table_name)
-    return int(session.execute(select(func.count()).select_from(table)).scalar_one())
+def _count_rows(session: Session, table_name: str) -> int:
+    """Row count of a public table known to exist: a plain ``count(*)`` needs no reflected columns."""
+    name = _validate_identifier(table_name, "table")
+    return int(session.execute(select(func.count()).select_from(sql_table(name, schema=PUBLIC_SCHEMA))).scalar_one())
 
 
 def _project_counts(session: Session, engine: Engine, table_names: tuple[str, ...]) -> dict[str, int]:
@@ -153,8 +153,10 @@ def _project_counts(session: Session, engine: Engine, table_names: tuple[str, ..
 
 
 def metrics(session: Session, engine: Engine) -> dict[str, int]:
+    existing = _public_tables(engine)  # read once: tables that do not exist count as 0
+
     def count(*names: str) -> int:
-        return sum(_count_table(session, engine, name) or 0 for name in names)
+        return sum(_count_rows(session, name) for name in names if name in existing)
 
     return {
         "projects": count("projects"),
@@ -176,7 +178,7 @@ def _domain_health(
     engine = get_engine(bound_settings)
     try:
         try:
-            database = check_database(bound_settings)
+            database = check_database(bound_settings, engine=engine)
             database_payload = {
                 "status": "OK",
                 "name": database_name,
@@ -593,12 +595,13 @@ def database_overview(settings: Settings) -> dict[str, Any]:
             for entity, candidates in data_map_candidates
             if any(name in names for name in candidates)
         ]
+        probe = check_database(settings, engine=engine)
         return {
             "status": "ok",
             "database": settings.db_name,
             "schema": PUBLIC_SCHEMA,
-            "postgresql_version": check_database(settings).get("version"),
-            "pgvector": check_database(settings).get("pgvector") == "true",
+            "postgresql_version": probe.get("version"),
+            "pgvector": probe.get("pgvector") == "true",
             "migration": _migration_status(settings, engine, _expected_revision_for_database(settings)),
             "metrics": current_metrics,
             "tables": tables,

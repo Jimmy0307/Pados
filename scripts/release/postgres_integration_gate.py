@@ -9,14 +9,21 @@ heads, then runs each suite through ``regression_gate.py`` with skips refused (a
 for lack of a database is a failure here, never a pass). Every database name is fixed and disposable; an
 existing one is only dropped with ``--recreate``. The password is passed to child processes through the
 environment and is never printed or written to the reports.
+
+``OUTDIR/postgres-integration.json`` (schema ``pados.postgres-integration.v1``) is the runner record the
+``postgres-integration`` runtime lane reads: the commit, the platform family, the finish time and, per suite, its
+status and the SHA-256 of its ``postgres-<suite>.json`` report, so a suite report edited afterwards no longer matches.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import platform
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -33,7 +40,34 @@ PROOF = "pados_ci_rc2_proof"
 MIGRATION = "pados_fc_migration_ci"   # migration suites require a pados_fc_migration_* database
 DATABASES = (OPS, D4, RESIDUAL, PROOF, MIGRATION)
 # Minimum passing tests per suite (the RC2 acceptance counts), so a silently shrunken suite fails the gate.
-MIN_TESTS = {"d1-binding": 27, "d4-handoff": 14, "residual": 3, "proof-lane": 17, "p6-11": 7, "migration": 5}
+MIN_TESTS = {"d1-binding": 31, "d4-handoff": 18, "residual": 25, "proof-lane": 26, "p6-11": 7, "migration": 5}
+# The pytest paths of each suite. The runtime lane registry repeats them (``suite_paths``) and the lane reader
+# checks every suite report against them, so one suite's report cannot stand in for another's.
+SUITE_PATHS: dict[str, tuple[str, ...]] = {
+    # The approval-binding database also carries SEC-4 (approval lifecycle) and EXEC-1 (no-executor refusal).
+    "d1-binding": ("tests/integration/test_rc2_approval_binding_postgres.py",
+                   "tests/integration/test_sec4_approval_lifecycle_postgres.py",
+                   "tests/integration/test_rc2_exec1_no_executor_route_postgres.py",
+                   "tests/integration/test_op004_idempotency_postgres.py",
+                   "tests/integration/test_control_work_request_capture_postgres.py"),
+    # SEC-9 (model call outside the routing transaction) uses the D4 handoff database.
+    "d4-handoff": ("tests/integration/test_rc2_loop_model_handoff_postgres.py",
+                   "tests/integration/test_sec9_model_call_outside_transaction_postgres.py",
+                   "tests/integration/test_op004_lease_model_takeover_postgres.py"),
+    # The residual database also carries the OP-001 trace continuity suite (API -> TaskLoop -> job -> receipt).
+    "residual": ("tests/integration/test_residual_plan_amendment_postgres.py",
+                 "tests/integration/test_op001_trace_continuity_postgres.py",
+                 "tests/integration/test_op004_lease_postgres.py",
+                 "tests/integration/test_op004_create_idempotency_postgres.py",
+                 "tests/integration/test_op004_db_deadline_postgres.py"),
+    "proof-lane": ("tests/integration/test_final_convergence_product_loop_postgres.py",
+                   "tests/integration/test_final_closure_approval_binding.py",
+                   "tests/integration/test_remote_live_ports.py"),
+    "p6-11": ("tests/integration/test_p6_11_controller_postgres.py", "tests/integration/test_p6_11_gap_postgres.py",
+              "tests/integration/test_p6_11_human_gate_postgres.py", "tests/integration/test_p6_11_outcome_postgres.py"),
+    "migration": ("tests/integration/test_rc2_migration_0018.py",
+                  "tests/integration/test_final_convergence_migration_0017.py"),
+}
 
 
 def _connection() -> dict[str, str]:
@@ -84,6 +118,23 @@ def _migrate(database: str, *targets: str, config: str = "alembic.ini") -> None:
             raise SystemExit(f"POSTGRES_GATE_MIGRATION_FAILED {database} {target}")
 
 
+def _summary(outdir: Path, results: dict[str, int]) -> dict[str, object]:
+    def digest(name: str) -> str | None:
+        report = outdir / f"postgres-{name}.json"
+        return hashlib.sha256(report.read_bytes()).hexdigest() if report.is_file() else None
+
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True,  # noqa: S603,S607
+                          check=False).stdout.strip()
+    return {"schema_version": "pados.postgres-integration.v1",
+            "status": "PASS" if not any(results.values()) else "FAIL",
+            "suites": {name: ("PASS" if code == 0 else "FAIL") for name, code in results.items()},
+            "suite_reports": {name: {"status": "PASS" if code == 0 else "FAIL", "sha256": digest(name)}
+                              for name, code in results.items()},
+            # platform.platform(): a WSL kernel string ("...-microsoft-standard-WSL2") is then visible to the reader.
+            "source_commit": head, "platform": platform.platform(),
+            "finished": datetime.now(UTC).isoformat()}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("outdir", type=Path)
@@ -99,38 +150,23 @@ def main(argv: list[str] | None = None) -> int:
     _migrate(PROOF, "head", config="alembic_p6_19b.ini")
     proof_lane = {"PADOS_TEST_OPERATIONAL_DATABASE": OPS, "PADOS_DB_NAME": PROOF, "PADOS_PRODUCT_DATABASE_NAME": PROOF}
     ops_lane = {"PADOS_TEST_OPERATIONAL_DATABASE": OPS, "PADOS_DB_NAME": OPS, "PADOS_PRODUCT_DATABASE_NAME": PROOF}
-    suites: dict[str, tuple[list[str], dict[str, str]]] = {
-        # The approval-binding database also carries SEC-4 (approval lifecycle) and EXEC-1 (no-executor refusal).
-        "d1-binding": (["tests/integration/test_rc2_approval_binding_postgres.py",
-                        "tests/integration/test_sec4_approval_lifecycle_postgres.py",
-                        "tests/integration/test_rc2_exec1_no_executor_route_postgres.py"],
-                       {"PADOS_RC2_APPROVAL_BINDING_TEST_DATABASE_URL": _url(connection, OPS)}),
-        # SEC-9 (model call outside the routing transaction) uses the D4 handoff database.
-        "d4-handoff": (["tests/integration/test_rc2_loop_model_handoff_postgres.py",
-                        "tests/integration/test_sec9_model_call_outside_transaction_postgres.py"],
-                       {"PADOS_RC2_D4_TEST_DATABASE_URL": _url(connection, D4)}),
-        "residual": (["tests/integration/test_residual_plan_amendment_postgres.py"],
-                     {"PADOS_RESIDUAL_AMENDMENT_TEST_DATABASE_URL": _url(connection, RESIDUAL)}),
-        "proof-lane": (["tests/integration/test_final_convergence_product_loop_postgres.py",
-                        "tests/integration/test_final_closure_approval_binding.py",
-                        "tests/integration/test_remote_live_ports.py"], proof_lane),
-        "p6-11": (["tests/integration/test_p6_11_controller_postgres.py", "tests/integration/test_p6_11_gap_postgres.py",
-                   "tests/integration/test_p6_11_human_gate_postgres.py",
-                   "tests/integration/test_p6_11_outcome_postgres.py"], ops_lane),
-        "migration": (["tests/integration/test_rc2_migration_0018.py",
-                       "tests/integration/test_final_convergence_migration_0017.py"],
-                      {"PADOS_FC_MIGRATION_TEST_DATABASE": MIGRATION, "PADOS_DB_NAME": MIGRATION}),
+    environments: dict[str, dict[str, str]] = {
+        "d1-binding": {"PADOS_RC2_APPROVAL_BINDING_TEST_DATABASE_URL": _url(connection, OPS)},
+        "d4-handoff": {"PADOS_RC2_D4_TEST_DATABASE_URL": _url(connection, D4)},
+        "residual": {"PADOS_RESIDUAL_AMENDMENT_TEST_DATABASE_URL": _url(connection, RESIDUAL)},
+        "proof-lane": proof_lane,
+        "p6-11": ops_lane,
+        "migration": {"PADOS_FC_MIGRATION_TEST_DATABASE": MIGRATION, "PADOS_DB_NAME": MIGRATION},
     }
-    selected = args.suite or list(suites)
+    selected = args.suite or list(SUITE_PATHS)
     results: dict[str, int] = {}
     for name in selected:
-        paths, extra = suites[name]
+        paths, extra = list(SUITE_PATHS[name]), environments[name]
         results[name] = _run([str(ROOT / "scripts/release/regression_gate.py"), f"postgres-{name}",
                               str(args.outdir / f"postgres-{name}.json"), "--no-skips",
                               "--min-tests", str(MIN_TESTS[name]), "--basetemp", str(args.outdir / f"pt-{name}"),
                               *paths], _env(**extra))
-    summary = {"status": "PASS" if not any(results.values()) else "FAIL",
-               "suites": {name: ("PASS" if code == 0 else "FAIL") for name, code in results.items()}}
+    summary = _summary(args.outdir, results)
     (args.outdir / "postgres-integration.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n",
                                                            encoding="utf-8")
     print(f"POSTGRES_INTEGRATION {summary['status']} {summary['suites']}")

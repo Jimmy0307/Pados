@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { useCallback, useEffect, useState, type FormEvent, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
-import { RemoteApiError, RemoteClient, deriveBanner, type AttentionProjection, type ConnectivityProjection, type RemoteNodes, type RemoteRun, type WorkMapProjection } from "./remote-api";
-import { ActionsView, AttentionView, ConnectivityBanner, REMOTE_VIEWS, TaskAssignmentView, WorkMapView, type RemoteView } from "./remote-console";
+import { RemoteApiError, RemoteClient, describeRemoteFailure, deriveBanner, homeBaseUnreachable, type AttentionProjection, type ConnectivityProjection, type RemoteNodes, type RemoteRun, type WorkMapProjection } from "./remote-api";
+import { ActionsSignInHint, ActionsView, AttentionView, ConnectivityBanner, LocalConsoleHint, REMOTE_VIEWS, TaskAssignmentView, WorkMapView, type RemoteView } from "./remote-console";
+import { remoteInitialView } from "./page-links";
 import "./remote.css";
 
 function RemoteApp(): ReactElement {
@@ -10,7 +11,8 @@ function RemoteApp(): ReactElement {
   const [client, setClient] = useState<RemoteClient | null>(null);
   const [endpoint, setEndpoint] = useState("");
   const [endpointConfirmed, setEndpointConfirmed] = useState(false);
-  const [view, setView] = useState<RemoteView>("map");
+  // ?view=actions (the operator inbox's link for a result waiting for acceptance) opens that view after sign-in.
+  const [view, setView] = useState<RemoteView>(() => remoteInitialView(window.location.search));
   const [attention, setAttention] = useState<AttentionProjection | null>(null);
   const [workMap, setWorkMap] = useState<WorkMapProjection | null>(null);
   const [nodes, setNodes] = useState<RemoteNodes | undefined>();
@@ -38,11 +40,11 @@ function RemoteApp(): ReactElement {
       setNotice("");
       setLastSync(new Date().toLocaleTimeString());
     } catch (error) {
-      if (error instanceof RemoteApiError) {
-        setReachable(true);
-        setNotice(error.detail);
+      if (homeBaseUnreachable(error)) {
+        setReachable(false);  // OFFLINE / RECONNECTING, never an answer from the Home Base
       } else {
-        setReachable(false);
+        setReachable(true);
+        setNotice(describeRemoteFailure(error));
       }
     }
   }, [client]);
@@ -91,7 +93,7 @@ function RemoteApp(): ReactElement {
       setNotice(`${label}: ${result.outcome}`);
       return result;
     } catch (error) {
-      setNotice(`${label}: ${error instanceof RemoteApiError ? error.detail : "request failed"}`);
+      setNotice(`${label}: ${describeRemoteFailure(error)}`);
       return null;
     }
   }
@@ -114,6 +116,8 @@ function RemoteApp(): ReactElement {
       </form>
       {notice && <p className="rc-notice" role="alert">{notice}</p>}
       <p className="rc-note">Access values stay in memory for this session. The browser sends intent only.</p>
+      {view === "actions" && <ActionsSignInHint />}
+      <LocalConsoleHint />
     </main>;
   }
 
@@ -130,7 +134,7 @@ function RemoteApp(): ReactElement {
       const descriptor = await client.presenceDescriptor("pados-remote-device");
       setNotice(`Device descriptor (give to the Home Base operator to enrol): ${JSON.stringify(descriptor)}`);
     } catch (error) {
-      setNotice(`register device: ${error instanceof RemoteApiError ? error.detail : "WebAuthn unavailable"}`);
+      setNotice(`register device: ${error instanceof RemoteApiError ? describeRemoteFailure(error) : "WebAuthn unavailable"}`);
     }
   })();
 

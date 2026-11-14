@@ -1,0 +1,162 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// The Control Center's write actions use the existing control API: the same routes, the control token header, the
+// server's idempotency and version checks. Nothing is stored in the browser, and the server's refusal of a result
+// acceptance (RESULT_ACCEPTANCE_REQUIRES_STEP_UP) reaches the person as the code.
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describeFailure } from "./http";
+import {
+  CONTROL_TOKEN_HEADER,
+  ControlTokenPanel,
+  LOCAL_ONLY,
+  isLocalPage,
+  createWorkRequest,
+  decideApproval,
+  decisionPrompt,
+  getApproval,
+  WORK_CAPABILITIES,
+  workRequestFailure,
+  type ControlApproval,
+} from "./control-actions";
+
+type Sent = { url: string; init: RequestInit };
+
+function recorder(status: number, body: unknown): { sent: Sent[]; fetcher: typeof fetch } {
+  const sent: Sent[] = [];
+  const fetcher = (async (url: string, init: RequestInit) => {
+    sent.push({ url, init });
+    return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+  }) as unknown as typeof fetch;
+  return { sent, fetcher };
+}
+
+const approval: ControlApproval = {
+  id: "11111111-2222-3333-4444-555555555555", project_id: "p1", status: "PENDING", version: 3,
+  proposal_summary: "Run the markdown reference check", subject_kind: "WORK_ROUTE",
+  subject_json: { request_id: "r1", actor: { surfaces: ["CONTROL_API"], worker_types: ["COMMAND"] },
+    operations: [{ capability_id: "RUN_VALIDATION", command_id: "markdown_reference_check", max_risk_level: "LOW" }] },
+};
+
+function headerOf(init: RequestInit, name: string): string | undefined {
+  return (init.headers as Record<string, string>)[name];
+}
+
+beforeEach(() => { vi.stubGlobal("location", { hostname: "127.0.0.1" }); });
+afterEach(() => { vi.unstubAllGlobals(); });
+
+describe("control API actions", () => {
+  it("creates a work request on the existing route with the token and a fresh idempotency key", async () => {
+    const { sent, fetcher } = recorder(200, { status: "ok", work_request: { id: "w1" } });
+    await createWorkRequest("tok-1", "p1", "Check links", "Check the docs links", fetcher);
+    await createWorkRequest("tok-1", "p1", "Check links", "Check the docs links", fetcher);
+    expect(sent.map((s) => s.url)).toEqual(["/control/work-requests", "/control/work-requests"]);
+    expect(headerOf(sent[0].init, CONTROL_TOKEN_HEADER)).toBe("tok-1");
+    const [first, second] = sent.map((s) => JSON.parse(String(s.init.body)));
+    expect(first).toMatchObject({ project_id: "p1", title: "Check links", body: "Check the docs links" });
+    expect(first.idempotency_key).toMatch(/^web-work-[0-9a-f]{24}$/);
+    expect(first.idempotency_key).not.toBe(second.idempotency_key);
+    expect(JSON.stringify(first)).not.toContain("tok-1");  // the token travels only in its header
+    expect(first).not.toHaveProperty("requested_capability");  // without a capability the request is plain text
+  });
+
+  it("names the capability the work needs, so the server records the request as a task", async () => {
+    const { sent, fetcher } = recorder(200, { status: "ok", work_request: { id: "w1" } });
+    await createWorkRequest("tok-1", "p1", "Check links", "Check the docs links", fetcher, "web-work-key", "RUN_STATIC_ANALYSIS");
+    expect(JSON.parse(String(sent[0].init.body))).toEqual({ project_id: "p1", title: "Check links", body: "Check the docs links",
+      idempotency_key: "web-work-key", requested_capability: "RUN_STATIC_ANALYSIS" });
+  });
+
+  it("says what to do when the server cannot record the request as a task", async () => {
+    const { fetcher } = recorder(409, { error: { schema_version: "pados.error.v1", code: "TASK_ENVELOPE_SCOPE_VERSION_UNAVAILABLE",
+      category: "CONFLICT", message: "conflict", retryable: false, request_id: "r1", write_occurred: "NO" } });
+    const failure = await createWorkRequest("tok-1", "p1", "t", "b", fetcher, "k", "RUN_TESTS").catch((error: unknown) => error);
+    expect(workRequestFailure(failure)).toContain("proof database");
+    expect(workRequestFailure(new Error("boom"))).toBe("boom");
+  });
+
+  it("offers only capabilities the server accepts", () => {
+    const ids = WORK_CAPABILITIES.map((item) => item.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) expect(id).toMatch(/^[A-Z][A-Z_]+$/);
+    expect(ids).toContain("RUN_STATIC_ANALYSIS");
+    expect(ids).not.toContain("DEPLOY");
+  });
+
+  it.each(["approve", "reject", "revise"] as const)("sends %s with the version the person reviewed", async (verb) => {
+    const { sent, fetcher } = recorder(200, { status: "ok", approval: { ...approval, status: "APPROVED" } });
+    await decideApproval("tok-1", approval, verb, "looks right", fetcher);
+    expect(sent[0].url).toBe(`/control/approvals/${approval.id}/${verb}`);
+    expect(sent[0].init.method).toBe("POST");
+    expect(JSON.parse(String(sent[0].init.body))).toMatchObject({ version: 3, reason: "looks right" });
+  });
+
+  it("reads one approval with the token", async () => {
+    const { sent, fetcher } = recorder(200, { status: "ok", approval });
+    expect((await getApproval("tok-1", approval.id, fetcher)).approval.version).toBe(3);
+    expect(headerOf(sent[0].init, CONTROL_TOKEN_HEADER)).toBe("tok-1");
+  });
+
+  it("surfaces the server's refusal of a result acceptance as its code", async () => {
+    const { fetcher } = recorder(403, { detail: "RESULT_ACCEPTANCE_REQUIRES_STEP_UP" });
+    const failure = await decideApproval("tok-1", approval, "approve", "", fetcher).catch((error: unknown) => error);
+    expect(describeFailure(failure)).toContain("RESULT_ACCEPTANCE_REQUIRES_STEP_UP");
+  });
+
+  it("asks the person to confirm exactly what is decided", () => {
+    const prompt = decisionPrompt(approval, "approve");
+    for (const part of ["APPROVE", approval.id, "project p1", "version 3", "RUN_VALIDATION markdown_reference_check",
+                        "risk up to LOW", "request r1", "Run the markdown reference check"]) {
+      expect(prompt).toContain(part);
+    }
+    expect(decisionPrompt({ ...approval, subject_kind: null, subject_json: null }, "reject")).toContain("cannot route work");
+  });
+});
+
+describe("the control token stays in page memory", () => {
+  it("is a masked field that the browser is told not to remember", () => {
+    const html = renderToStaticMarkup(createElement(ControlTokenPanel, { controlValue: "", onChange: () => undefined, local: true }));
+    expect(html).toContain('type="password"');
+    expect(html).toContain('autoComplete="off"');
+    expect(html).toMatch(/memory only/);
+  });
+
+  it("is never written to browser storage or a cookie", () => {
+    const sources = import.meta.glob(["./control-actions.tsx", "./control-center.tsx"],
+      { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+    expect(Object.keys(sources)).toHaveLength(2);
+    for (const [name, source] of Object.entries(sources)) {
+      expect(source, name).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie/);
+    }
+  });
+});
+
+describe("the control token is used only on this computer", () => {
+  it("knows a loopback page from any other host", () => {
+    for (const host of ["127.0.0.1", "localhost", "LOCALHOST", "[::1]"]) expect(isLocalPage(host), host).toBe(true);
+    for (const host of ["jimmy0307.github.io", "pados.example.com", "127.0.0.1.example.com", "", "0.0.0.0"]) {
+      expect(isLocalPage(host), host).toBe(false);
+    }
+  });
+
+  it("sends nothing from a page served by another host", async () => {
+    vi.stubGlobal("location", { hostname: "jimmy0307.github.io" });
+    const { sent, fetcher } = recorder(200, { status: "ok", work_request: { id: "w1" } });
+    const failure = await createWorkRequest("tok-1", "p1", "t", "b", fetcher).catch((error: unknown) => error);
+    expect(String(failure)).toContain(LOCAL_ONLY);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("does not offer the token field on another host", () => {
+    const html = renderToStaticMarkup(createElement(ControlTokenPanel, { controlValue: "", onChange: () => undefined, local: false }));
+    expect(html).not.toContain("<input");
+    expect(html).toMatch(/this computer/);
+  });
+
+  it("keeps one idempotency key for a retried request", async () => {
+    const { sent, fetcher } = recorder(200, { status: "ok", work_request: { id: "w1" } });
+    await createWorkRequest("tok-1", "p1", "t", "b", fetcher, "web-work-fixed");
+    await createWorkRequest("tok-1", "p1", "t", "b", fetcher, "web-work-fixed");
+    expect(sent.map((s) => JSON.parse(String(s.init.body)).idempotency_key)).toEqual(["web-work-fixed", "web-work-fixed"]);
+  });
+});

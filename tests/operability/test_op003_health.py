@@ -1,0 +1,250 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+"""OP-003: one versioned health schema; liveness never claims dependencies; readiness fails on required ones only.
+
+Probes are bounded and non-mutating, and health output never contains credentials, connection strings or exception
+text. ``/ready`` keeps its existing decision and reports it in the same schema.
+"""
+from __future__ import annotations
+
+import functools
+import hashlib
+import json
+import threading
+import time
+from collections.abc import Iterator
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+
+from pados.operability import health as health_contract
+
+CONTROL_VALUE = "pados-test-control-" + "value"
+SECRET_TEXT = "pass" + "word=hunter2 host=db.internal.example user=pados"  # split so the file holds no secret pattern
+
+
+@pytest.fixture(autouse=True)
+def _settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    from pados.config import get_settings
+
+    monkeypatch.setenv("PADOS_CONTROL_API_TOKEN_HASH", hashlib.sha256(CONTROL_VALUE.encode()).hexdigest().upper())
+    monkeypatch.setenv("PADOS_CHAT_PROVIDER", "")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def _assessment(*, operational: bool = True, proof: bool = True, provider: bool = True,
+                product_configured: bool = True, reasons: tuple[str, ...] = ()) -> dict[str, Any]:
+    return {"dimensions": {"operational_usable": operational, "proof_usable": proof,
+                           "object_root_usable": product_configured, "product_loop_configured": product_configured,
+                           "provider_configured": provider},
+            "reasons": list(reasons), "provider_live_uat": "NOT_APPLICABLE", "ready": not reasons}
+
+
+def _client(monkeypatch: pytest.MonkeyPatch, assessment: Any, **settings_env: str) -> TestClient:
+    for key, value in settings_env.items():
+        monkeypatch.setenv(key, value)
+    from pados.api import app as app_module
+    from pados.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setattr(app_module, "system_health", assessment if callable(assessment) else lambda _s: assessment)
+    return TestClient(app_module.create_app())
+
+
+def _checks(body: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {check["name"]: check for check in body["checks"]}
+
+
+def test_healthy_core_is_ready_and_unconfigured_optional_lanes_degrade_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(monkeypatch, _assessment(proof=False, provider=False, product_configured=False,
+                                              reasons=("PROOF_DB_UNCONFIGURED", "PRODUCT_LOOP_UNCONFIGURED",
+                                                       "PROVIDER_UNAVAILABLE")))
+    response = client.get("/health/ready")
+    body = response.json()
+    assert response.status_code == 200 and body["status"] == "OK"
+    assert body["schema_version"] == "pados.health.v1" and body["kind"] == "readiness"
+    checks = _checks(body)
+    assert checks["operational_database"] == {**checks["operational_database"], "required": True, "status": "OK"}
+    assert {checks[n]["status"] for n in ("proof_database", "product_loop_configuration", "provider_routing",
+                                          "chat_provider")} == {"NOT_CONFIGURED"}
+    assert all(check["required"] is False for name, check in checks.items() if name != "operational_database")
+
+
+def test_a_required_database_failure_is_not_ready_with_a_safe_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(monkeypatch, _assessment(operational=False, reasons=("OPERATIONAL_DB_UNAVAILABLE",)))
+    response = client.get("/health/ready")
+    assert response.status_code == 503 and response.json()["status"] == "NOT_READY"
+    database = _checks(response.json())["operational_database"]
+    assert (database["status"], database["reason"]) == ("FAILED", "OPERATIONAL_DB_UNAVAILABLE")
+
+
+def test_an_optional_degraded_dependency_keeps_the_service_ready_but_degraded(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(monkeypatch, _assessment(), PADOS_CHAT_PROVIDER="mock")
+    response = client.get("/health/ready")
+    assert response.status_code == 200 and response.json()["status"] == "DEGRADED"
+    assert _checks(response.json())["chat_provider"]["reason"] == "MOCK_CHAT_PROVIDER_SELECTED"
+
+
+def test_a_slow_probe_is_bounded_and_reported_as_a_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    def slow(_settings: Any) -> dict[str, Any]:
+        time.sleep(2.0)
+        return _assessment()
+
+    client = _client(monkeypatch, slow)
+    monkeypatch.setattr(health_contract, "bounded", functools.partial(health_contract.bounded, timeout_s=0.2))
+    started = time.perf_counter()
+    response = client.get("/health/ready")
+    assert time.perf_counter() - started < 1.5
+    assert response.status_code == 503
+    assert _checks(response.json())["operational_database"]["reason"] == "PROBE_TIMEOUT"
+
+
+def test_a_failing_probe_reports_a_code_and_never_its_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(_settings: Any) -> dict[str, Any]:
+        raise RuntimeError(SECRET_TEXT)
+
+    response = _client(monkeypatch, broken).get("/health/ready")
+    assert response.status_code == 503
+    assert _checks(response.json())["operational_database"]["reason"] == "PROBE_FAILED"
+    assert "hunter2" not in response.text and "db.internal" not in response.text
+
+
+def test_liveness_never_touches_a_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    def must_not_run(_settings: Any) -> dict[str, Any]:
+        raise AssertionError("liveness must not probe dependencies")
+
+    from pados.api import app as app_module
+
+    monkeypatch.setattr(app_module, "check_database", must_not_run)
+    response = _client(monkeypatch, must_not_run).get("/health/live")
+    assert response.status_code == 200
+    assert response.json() == {**response.json(), "kind": "liveness", "status": "ALIVE", "checks": []}
+
+
+def test_the_legacy_health_summary_never_echoes_driver_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    def failing(_settings: Any) -> dict[str, str]:
+        raise RuntimeError(SECRET_TEXT)
+
+    from pados.api import app as app_module
+
+    monkeypatch.setattr(app_module, "check_database", failing)
+    response = _client(monkeypatch, _assessment()).get("/health")
+    assert response.status_code == 200 and response.json()["status"] == "degraded"
+    assert response.json()["database"] == {"status": "error", "error": "DATABASE_UNAVAILABLE"}
+    assert "hunter2" not in response.text and "db.internal" not in response.text
+
+
+def test_product_loop_lanes_are_required_only_when_it_is_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    degraded_proof = _assessment(proof=False, reasons=("PROOF_DB_UNAVAILABLE",))
+    disabled = _client(monkeypatch, degraded_proof).get("/health/ready")
+    assert disabled.status_code == 200  # the proof lane is optional while the Product Loop is disabled
+    enabled = _client(monkeypatch, degraded_proof, PADOS_PRODUCT_LOOP_ENABLED="true").get("/health/ready")
+    assert enabled.status_code == 503
+    assert _checks(enabled.json())["proof_database"] == {**_checks(enabled.json())["proof_database"],
+                                                         "required": True, "status": "FAILED",
+                                                         "reason": "PROOF_DB_UNAVAILABLE"}
+
+
+@pytest.mark.parametrize("ready", [True, False])
+def test_ready_keeps_its_decision_and_reports_it_in_the_same_schema(monkeypatch: pytest.MonkeyPatch,
+                                                                     ready: bool) -> None:
+    from pados.api import app as app_module
+
+    monkeypatch.setattr(app_module, "check_database", lambda _settings: {"status": "ok"})
+    assessment = _assessment() if ready else _assessment(provider=False, reasons=("PROVIDER_UNAVAILABLE",))
+    response = _client(monkeypatch, assessment).get("/ready")
+    assert response.status_code == (200 if ready else 503)
+    body = response.json() if ready else response.json()["detail"]
+    assert body["health"]["schema_version"] == "pados.health.v1"
+    assert (body["health"]["status"] == "NOT_READY") is (not ready)
+    assert "hunter2" not in json.dumps(body)
+
+
+def test_a_hung_probe_runs_once_however_often_readiness_is_asked() -> None:
+    release = threading.Event()
+    shared = health_contract.SharedProbe(cache_s=0.0)
+
+    def hung() -> dict[str, Any]:
+        release.wait(5)
+        return _assessment()
+
+    results = [health_contract.bounded(hung, timeout_s=0.05, shared=shared) for _ in range(5)]
+    assert {error for _, _, error in results} == {"PROBE_TIMEOUT"}
+    assert shared.started_runs == 1  # later callers joined the stuck run instead of starting threads
+    release.set()
+
+
+def test_a_finished_probe_result_is_reused_briefly_and_then_refreshed() -> None:
+    calls: list[int] = []
+    shared = health_contract.SharedProbe(cache_s=60.0)
+
+    def probe() -> int:
+        calls.append(1)
+        return len(calls)
+
+    first = health_contract.bounded(probe, timeout_s=1.0, shared=shared)
+    second = health_contract.bounded(probe, timeout_s=1.0, shared=shared)
+    assert first[0] == second[0] == 1 and len(calls) == 1
+    assert health_contract.bounded(probe, timeout_s=1.0)[0] == 2  # no shared state: a fresh run
+
+
+def _with_corpus(**lane: bool) -> dict[str, Any]:
+    corpus = {"configured": True, "reachable": True, "authenticated": True, "migrations_current": True,
+              "usable": True, **lane}
+    return {**_assessment(), "lanes": {"corpus": corpus}}
+
+
+@pytest.mark.parametrize(("lane", "status", "reason", "overall"), [
+    ({}, "OK", None, "OK"),
+    ({"configured": False, "usable": False}, "NOT_CONFIGURED", "CORPUS_DB_UNCONFIGURED", "OK"),
+    ({"reachable": True, "authenticated": False, "usable": False, "missing": True}, "NOT_CONFIGURED",
+     "CORPUS_DB_UNCONFIGURED", "OK"),  # the default name, but no Corpus database was ever created
+    ({"reachable": False, "authenticated": False, "usable": False}, "DEGRADED", "CORPUS_DB_UNAVAILABLE", "DEGRADED"),
+    ({"migrations_current": False, "usable": False}, "DEGRADED", "CORPUS_MIGRATION_STALE", "DEGRADED"),
+])
+def test_corpus_readiness_is_reported_as_an_optional_check(monkeypatch: pytest.MonkeyPatch, lane: dict[str, bool],
+                                                           status: str, reason: str | None, overall: str) -> None:
+    response = _client(monkeypatch, _with_corpus(**lane)).get("/health/ready")
+    corpus = _checks(response.json())["corpus_database"]
+    assert (corpus["required"], corpus["status"], corpus.get("reason")) == (False, status, reason)
+    assert response.status_code == 200 and response.json()["status"] == overall  # never blocks readiness
+
+
+def test_system_health_probes_the_corpus_lane_without_changing_its_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pados.config import get_settings
+    from pados.operations import service as operations
+
+    probed: list[tuple[str, str]] = []
+
+    def probe(_settings: Any, database: str, lane: str) -> dict[str, Any]:
+        probed.append((lane, database))
+        usable = lane != "corpus"  # the corpus lane is down; nothing else may change because of it
+        return {"database": database, "configured": True, "reachable": usable, "authenticated": usable,
+                "migrations_current": usable, "usable": usable, "main_revisions": [], "proof_revisions": []}
+
+    monkeypatch.setattr(operations, "_probe_lane", probe)
+    assessment = operations.system_health(get_settings())
+    assert ("corpus", get_settings().corpus_database_name) in probed
+    assert assessment["lanes"]["corpus"]["usable"] is False
+    assert not any(reason.startswith("CORPUS") for reason in assessment["reasons"])
+
+
+def test_the_corpus_lane_is_not_probed_when_the_operational_lane_is_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pados.config import get_settings
+    from pados.operations import service as operations
+
+    probed: list[str] = []
+
+    def probe(_settings: Any, database: str, lane: str) -> dict[str, Any]:
+        probed.append(lane)
+        return {"database": database, "configured": True, "reachable": False, "authenticated": False,
+                "migrations_current": False, "usable": False, "main_revisions": [], "proof_revisions": []}
+
+    monkeypatch.setattr(operations, "_probe_lane", probe)
+    assessment = operations.system_health(get_settings())
+    assert "corpus" not in probed  # no third connection attempt to a server that is down
+    client = _client(monkeypatch, assessment)
+    body = client.get("/health/ready").json()
+    assert body["status"] == "NOT_READY" and "corpus_database" not in _checks(body)

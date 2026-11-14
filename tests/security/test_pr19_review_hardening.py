@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import time
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -93,5 +94,36 @@ def test_a_stale_stop_request_is_cleared_when_the_server_starts(tmp_path: Path, 
     stale = tmp_path / serve.STOP_FILE
     stale.parent.mkdir(parents=True)
     stale.write_text("instance-a", encoding="utf-8")
+    os.utime(stale, (1_000_000_000, 1_000_000_000))  # written long before this server process started
     serve.run("instance-a", tmp_path)
     assert not stale.exists()
+
+
+def test_a_stop_request_written_after_the_server_process_started_is_kept(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R19-7: `pados down` issued while the server was still starting is this launch's request, not a stale one."""
+    import uvicorn
+
+    from pados.install import serve
+
+    seen: list[bool] = []
+
+    class FakeServer:
+        def __init__(self, _config: object) -> None:
+            self.should_exit = False
+
+        def run(self) -> None:
+            for _ in range(100):  # the watcher acts within its first poll
+                if self.should_exit:
+                    break
+                time.sleep(0.02)
+            seen.append(self.should_exit)
+
+    monkeypatch.setattr(uvicorn, "Config", lambda *_a, **_k: object())
+    monkeypatch.setattr(uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(serve, "create_app", lambda: object())
+    request = tmp_path / serve.STOP_FILE
+    request.parent.mkdir(parents=True)
+    request.write_text("instance-a", encoding="utf-8")  # newer than this (test) process
+    serve.run("instance-a", tmp_path)
+    assert seen == [True] and not request.exists()

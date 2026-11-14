@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** Remote Operations client. Sends intents, reads projections. Holds no context. */
 
+import { actionKey, createSingleFlight, HttpError, requestJson, type RequestOutcome } from "./http";
 export type Bucket = "WAITING_APPROVAL" | "FAILED" | "RUNNING" | "COMPLETED";
 
 export interface RemoteRun {
@@ -165,8 +166,43 @@ export const browserAuthenticator: PresenceAuthenticator = async (options) => {
 };
 
 export class RemoteApiError extends Error {
-  constructor(readonly status: number, readonly detail: string) {
+  constructor(
+    readonly status: number,
+    readonly detail: string,
+    readonly requestId = "",
+    readonly outcome: RequestOutcome = "SERVER_ERROR",
+  ) {
     super(`${status} ${detail}`);
+  }
+}
+
+/**
+ * Whether a failed request means the Home Base was not reached (network loss or no answer in time). Since OP-007 such
+ * failures also arrive as RemoteApiError, so the type alone no longer says whether the Home Base answered.
+ */
+export function homeBaseUnreachable(error: unknown): boolean {
+  return !(error instanceof RemoteApiError) || error.outcome === "NETWORK_ERROR" || error.outcome === "REQUEST_TIMEOUT";
+}
+
+/**
+ * What a remote operator is told about a failed request (OP-007): the outcome, what is safe to do next, the server's
+ * code for a refusal, and the request id for support. Raw transport text never reaches the notice.
+ */
+export function describeRemoteFailure(error: unknown): string {
+  if (!(error instanceof RemoteApiError)) return "The request failed.";
+  const reference = error.requestId ? ` Request ${error.requestId}.` : "";
+  switch (error.outcome) {
+    case "REQUEST_TIMEOUT":
+      return `The Home Base did not answer in time. Refresh to try the view again.${reference}`;
+    case "WRITE_OUTCOME_UNKNOWN":
+      return "The action may or may not have been applied. Refresh and check the attention view before trying "
+        + `again.${reference}`;
+    case "SESSION_STALE":
+      return `Your remote session is no longer valid. Sign in again with your access proof.${reference}`;
+    case "NETWORK_ERROR":
+      return `The Home Base could not be reached. Check the connection, then refresh.${reference}`;
+    default:
+      return `Refused: ${error.detail || `HTTP ${error.status}`}.${reference}`;
   }
 }
 
@@ -183,6 +219,8 @@ export class RemoteClient {
   private readonly baseUrl: string;
   // Server-issued session handle: binding context for step-up, kept in memory only.
   private sessionHandle: string | null = null;
+  // Duplicate-write protection scoped to this client: never shared with another sign-in or session.
+  private readonly singleFlight = createSingleFlight();
 
   constructor(
     private readonly signIn: RemoteSignIn,
@@ -204,7 +242,8 @@ export class RemoteClient {
   }
 
   private async call<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await this.fetcher(`${this.baseUrl}${PREFIX}${path}`, {
+    const url = `${this.baseUrl}${PREFIX}${path}`;
+    const send = () => requestJson<T>(url, {
       ...init,
       headers: {
         "Content-Type": "application/json",
@@ -212,18 +251,16 @@ export class RemoteClient {
         "X-PADOS-Remote-Proof": this.signIn.proof,
         ...(init.headers || {}),
       },
+    }, { fetcher: this.fetcher }).catch((error: unknown) => {
+      // OP-007: keep RemoteApiError for callers, with the request id and the distinct outcome.
+      if (!(error instanceof HttpError)) throw error;
+      const detail = typeof error.detail === "string" ? error.detail
+        : error.detail !== undefined ? JSON.stringify(error.detail) : error.code;
+      throw new RemoteApiError(error.status, detail, error.requestId, error.outcome);
     });
-    if (!response.ok) {
-      let detail = response.statusText;
-      try {
-        const body = (await response.json()) as { detail?: unknown };
-        detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
-      } catch {
-        /* keep status text */
-      }
-      throw new RemoteApiError(response.status, detail);
-    }
-    return (await response.json()) as T;
+    const method = (init.method || "GET").toUpperCase();
+    return method !== "GET" && typeof init.body === "string"
+      ? this.singleFlight(actionKey(method, url, init.body), send) : send();
   }
 
   attention(): Promise<AttentionProjection> {

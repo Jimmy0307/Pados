@@ -555,3 +555,72 @@ def test_consumed_proof_does_not_authorize_a_late_acceptance(live: Live, monkeyp
     with Session(live.op_engine) as session:
         graph = result_acceptance.rebuild_task_work_graph(session, live.proof, task["loop_id"])
     assert {node.node_id: node.status for node in graph.nodes}[task["envelope"].task_id] == "APPROVED_NOT_COMMITTED"
+
+
+@pytest.mark.parametrize("status", ["APPROVED", "REJECTED", "REVISION_REQUESTED"])
+def test_the_control_token_route_cannot_decide_a_result_acceptance(live: Live, monkeypatch, status: str) -> None:
+    """A ResultCandidate approval is decided only with a fresh WebAuthn step-up (remote), never by the control token.
+
+    Found in the local usability walkthrough: the Decision Inbox pointed at /control/approvals/{id}, whose approve,
+    reject and revise routes would set the approval row and strand the candidate (the governed step-up decision then
+    fails with "approval is not pending"). Acceptance itself was already safe: the CAS needs a recorded decision bound
+    to a consumed proof.
+    """
+    task = _run_task(live, monkeypatch)
+    row = _submit(live, task["loop_id"])
+    with Session(live.op_engine) as session:
+        approval = control_service.get_approval(session, str(row["approval_id"]))
+    with Session(live.op_engine) as session, session.begin(), \
+            pytest.raises(PermissionError, match="RESULT_ACCEPTANCE_REQUIRES_STEP_UP"):
+        control_service.decide_approval(session, str(row["approval_id"]), version=int(str(approval["version"])),
+                                        status=status, reason="", idempotency_key=f"control-{uuid4().hex[:8]}")
+    with Session(live.op_engine) as session:
+        assert control_service.get_approval(session, str(row["approval_id"]))["status"] == "PENDING"
+    if status == "APPROVED":  # the governed path still works afterwards
+        headers, proof = _step_up(live, str(row["approval_id"]))
+        decided = _decide(live, headers, str(row["approval_id"]), row["candidate_id"], proof)
+        assert decided.status_code == 200, decided.text
+        assert _scope(live) == 1
+
+
+@pytest.mark.parametrize("failure", ["refused", "database"])
+def test_a_failure_after_the_proof_is_consumed_decides_nothing(live: Live, monkeypatch, failure: str) -> None:
+    """The step-up proof is consumed in its own committed transaction; the approval decision and the candidate
+    decision are recorded together in a later one. They are not atomic. A failure between them leaves the proof spent
+    and nothing decided or committed, the spent proof cannot be replayed, and a fresh step-up decides normally.
+    """
+    task = _run_task(live, monkeypatch)
+    row = _submit(live, task["loop_id"])
+    approval_ref, candidate_id = str(row["approval_id"]), row["candidate_id"]
+    headers, proof = _step_up(live, approval_ref)
+    error: Exception = (ValueError("INJECTED_BEFORE_DECISION") if failure == "refused"
+                        else DBAPIError("INSERT INTO result_acceptance_decisions", {}, Exception("connection lost")))
+
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise error
+
+    original = result_acceptance.record_candidate_decision
+    monkeypatch.setattr(result_acceptance, "record_candidate_decision", fail)
+    if failure == "refused":  # a refusal inside the decision is reported, never as success
+        decision = _decide(live, headers, approval_ref, candidate_id, proof)
+        assert decision.status_code == 200 and decision.json()["outcome"] == "COMMIT_CONFLICT"
+    else:  # a database failure surfaces as an error
+        with pytest.raises(DBAPIError):
+            _decide(live, headers, approval_ref, candidate_id, proof)
+    monkeypatch.setattr(result_acceptance, "record_candidate_decision", original)
+
+    with Session(live.op_engine) as session:
+        assert control_service.get_approval(session, approval_ref)["status"] == "PENDING"  # rolled back with it
+        decisions = session.execute(text("SELECT count(*) FROM result_acceptance_decisions WHERE candidate_id = :c"),
+                                    {"c": candidate_id}).scalar()
+        spent = session.execute(text("SELECT status FROM approval_step_up_challenges WHERE proof_id = CAST(:p AS uuid)"),
+                                {"p": proof.removeprefix("step-up-proof:")}).scalar()
+    assert decisions == 0 and spent == "CONSUMED"
+    assert _scope(live) == 0 and _commits(live) == []
+
+    replay = _decide(live, headers, approval_ref, candidate_id, proof)
+    assert replay.status_code == 403 and "APPROVAL_PROOF_REPLAYED" in replay.text
+    headers, fresh = _step_up(live, approval_ref)  # re-verification: a new challenge and proof
+    decided = _decide(live, headers, approval_ref, candidate_id, fresh)
+    assert decided.status_code == 200 and decided.json()["outcome"] == "COMMITTED", decided.text
+    assert _scope(live) == 1 and len(_commits(live)) == 1

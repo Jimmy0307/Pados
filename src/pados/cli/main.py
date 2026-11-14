@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -25,7 +26,8 @@ from pados.config import (
     lane_settings,
 )
 from pados.db import check_database, get_engine, session_scope
-from pados.logging_config import configure_logging, get_logger
+from pados.logging_config import configure_logging, get_logger, resolve_log_level
+from pados.operability.context import bind_context, context_from_headers
 from pados.loop import service as loop_service
 from pados.loop.schemas import LoopCreate, TaskGoalCreate, TaskPlanCreate
 from pados.memory import packet as context_packet
@@ -154,7 +156,10 @@ def _assert_project_import_path() -> None:
     actual = Path(pados.__file__).resolve()
     expected = (Path.cwd() / "src" / "pados" / "__init__.py").resolve()
     if actual != expected:
-        raise RuntimeError("WORKTREE_IMPORT_PATH_MISMATCH")
+        # Said plainly: before this, a doctor run from another directory ended as "Unexpected internal error".
+        _operator_error("WORKTREE_IMPORT_PATH_MISMATCH",
+                        f"run this command from the PADOS checkout it is installed from ({actual.parents[2]}); "
+                        f"the current directory is {Path.cwd()}")
 
 
 @app.callback()
@@ -166,6 +171,19 @@ def main(
 
     context.ensure_object(dict)
     context.obj["debug"] = debug
+    # Log events go to standard error: standard output carries only a command's result (one JSON document with
+    # --json), so it can be piped and parsed.
+    try:
+        level = get_settings().log_level
+    except Exception:  # noqa: BLE001 - invalid settings are reported by the command itself (e.g. init, doctor)
+        level = "INFO"
+    configure_logging(level, to_stderr=True)
+    # OP-001: one operation context per command, from PADOS_REQUEST_ID / PADOS_CORRELATION_ID when they are safe
+    # identifiers, otherwise generated. It only traces (events, logs); it never authorizes or changes a command.
+    operation = context_from_headers(os.environ.get("PADOS_REQUEST_ID"), os.environ.get("PADOS_CORRELATION_ID"),
+                                     component="cli")
+    context.obj["request_id"] = operation.request_id
+    context.with_resource(bind_context(operation))
 
 
 def _run(command: list[str]) -> tuple[int, str]:
@@ -282,7 +300,8 @@ def doctor(
     _assert_project_import_path()
     settings = get_settings()
     runtime_mode = settings.runtime_mode.lower()
-    configure_logging(settings.log_level)
+    # The root callback already configured logging (and wrote any level problem once); doctor only reports it.
+    log_level_problem = resolve_log_level(settings.log_level)[1]
     logger = get_logger("pados.cli")
     checks: dict[str, Any] = {
         "python": sys.version.split()[0],
@@ -298,6 +317,8 @@ def doctor(
             "chat_provider_mode": chat_provider_mode(settings),
             "embed_provider": settings.embed_provider,
             "local_llm_concurrency": settings.local_llm_concurrency,
+            # Reported, not fatal: an unknown level logs at INFO.
+            "log_level": {"status": "invalid" if log_level_problem else "ok", "problem": log_level_problem},
         },
         "files": {
             "docker_compose": Path("docker-compose.yml").exists(),
@@ -953,6 +974,8 @@ def loop_start(
 def loop_step(
     loop_id: Annotated[UUID, typer.Option("--loop-id", help="Loop UUID.")],
     idempotency_key: Annotated[str, typer.Option("--idempotency-key")],
+    owner: Annotated[str | None, typer.Option(
+        "--owner", help="Hold the loop's lease as this owner; refused while another owner holds it.")] = None,
     json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     # A local-model call runs after the routing transaction commits (RC2 SEC-9).
@@ -961,6 +984,7 @@ def loop_step(
         loop_id=str(loop_id),
         artifact_root=artifact_root(get_settings()),
         idempotency_key=idempotency_key,
+        owner_instance=owner,
     )
     _echo_json({"status": "ok", **result}, json_output)
 

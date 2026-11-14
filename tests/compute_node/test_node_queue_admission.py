@@ -170,8 +170,9 @@ def test_slot_is_held_while_the_worker_runs_and_released_only_after_it_returns(g
 # F -----------------------------------------------------------------------------------------------------------
 def test_a_failed_schedule_does_not_leak_a_slot(tmp_path):
     node = _held_node(tmp_path, RefusingExecutor())
-    with pytest.raises(RuntimeError):
-        _execute(node)
+    response = _execute(node)
+    # OP-001: an unhandled scheduling failure leaves as a safe INTERNAL_ERROR envelope instead of a bare exception.
+    assert response.status_code == 500 and response.json()["error"]["code"] == "INTERNAL_ERROR"
     assert _load(node.runtime.jobs) == (0, 0)
 
 

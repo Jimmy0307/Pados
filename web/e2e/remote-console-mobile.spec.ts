@@ -196,7 +196,7 @@ test("refused task submission preserves the original intent for retry", async ({
   await page.getByLabel("Original intent").fill("retain this task if Home Base refuses it");
   await page.getByRole("button", { name: "Create task" }).click();
 
-  await expect(page.getByRole("status")).toContainText("create task: TASK_REFUSED");
+  await expect(page.getByRole("status")).toContainText("create task: Refused: TASK_REFUSED");
   await expect(page.getByLabel("Original intent")).toHaveValue("retain this task if Home Base refuses it");
 });
 

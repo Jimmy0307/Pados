@@ -157,4 +157,7 @@ def create_remote_app() -> FastAPI:
                   lifespan=connectivity_lifespan(settings.connectivity_config))
     if not mount_remote(app, settings):
         raise RuntimeError("PADOS_REMOTE_CONFIG_REQUIRED")
+    from pados.operability.http import install_operability
+
+    install_operability(app, component="remote")
     return app

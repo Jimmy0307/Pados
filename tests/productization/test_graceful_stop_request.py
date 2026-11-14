@@ -39,3 +39,36 @@ def test_the_watcher_asks_uvicorn_to_exit_gracefully(tmp_path: Path) -> None:
     watcher.join(timeout=2)
     assert server.should_exit is True and not watcher.is_alive()
     assert not path.exists()  # consumed, so a later instance never sees a stale request
+
+
+# R19-7: a `pados down` issued while the server is still starting must not be dropped. The launcher writes the
+# request and waits up to 10 s before forcing termination; a server that deleted the file at startup lost the request
+# and was force-killed instead of draining.
+
+
+def test_a_stop_requested_before_the_watcher_starts_is_honoured(tmp_path: Path) -> None:
+    from pados.install.serve import start_stop_watcher
+
+    server = SimpleNamespace(should_exit=False)
+    path = tmp_path / STOP_FILE
+    path.parent.mkdir(parents=True)
+    path.write_text("instance-a", encoding="utf-8")  # written while the process was still importing
+    watcher = start_stop_watcher(server, tmp_path, "instance-a", interval=0.05)
+    watcher.join(timeout=2)
+    assert server.should_exit is True and not watcher.is_alive()
+    assert not path.exists()
+
+
+def test_a_stale_request_for_another_instance_is_left_alone_and_ignored(tmp_path: Path) -> None:
+    from pados.install.serve import start_stop_watcher
+
+    server = SimpleNamespace(should_exit=False)
+    path = tmp_path / STOP_FILE
+    path.parent.mkdir(parents=True)
+    path.write_text("instance-old", encoding="utf-8")  # left by an interrupted `pados down` of an earlier instance
+    watcher = start_stop_watcher(server, tmp_path, "instance-a", interval=0.05)
+    time.sleep(0.2)
+    assert server.should_exit is False and path.read_text(encoding="utf-8") == "instance-old"
+    path.write_text("instance-a", encoding="utf-8")  # the launcher overwrites it with this instance's request
+    watcher.join(timeout=2)
+    assert server.should_exit is True and not path.exists()

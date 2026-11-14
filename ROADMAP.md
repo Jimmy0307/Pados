@@ -45,8 +45,11 @@ supervised, non-sensitive use only (`docs/releases/PADOS_RC2_LOCAL_DOGFOOD_V1/DO
   the Governed Outcome Learning Adapter pattern (`docs/architecture/GOVERNED_OUTCOME_LEARNING_INTEROP.md`,
   `pados.learning.external_outcomes`). Generic reference adapters are in place. Deployment-specific connectors
   stay with their owners.
-- Live OCR and Vision engines
-- Embedding and reranker capabilities
+- Live OCR and Vision engines: the text-layer path is live on Linux. Scanned-PDF OCR is NOT_VALIDATED: a
+  rasterizer adapter and a Tesseract worker are needed (DI-4), and Windows needs Job Object containment (R19-3).
+- Embedding and reranker capabilities: EXPERIMENTAL in PR #24. Pinned local FastEmbed/ONNX models are
+  live-validated on Windows and VMware Linux on a synthetic corpus. Rerank stays SHADOW. Next: subprocess
+  isolation (DI-1), an embedding cache when measured need appears (DI-3), and a real-corpus evaluation (DI-7).
 - Capability Packs (Pack V1 is the current phase; see above) and deterministic algorithm integrations
 - Governed Skills and MCP registration and authorization
 - Office and engineering adapters, including CAD capability evaluation
@@ -58,6 +61,19 @@ Large models and optional OCR/Vision engines are runtime expansion work; they ar
 - Refine Work Map navigation, topology, and mobile task controls from dogfood evidence.
 - Add Mac and additional Home Base environments after platform-specific validation.
 - Expand live network, hotspot, and intermittent-connectivity UAT.
+
+## Engineering Operability
+
+The operability remediation (OP-001 to OP-010) is on `feat/operability-remediation-20261101`, in review and not
+merged; OP-004 (deadline propagation) is partial, with its limits listed. Status, remaining work and unblock conditions for each item and for the PR #19 residuals are in
+`docs/audits/PADOS_OPERABILITY_RESIDUAL_REGISTER.md`. Infrastructure-dependent follow-ups:
+
+- Metrics exporter, dashboards and alerts (OP-008 names and labels are fixed first).
+- Pack manifest schema v2 for retry limits and health intervals (OP-009), an owner decision.
+- Cross-database approval fencing for the Product Loop (R19-1), an owner-approved design.
+- TaskLoop lease renewal while a long model call runs (a takeover is safe today, not prevented).
+- Health contracts for the remote listener, the learning loop and the optional projections (C07, C12, C17), and a
+  Corpus operability contract record (C08).
 
 ## Pending Evidence
 

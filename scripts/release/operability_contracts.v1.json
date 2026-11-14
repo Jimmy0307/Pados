@@ -1,0 +1,155 @@
+{
+  "schema_version": "pados.operability-contracts.v1",
+  "components": {
+    "C01": {
+      "name": "Core API and Home Base",
+      "contract": {"path": "docs/operations/CONTEXT_AND_ERROR_RUNBOOK.md", "heading": "Where the context exists"},
+      "error_codes": ["INTERNAL_ERROR", "DATABASE_UNAVAILABLE", "VALIDATION_FAILED", "NOT_FOUND"],
+      "health": {"endpoint": "/health/ready", "source": "src/pados/api/app.py"},
+      "failure_injection": [{"path": "tests/operability/test_op005_failure_injection.py", "names": ["test_database_disconnect_is_a_dependency_failure_never_an_internal_error"]},
+                            {"path": "tests/operability/test_op001_context_and_errors.py", "names": ["test_an_unhandled_exception_is_a_safe_internal_envelope_and_is_logged"]}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Core API"}
+    },
+    "C02": {
+      "name": "Control, approval and authority",
+      "contract": {"path": "docs/product/PUBLIC_API_BOUNDARY.md", "heading": "Control approvals and work routing (approval subject binding)"},
+      "error_codes": ["APPROVAL_REVOKED", "APPROVAL_EXPIRED", "APPROVAL_CONSUMED", "APPROVAL_SCOPE_MISMATCH", "APPROVAL_IDEMPOTENCY_CONTENT_CONFLICT"],
+      "health": {"not_applicable": "served inside the core API; covered by /health/ready (operational database)"},
+      "failure_injection": [{"path": "tests/integration/test_sec4_approval_lifecycle_postgres.py"},
+                            {"path": "tests/integration/test_op004_idempotency_postgres.py"}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "TaskLoop"}
+    },
+    "C03": {
+      "name": "TaskLoop scheduler and runtime",
+      "contract": {"path": "docs/operations/DEADLINE_RETRY_IDEMPOTENCY_LEASE.md", "heading": "TaskLoop lease"},
+      "error_codes": ["LOOP_LEASE_HELD", "JOB_DEADLINE_EXCEEDED", "TASK_PLAN_IDEMPOTENCY_CONTENT_CONFLICT"],
+      "health": {"not_applicable": "runs inside the core API process; covered by /health/ready"},
+      "failure_injection": [{"path": "tests/integration/test_op004_lease_postgres.py", "names": ["test_another_owner_is_refused_while_the_lease_is_live_and_nothing_runs", "test_a_lapsed_lease_can_be_taken_over_and_the_loop_resumes"]},
+                            {"path": "tests/integration/test_sec9_model_call_outside_transaction_postgres.py"}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "TaskLoop"}
+    },
+    "C04": {
+      "name": "Capability fabric and governed executor",
+      "contract": {"path": "docs/capability/CAPABILITY_FABRIC_V1.md", "heading": "Registry and lifecycle"},
+      "error_codes": ["REVOKED_DURING_EXECUTION", "PLAN_HASH_MISMATCH", "EXECUTION_LEDGER_CORRUPT"],
+      "health": {"not_applicable": "a library inside the calling process; it has no serving endpoint"},
+      "failure_injection": [{"path": "tests/capability/test_execution_ledger.py"},
+                            {"path": "tests/capability/test_op001_executor_trace.py", "names": ["test_a_refusal_is_traced_with_its_code"]}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Evidence, receipts and CAS"}
+    },
+    "C05": {
+      "name": "Worker routing, jobs and execution adapters",
+      "contract": {"path": "docs/product/PUBLIC_API_BOUNDARY.md", "heading": "P6.10 model handoff and waiting"},
+      "error_codes": ["ROUTE_HAS_NO_EXECUTOR", "PARENT_DEADLINE_EXCEEDED", "OUTPUT_CONTRACT_FAILED", "MODEL_PROVIDER_FAILED"],
+      "health": {"not_applicable": "jobs run inside the core API; the chat provider mode is reported by /health/ready"},
+      "failure_injection": [{"path": "tests/operability/test_op005_failure_injection.py", "names": ["test_provider_timeout_closes_the_job_and_keeps_no_partial_output", "test_a_malformed_empty_model_answer_fails_the_output_contract"]},
+                            {"path": "tests/integration/test_rc2_exec1_no_executor_route_postgres.py"}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Workers and providers"}
+    },
+    "C06": {
+      "name": "Product loop and external provider plane",
+      "contract": {"path": "docs/product/PUBLIC_API_BOUNDARY.md", "heading": "Product Loop dispatch authority (RC2 ARCH-1 / SEC-1, SEC-2)"},
+      "error_codes": ["APPROVAL_SUBJECT_MISMATCH", "CLOUD_EGRESS_CLASSIFICATION_REFUSED", "CLOUD_EGRESS_CEILING_INVALID"],
+      "health": {"endpoint": "/ready", "source": "src/pados/api/app.py"},
+      "failure_injection": [{"path": "tests/security/test_rc2_arch1_product_dispatch_authority.py"},
+                            {"path": "tests/security/test_rc2_sec2_cloud_egress_classification.py"}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Product Loop"},
+      "runtime_lanes": ["rea-runtime", "openmaic-runtime", "ai-scientist-v3-runtime", "local-model-governed-acceptance"]
+    },
+    "C07": {
+      "name": "Remote operations overlay",
+      "contract": {"path": "docs/remote/PRIVATE_OVERLAY_DEPLOYMENT.md", "heading": "Rules"},
+      "error_codes": ["REMOTE_AUTH_REQUIRED", "REMOTE_AUTH_INVALID", "STEP_UP_PROOF_INVALID", "APPROVAL_STEP_UP_PROOF_REQUIRED"],
+      "health": {"gap": "the remote listener has no health endpoint of its own; its state shows only through REMOTE_LISTENER_* refusals"},
+      "failure_injection": [{"path": "tests/remote"}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Remote operations"}
+    },
+    "C08": {
+      "name": "Corpus, ingestion and retrieval",
+      "contract": {"path": "docs/operations/CORPUS_CONTRACT.md", "heading": "Corpus operability contract"},
+      "error_codes": ["INGEST_FAILED", "CORPUS_UNAVAILABLE", "HUMAN_AUTHORIZATION_REQUIRED", "AUTHORIZATION_EXPIRED", "BATCH_NOT_AUTHORIZED"],
+      "health": {"endpoint": "/health/ready", "source": "src/pados/api/app.py"},
+      "failure_injection": [{"path": "tests/unit/test_p6_15_corpus_runtime.py"}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Corpus"}
+    },
+    "C09": {
+      "name": "Compute node registry and provider",
+      "contract": {"path": "docs/local-compute/NODE_PROTOCOL.md", "heading": "Job lifecycle"},
+      "error_codes": ["NODE_OFFLINE", "NODE_TIMEOUT", "NODE_SCHEMA_INVALID", "NODE_DEADLINE_EXCEEDED"],
+      "health": {"endpoint": "/health", "source": "src/pados/compute_node/service.py"},
+      "failure_injection": [{"path": "tests/operability/test_op005_failure_injection.py", "names": ["test_a_malformed_node_response_is_refused_as_schema_invalid", "test_an_offline_node_is_reported_after_one_bounded_status_retry"]}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Compute node"},
+      "runtime_lanes": ["local-model-measured-execution"]
+    },
+    "C10": {
+      "name": "Database, migrations and service lanes",
+      "contract": {"path": "docs/operations/HEALTH.md", "heading": "`pados.health.v1`"},
+      "error_codes": ["OPERATIONAL_DB_UNAVAILABLE", "OPERATIONAL_MIGRATION_STALE", "DATABASE_UNAVAILABLE"],
+      "health": {"endpoint": "/health/ready", "source": "src/pados/api/app.py"},
+      "failure_injection": [{"path": "tests/operability/test_op003_health.py", "names": ["test_a_required_database_failure_is_not_ready_with_a_safe_code", "test_a_slow_probe_is_bounded_and_reported_as_a_timeout"]}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Core API"},
+      "runtime_lanes": ["postgres-integration"]
+    },
+    "C11": {
+      "name": "Evidence, artifacts, CAS and state proof",
+      "contract": {"path": "docs/operations/CONTEXT_AND_ERROR_RUNBOOK.md", "heading": "Where the context exists"},
+      "error_codes": ["PERSISTED_EXECUTION_RECEIPT_MISSING", "PERSISTED_CAPABILITY_RESULT_HASH_MISMATCH", "AUDIT_CHAIN_HEAD_CHANGED"],
+      "health": {"not_applicable": "storage is read through the core API and the proof lane, covered by /ready"},
+      "failure_injection": [{"path": "tests/operability/test_op005_failure_injection.py", "names": ["test_partial_or_altered_evidence_never_verifies"]},
+                            {"path": "tests/capability/test_execution_ledger.py"}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Evidence, receipts and CAS"}
+    },
+    "C12": {
+      "name": "Learning, P7 loop and anchors",
+      "contract": {"path": "docs/learning/OUTCOME_LEARNING_V1.md", "heading": "Invariants"},
+      "error_codes": ["ADAPTER_UNAVAILABLE", "ADAPTER_FAILURE"],
+      "health": {"gap": "learning and capability-loop runtimes have no health contract"},
+      "failure_injection": [{"path": "tests/capability_loop"}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Learning loop and anchors"},
+      "runtime_lanes": ["rea-runtime", "openmaic-runtime"]
+    },
+    "C13": {
+      "name": "Capability packs and extension registry",
+      "contract": {"path": "docs/capability/CAPABILITY_FABRIC_V1.md", "heading": "Registry and lifecycle"},
+      "error_codes": ["PACK_MANIFEST_INVALID", "PACK_ADAPTER_FAILED", "PACK_CAPABILITY_CONFLICT"],
+      "health": {"not_applicable": "packs are registry content, not a serving process"},
+      "failure_injection": [{"path": "tests/capability/test_pack_boundaries.py"}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Capability packs and adapters"},
+      "runtime_lanes": ["ai-scientist-v3-runtime"]
+    },
+    "C14": {
+      "name": "CLI, install, launcher and doctor",
+      "contract": {"path": "docs/install/TROUBLESHOOTING.md", "heading": "Troubleshooting the npm installation"},
+      "error_codes": ["UPDATE_REQUIRED", "RUNTIME_RECORD_MISSING", "MIGRATION_CONSENT_REQUIRED"],
+      "health": {"not_applicable": "a command line; `pados doctor` and scripts/healthcheck.ps1 report the service health"},
+      "failure_injection": [{"path": "packages/cli/test/inst1-init-consent.test.js"}],
+      "runbook": {"path": "docs/install/TROUBLESHOOTING.md", "heading": "Troubleshooting the npm installation"}
+    },
+    "C15": {
+      "name": "Web and PWA operator surfaces",
+      "contract": {"path": "PADOS_WEB_RUNBOOK.md", "heading": "PADOS Web Control Center Runbook"},
+      "error_codes": ["REQUEST_TIMEOUT", "WRITE_OUTCOME_UNKNOWN", "SESSION_STALE"],
+      "health": {"not_applicable": "a browser client; it displays the API health"},
+      "failure_injection": [{"path": "web/src/api.test.ts"}],
+      "runbook": {"path": "PADOS_WEB_RUNBOOK.md", "heading": "Request deadlines and stale actions"}
+    },
+    "C16": {
+      "name": "CI/CD, packaging and release supply chain",
+      "contract": {"path": "docs/operations/RUNTIME_LANE_GATE.md", "heading": "Lanes and targets"},
+      "error_codes": ["RUNTIME_READINESS_NOT_PROVEN", "EVIDENCE_HASH_MISMATCH", "EVIDENCE_COMMIT_MISMATCH"],
+      "health": {"not_applicable": "CI is pass/fail; runtime readiness is the lane gate"},
+      "failure_injection": [{"path": "tests/release_supply_chain/test_op002_runtime_lane_gate.py"},
+                            {"path": "tests/release_supply_chain/test_op006_operability_gate.py"}],
+      "runbook": {"path": "docs/operations/RUNTIME_LANE_GATE.md", "heading": "Commands"},
+      "runtime_lanes": ["github-ci", "windows-ci-gates", "vmware-linux-ci-gates"]
+    },
+    "C17": {
+      "name": "Optional enterprise, connectivity and machine projections",
+      "contract": {"path": "docs/remote/CONNECTIVITY_CLOSURE_V1.md", "heading": "Configuration"},
+      "error_codes": ["PROVIDER_UNREACHABLE"],
+      "health": {"gap": "optional projections report degradation per adapter, not through the v1 health schema"},
+      "failure_injection": [{"path": "tests/connectivity"}],
+      "runbook": {"path": "docs/operations/RECOVERY_RUNBOOKS.md", "heading": "Optional projections"}
+    }
+  }
+}
