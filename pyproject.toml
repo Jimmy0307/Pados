@@ -30,6 +30,11 @@ dev = [
   "pytest>=9,<10",
   "ruff>=0.14,<1"
 ]
+# Optional local engines for the Document Intelligence packs (Apache-2.0 FastEmbed over MIT ONNX Runtime, CPU).
+# Never a Core dependency: without it the dense and cross-encoder capabilities report ENGINE_NOT_INSTALLED.
+document-intelligence = [
+  "fastembed>=0.9.1,<0.10"
+]
 
 [project.scripts]
 pados = "pados.cli.main:app"
