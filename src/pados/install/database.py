@@ -109,12 +109,12 @@ def ancestors_of(target: str, root: Path | None = None) -> frozenset[str]:
 
 def _read_revisions(settings: Settings) -> tuple[str, ...] | None:
     from pados.db import get_engine
+    from pados.db.relations import relation_visible
 
     engine = get_engine(settings)
     try:
         with engine.connect() as connection:
-            exists = connection.execute(text("select to_regclass('public.alembic_version')")).scalar()
-            if not exists:
+            if not relation_visible(connection, "alembic_version"):
                 return None
             rows = connection.execute(text("select version_num from alembic_version")).scalars().all()
             return tuple(sorted(str(row) for row in rows))
