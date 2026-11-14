@@ -15,6 +15,7 @@ from pados.control.approval_subject import (
     WorkRouteSubject,
     subject_hash,
 )
+from pados.db.relations import relation_visible
 from pados.logging_config import get_logger
 
 _LOG = get_logger("pados.control")
@@ -246,7 +247,8 @@ RESULT_ACCEPTANCE_REQUIRES_STEP_UP = "RESULT_ACCEPTANCE_REQUIRES_STEP_UP"
 
 def _backs_a_result_candidate(session: Session, approval_id: str) -> bool:
     """Whether a ResultCandidate's acceptance waits on this approval (lanes without the table have none)."""
-    if session.execute(text("SELECT to_regclass('public.result_acceptance_candidates')")).scalar() is None:
+    # Resolved on the search_path, as the query below is: a non-default schema must never switch the guard off (N-1).
+    if not relation_visible(session, "result_acceptance_candidates"):
         return False
     return session.execute(
         text("SELECT 1 FROM result_acceptance_candidates WHERE approval_id::text = :id LIMIT 1"),
