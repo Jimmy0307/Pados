@@ -51,13 +51,17 @@ A PDF start runs the existing OCR-pack stages, which run only on POSIX (R19-3). 
   offsets in the BM25 reading-order view. A ranking never carries document or query text. The query is
   identified by the **same hash the BM25 stage records**, so a fusion or rerank stage refuses a ranking of another
   document (`DI_RANKING_DOCUMENT_MISMATCH`) or another query (`DI_RANKING_QUERY_MISMATCH`). Model rankings name
-  the model pin, its digest and the engine identity. A fusion ranking names its input ranking digests. A SHADOW
-  rerank records the reranker's order beside the published prior order.
+  the model pin, its digest and the engine identity. A fusion ranking names its input ranking digests. A rerank
+  ranking records its mode and outcome (`APPLIED`, `SHADOW_SCORED` or `SHADOW_FAILED`). In SHADOW mode the
+  published order is the prior one and `shadow_order` is the reranker's own top-k over all candidates (what ACTIVE
+  would publish). ACTIVE ties keep the prior order. Dense scores must lie in the cosine range.
 - Evidence hand-off (`evidence.py`): a passage line `<Label>: <value>` whose label normalizes to a subject token of
   the chosen profile (`Root cause:` → `root_cause`) becomes a comparable (subject, assertion) evidence item. Every
   other passage becomes a statement-only item, which can be displayed but can never ground a claim.
-  `content_digest` is the SHA-256 of the passage text, so a changed document yields a different, stale pack. The
-  evidence map binds each item to its passage, page, offsets and line.
+  `content_digest` is the SHA-256 of the passage text, so a changed document yields a different, stale pack.
+  Evidence ids are `ev.<rank>.<n>`, which is bounded whatever the block id. The evidence map binds each item to
+  its passage, page, offsets and line. The evidence stage binds its ranking to the document but takes no query: it
+  packages whatever final ranking the template feeds it.
 - **One document is one case.** Every item of a pack is attributed to the task's `case_id`. A multi-case binder
   must be split into per-case documents first. The retrieval benchmark uses a binder; the grounding workflow never
   does.
@@ -72,17 +76,21 @@ It is an optional extra: `pip install "pados[document-intelligence]"`.
 | `bge-small-en-v1.5-onnx-q` | `Qdrant/bge-small-en-v1.5-onnx-Q@aa8f8b06` (weights of `BAAI/bge-small-en-v1.5`) | MIT | ONNX + tokenizer + configs (SHA-256 + size) | batch 32, 2000 chars, 60 s, 2 threads, 1 GiB |
 | `ms-marco-minilm-l6-v2-onnx` | `Xenova/ms-marco-MiniLM-L-6-v2@a0914435` (weights of `cross-encoder/ms-marco-MiniLM-L-6-v2`) | Apache-2.0 | ONNX + tokenizer + configs | batch 16, 2000 chars, 60 s, 2 threads, 1 GiB |
 
-- **No download by PADOS.** The engine loads only with `specific_model_path` + `local_files_only` and only after
-  `verify_model_dir` matches every pinned file byte for byte. Symlinks, path escapes and resized or altered
-  files are refused. The operator fetch is explicit (`scripts/models/fetch_pinned_models.py --approve <pin>
+- **No download by PADOS.** The engine loads only with `specific_model_path`, `local_files_only` and
+  `HF_HUB_OFFLINE=1`, and only after `verify_model_dir` matches every pinned file byte for byte. A live test loads
+  both engines with sockets blocked. Symlinks, path escapes, resized or altered files and **any unpinned file**
+  are refused; the fetch tool's `.cache` metadata is the one exception. Verification is cached on a stat
+  fingerprint of the directory: any change re-verifies and unloads the engine. The operator fetch is explicit (`scripts/models/fetch_pinned_models.py --approve <pin>
   --accept-license <SPDX>`); a mismatch is quarantined. The ONNX digests equal the Hugging Face LFS SHA-256
   records.
 - Only permissive licenses are pinnable (MIT, Apache-2.0, BSD-2/3). `jina-reranker-v2` (CC-BY-NC-4.0) is refused
   by construction.
-- Every call is bounded (≤ 4096 texts, the pin's input length and batch size) and runs on the engine's single
-  worker thread under the pin's deadline. A late call **poisons** the engine (`ENGINE_POISONED`), because CPython
-  cannot stop the thread. Outputs are validated for count, dimension and finiteness, L2-normalized and quantized
-  to 6 decimals.
+- Every call is bounded: at most 4096 texts and 1,000,000 characters (`LOCAL_MODEL_INPUT_TOO_LARGE`), with each
+  input cut to the pin's length.
+- Each batch runs on a daemon thread under the pin's deadline, and a model load gets five times that deadline.
+  CPython cannot stop the thread, so a late batch makes the engine refuse (`ENGINE_POISONED`) only until that
+  computation returns; the engine then reloads. A runaway thread never blocks interpreter exit.
+- Outputs are validated for count, dimension and finiteness, L2-normalized and quantized to 6 decimals.
 - The model manifests' `execution_config_digest` binds the pin digest, engine label, providers, threads and
   bounds (Measured Capability: MODEL × RUNTIME × DEVICE × CONFIG × EVIDENCE).
 
@@ -92,7 +100,9 @@ It is an optional extra: `pip install "pados[document-intelligence]"`.
 | --- | --- |
 | Engine not installed / model dir missing or altered | adapter unavailable → the hybrid plan is **INFEASIBLE**. There is no silent fallback; the lexical template remains a separate choice |
 | Engine exception | `LOCAL_MODEL_FAILED`, empty exception chain, no text echoed |
-| Call past the deadline | `LOCAL_MODEL_TIMEOUT` (the only retryable code), engine poisoned |
+| Batch past the deadline | `LOCAL_MODEL_TIMEOUT` (the only retryable code); the engine refuses until the runaway batch returns |
+| Input above 1,000,000 characters | `LOCAL_MODEL_INPUT_TOO_LARGE` |
+| Unpinned file in the model directory | `MODEL_DIR_UNPINNED_FILE`; the engine is unavailable |
 | ACTIVE rerank failure | stage fails closed (`DI_RERANK_FAILED`), no evidence produced |
 | SHADOW rerank failure | prior order published, `rerank_outcome = SHADOW_FAILED`, `model_score = null` |
 | Ranking of another document or query | `DI_RANKING_DOCUMENT_MISMATCH` / `DI_RANKING_QUERY_MISMATCH` |
@@ -109,8 +119,11 @@ It is an optional extra: `pip install "pados[document-intelligence]"`.
   CONFIDENTIAL; the deterministic stages allow RESTRICTED.
 - **In-process third-party runtime (residual DI-1).** ONNX Runtime parses the pinned model file inside the PADOS
   process. Mitigations: in-tree pack code; the model bytes are pinned and verified before load; CPU provider only;
-  no network. A `LOCAL_SUBPROCESS` worker would isolate a runtime crash or a malicious model file; deciding that
-  is an owner decision (see register).
+  no network. A `LOCAL_SUBPROCESS` worker would isolate a runtime crash or a malicious model file, and it would
+  also enforce a real kill and the pin's `max_ram_mb`, which is declared but not enforced in-process. Deciding
+  that is an owner decision (see register).
+- **Hash-then-load window (residual DI-2).** The engine reopens the files by path after they are hashed. Keep the
+  model root writable only by the operator.
 - Authorization precedes ranking. A stage reads only the scoped artifacts the fabric bound to it, so a reranker
   never sees text outside the task's authorized inputs.
 - The evidence statement is bounded display text (printable, ≤ 280 chars), never an instruction.

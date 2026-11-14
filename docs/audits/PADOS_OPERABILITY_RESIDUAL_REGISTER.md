@@ -227,5 +227,38 @@ Still open for local use (each needs a product or owner decision, not a code fix
 clears only a stop request older than its own process, so a `pados down` issued while it starts is honoured. | Security backlog |
 | R19-8 | GitHub reports Dependabot alerts on `main`. They predate PR #19 and were outside its scope. | OPEN | Not triaged; no dependency change is authorized. On 2026-11-02 GitHub listed 27 open alerts: 3 critical (`npm:tinypool`, `pip:certifi`), 12 high (`npm:vite`, `npm:source-map-js`, `pip:pypdf`), 10 medium and 2 low. **Unblock:** owner authorization for a dependency-upgrade branch with lockfile, regression and supply-chain gates. | Supply-chain backlog |
 
+## Document Intelligence (branch `feat/pados-acceleration-20261114`, PR #24, stacked on #22)
+
+Real, governed dense retrieval, fusion, reranking and the evidence hand-off are covered in
+`docs/packs/document_intelligence/README.md` and `BENCHMARK_2026-11-14.md`. An independent code review and a
+security review ran on 2026-11-14 (code: APPROVE; security: 1 HIGH, 5 MEDIUM). The HIGH and the MEDIUM items
+that code can fix were fixed test-first (`test_di_review_findings.py`):
+
+- deadline per batch, a separate load deadline, recovery once a runaway call returns, daemon threads;
+- a total input bound;
+- verification cached on a stat fingerprint, with re-verification and unloading on change;
+- unpinned model files refused, and offline mode forced;
+- evidence ids bounded;
+- the SHADOW order is the reranker's own top-k;
+- ACTIVE ties keep the prior order;
+- every raisable code is declared;
+- an extension may report only adapters it registered;
+- the fetch script stages, verifies, then moves, with unique quarantine names.
+
+The rest is below.
+
+| ID | Residual | Status | Unblock | Owner of the decision |
+| --- | --- | --- | --- | --- |
+| DI-1 | ONNX Runtime (third-party native code) parses the pinned model and tokenizes document text **inside the PADOS process**. A memory-safety bug would affect the whole process. `max_ram_mb` is declared but not enforced, and a runaway batch cannot be killed. | OPEN (MEDIUM, accepted for EXPERIMENTAL local-supervised use) | Run the engines in a `LOCAL_SUBPROCESS` worker with bounded IPC: a real kill, a memory cap (Job Object / rlimit), and crash isolation. Required before production or before raising the ceiling above CONFIDENTIAL. | Owner |
+| DI-2 | Hash-then-load window: the engine reopens the files by path after verification. | OPEN (MEDIUM) | Load from a private copy made by the process, or require owner-only ACLs on the model root. | Owner (deployment policy) |
+| DI-3 | The dense stage re-embeds every passage per query: 1.8 s per query on Windows and 0.7 s on Linux for 66 passages, growing linearly. There is no index; pgvector was not introduced. | OPEN | When a measured use needs it: an embedding cache keyed by (document digest, pin digest), then an index. | Engineering |
+| DI-4 | **Scanned-PDF OCR is NOT_VALIDATED.** There is no isolated rasterizer adapter (the Tesseract adapter accepts images only). Tesseract is not installed on the VM (no internet, no passwordless sudo), and Windows OCR isolation fails closed (R19-3). | OPEN | A rasterizer adapter in the isolated worker, then Tesseract installed on a Linux worker. Both need network or sudo approval on the VM. | Owner (VM network/sudo), Engineering |
+| DI-5 | Structured evidence is label-based (`Label: value` with a profile subject). Free-text facts are statement-only and never ground a claim. A document author decides what the document says, so evidence is what the document states, never truth. The only claim provider measured is the deterministic extractive drafter; a model claim provider is NOT_VALIDATED. | OPEN (by design for V1) | A model claim provider through the Worker Router, with statements treated as untrusted data; governed acceptance as in R19-6. | Owner |
+| DI-6 | One document is one case: every item of a pack is attributed to the task's `case_id`. Multi-case binders must be split first; there is no automatic boundary detection. | OPEN | A boundary-aware evidence stage (per-section case binding) if needed. | Engineering |
+| DI-7 | The benchmark is synthetic (6 documents, 66 passages, 20 queries; judgments by the corpus author). Equal-weight RRF underperformed dense retrieval, and the reranker lowered keyword Success@1. | OPEN | Rerank stays SHADOW and the engines stay optional. Re-measure on a real, owner-approved corpus before considering ACTIVE or a default hybrid. | Owner (data) |
+| DI-8 | The contract-only descriptors `PASSAGE_RETRIEVAL_EMBEDDING` and `PASSAGE_RERANK` (GPU, BM25-shaped output) remain beside the real capabilities. | OPEN (LOW) | Retire or redefine them; a maintainer decision. | Maintainer |
+| DI-9 | On Windows, deterministic stages cost 20-40× their Linux time (BM25 232 vs 11 ms, fusion 533 vs 13 ms per stage, receipt `duration_ms`), with no model involved. | OPEN (not profiled) | Profile the governed stage path on Windows (artifact store writes, replay verification). | Engineering |
+| DI-10 | The model weights are third-party conversions: Qdrant's quantized ONNX of BGE (MIT) and Xenova's ONNX of the MS MARCO cross-encoder (upstream Apache-2.0; the conversion repository's card has no license field). The FastEmbed dependency set (20 packages, all permissive) is not in `requirements.lock`. | OPEN | The owner accepts the conversion provenance. Lock the optional extra if it is ever installed by default. | Owner |
+
 Rules: a residual leaves this table only with a commit that fixes it, a regression test that failed before the fix, and
 validation evidence. Merging a PR closes nothing on its own.

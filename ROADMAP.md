@@ -45,8 +45,11 @@ supervised, non-sensitive use only (`docs/releases/PADOS_RC2_LOCAL_DOGFOOD_V1/DO
   the Governed Outcome Learning Adapter pattern (`docs/architecture/GOVERNED_OUTCOME_LEARNING_INTEROP.md`,
   `pados.learning.external_outcomes`). Generic reference adapters are in place. Deployment-specific connectors
   stay with their owners.
-- Live OCR and Vision engines
-- Embedding and reranker capabilities
+- Live OCR and Vision engines: the text-layer path is live on Linux. Scanned-PDF OCR is NOT_VALIDATED: a
+  rasterizer adapter and a Tesseract worker are needed (DI-4), and Windows needs Job Object containment (R19-3).
+- Embedding and reranker capabilities: EXPERIMENTAL in PR #24. Pinned local FastEmbed/ONNX models are
+  live-validated on Windows and VMware Linux on a synthetic corpus. Rerank stays SHADOW. Next: subprocess
+  isolation (DI-1), an embedding cache when measured need appears (DI-3), and a real-corpus evaluation (DI-7).
 - Capability Packs (Pack V1 is the current phase; see above) and deterministic algorithm integrations
 - Governed Skills and MCP registration and authorization
 - Office and engineering adapters, including CAD capability evaluation
