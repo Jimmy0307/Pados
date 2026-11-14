@@ -209,9 +209,16 @@ def probes(bench: Any) -> dict[str, str]:
     from pados.enterprise.classification import DataClassification
     from pados.packs.ocr.contracts import JSON_MEDIA_TYPE, KIND_DOCUMENT
 
+    from pados.capability.provenance import ProvenanceRefused
+
     case = (corpus.CASES[0],)
     out: dict[str, str] = {}
-    foreign = bench.put_document(case, project_id="proj-b")
+    try:  # the same bytes are already a proj-a input: re-labelling them for proj-b must be refused
+        bench.put_document(case, project_id="proj-b")
+        out["relabel_registered_document_to_other_project"] = "ACCEPTED"
+    except ProvenanceRefused as exc:
+        out["relabel_registered_document_to_other_project"] = exc.code
+    foreign = bench.put_document(corpus.CASES[:2], project_id="proj-b")  # distinct bytes owned by proj-b
     plan, _ = bench.run(bench.evidence_task(foreign, task_type=task_type("document", "hybrid_rerank"), query="root cause",
                                             case_id=case[0].case_id, task_id="probe-foreign"))
     out["cross_project_document"] = plan.status.value
