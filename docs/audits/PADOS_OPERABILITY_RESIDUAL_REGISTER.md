@@ -259,6 +259,22 @@ The rest is below.
 | DI-8 | The contract-only descriptors `PASSAGE_RETRIEVAL_EMBEDDING` and `PASSAGE_RERANK` (GPU, BM25-shaped output) remain beside the real capabilities. | OPEN (LOW) | Retire or redefine them; a maintainer decision. | Maintainer |
 | DI-9 | On Windows, deterministic stages cost 20-40× their Linux time (BM25 232 vs 11 ms, fusion 533 vs 13 ms per stage, receipt `duration_ms`), with no model involved. | OPEN (not profiled) | Profile the governed stage path on Windows (artifact store writes, replay verification). | Engineering |
 | DI-10 | The model weights are third-party conversions: Qdrant's quantized ONNX of BGE (MIT) and Xenova's ONNX of the MS MARCO cross-encoder (upstream Apache-2.0; the conversion repository's card has no license field). The FastEmbed dependency set (20 packages, all permissive) is not in `requirements.lock`. | OPEN | The owner accepts the conversion provenance. Lock the optional extra if it is ever installed by default. | Owner |
+| DI-11 | The VMware VM's `docker0` bridge has no IPv4 address (DOWN, NO-CARRIER), so no PostgreSQL container is reachable from the VM: the E2E, `integration_pg` and `full_pytest` API tests fail. Separately, the host Wi-Fi subnet equals the VMnet8 subnet, so the VM has no internet. | OPEN (environment) | `sudo systemctl restart docker` on the VM; another upstream network or a VMnet8 subnet change on the host; then rerun `vm_online_chain.sh` (`docs/operations/VMWARE_OFFLINE_VALIDATION.md`). | Owner (host and VM admin) |
+| DI-12 | The offline Tesseract image trusts the Debian `Packages` index obtained over HTTPS; the `InRelease` GPG signature was not verified. | OPEN (LOW) | Verify `InRelease` against the Debian archive key in the image build. | Engineering |
+
+### Update 2026-11-14 (convergence, PR #25, stacked on #24)
+
+The rows above stay open: these items are implemented in a branch, not accepted.
+
+- **DI-1 and DI-2:** an opt-in candidate. The subprocess model worker (kill on deadline, RSS watchdog, offline
+  environment, private verified copy) is documented in `docs/packs/document_intelligence/MODEL_WORKER_DESIGN.md`.
+  The default is still in-process; a kernel memory cap and OS network isolation are pending owner decisions.
+- **DI-4:** an isolated PDFium rasterizer feeds the existing Tesseract path. The first live scanned-PDF execution
+  succeeded on clean synthetic renders inside a networkless, non-root container. It is not wired into a template,
+  and real-scan quality is NOT_VALIDATED (`docs/packs/ocr/SCANNED_PDF_OCR.md`).
+- **DI-9:** the cause is found and fixed in a branch (`ccc14e8`). `ObjectStoreArtifacts.get` requested a 256 MiB
+  buffer on every read, and the deterministic stages are now about 14× faster on Windows. This touches Core
+  (`capability/artifacts.py`) with unchanged semantics, so it needs owner review.
 
 Rules: a residual leaves this table only with a commit that fixes it, a regression test that failed before the fix, and
 validation evidence. Merging a PR closes nothing on its own.

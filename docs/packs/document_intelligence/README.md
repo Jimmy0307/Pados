@@ -149,3 +149,5 @@ It is an optional extra: `pip install "pados[document-intelligence]"`.
 ## Residuals
 
 Recorded in `docs/audits/PADOS_OPERABILITY_RESIDUAL_REGISTER.md` (DI-1 … DI-8).
+
+Follow-up work (PR #25): `MODEL_WORKER_DESIGN.md` (DI-1/DI-2), `EVALUATION_PROTOCOL.md` (synthetic vs real tracks, and the Windows DI-9 profile) and `docs/packs/ocr/SCANNED_PDF_OCR.md` (DI-4).

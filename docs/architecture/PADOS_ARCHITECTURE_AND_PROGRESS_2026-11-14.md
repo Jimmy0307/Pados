@@ -1,6 +1,6 @@
 # PADOS architecture and development progress (2026-11-14)
 
-This is a snapshot of the state on 2026-11-14, built from GitHub PR state and machine evidence. It does not change
+A standalone HTML view of this snapshot is `docs/architecture/pados-progress-2026-11-14.html`. This is a snapshot of the state on 2026-11-14, built from GitHub PR state and machine evidence. It does not change
 any authority, and it does not override `ARCHITECTURE.md` or `ROADMAP.md`. In the diagrams, solid nodes are
 implemented. Dashed nodes or edges, labelled *proposed* or *pending*, do not exist yet.
 
@@ -14,6 +14,7 @@ implemented. Dashed nodes or edges, labelled *proposed* or *pending*, do not exi
 | PR #22 runtime hardening | `205543a` | #21 | draft | local-supervised-dogfood READY; production NOT_READY |
 | PR #24 document intelligence (this round) | see PR | #22 | draft | validation recorded on the PR |
 | PR #17 AI-Scientist-v3 pack | — | `main` | draft | runtime NOT_VALIDATED |
+| PR #25 DI hardening (worker, private model copy, artifact read fix, OCR candidate) | see PR | #24 | draft | see `docs/releases/PR_OWNER_DECISION_DOSSIER_2026-11-14.md` |
 
 Nothing was merged in this round. All three stacked PRs say they need owner review, and an owner review cannot be
 self-approved.
