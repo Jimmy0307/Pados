@@ -45,6 +45,7 @@ from pados.capability.graph import DecompositionTemplate  # noqa: E402
 from pados.capability.task import TaskContract  # noqa: E402
 from pados.packs.document_intelligence.ranking import SCORED_CONTRACT, SCORED_KIND, load_scored  # noqa: E402
 from pados.packs.document_intelligence.wiring import evidence_stages, task_type  # noqa: E402
+from pados.packs.document_intelligence.evidence import token  # noqa: E402
 from pados.packs.document_intelligence.workflow import admit_verified_evidence  # noqa: E402
 from pados.packs.problem_solving import pack as ps  # noqa: E402
 from pados.packs.problem_solving.contracts import ClaimSet, GroundingStatus, ProblemSolvingReport  # noqa: E402
@@ -168,9 +169,10 @@ def _citation_correct(bench: Any, solved: Any, pack: Any, evidence_result: Any, 
             continue
         for evidence_id in claim.citations:
             checked += 1
-            text = texts[keys[passage_of[evidence_id]]].casefold()
-            label, _, value = text.partition(":")
-            if label.strip().replace(" ", "_") == claim.subject and claim.assertion.replace("_", " ") in value:
+            # The cited passage must itself state (subject, assertion) under the SAME token normalization the
+            # evidence stage uses (an independent re-read of the corpus text, not of the evidence pack).
+            label, _, value = texts[keys[passage_of[evidence_id]]].partition(":")
+            if token(label) == claim.subject and token(value, numeric_prefix=True) == claim.assertion:
                 correct += 1
     return {"grounded_citations_checked": checked, "grounded_citations_correct": correct}
 
