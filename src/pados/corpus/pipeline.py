@@ -15,7 +15,8 @@ from .ingestion import (
     sha256_file,
     transition,
 )
-from .pdf import parse_pdf
+from .pdf import failure_code, parse_pdf
+from .pdf_isolation import TRANSIENT_FAILURE_CODES
 from .security import discover_pdf_files, resolve_approved_root
 
 
@@ -67,6 +68,16 @@ def run_fixture_pilot(
             state = _event(events, state, IngestionState.UNSUPPORTED, str(exc))
             counts["failed"] += 1
             documents.append({"document_id": document_id, "version_id": version_id, "path": path.relative_to(approved_root).as_posix(), "status": state.value, "events": events})
+            batch_events.extend(events)
+            continue
+        code = failure_code(parsed)
+        if code in TRANSIENT_FAILURE_CODES:
+            # The run was refused or cut short (busy, timeout, memory, worker unavailable): the document was not
+            # judged, so it is not recorded as malformed (a batch retry parses it again), and it never reaches the
+            # duplicate check with the empty text of a failed parse.
+            state = _event(events, state, IngestionState.UNSUPPORTED, code)
+            counts["failed"] += 1
+            documents.append({"document_id": document_id, "version_id": version_id, "path": path.relative_to(approved_root).as_posix(), "status": state.value, "warnings": parsed.warnings, "events": events})
             batch_events.extend(events)
             continue
         normalized_hash = sha256_bytes(normalize_text("\n".join(page.normalized_text for page in parsed.pages)).encode("utf-8"))

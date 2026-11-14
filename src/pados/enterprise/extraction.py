@@ -9,10 +9,9 @@ have read an image.
 from __future__ import annotations
 
 import hashlib
-import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from importlib.util import find_spec
 from typing import Protocol
 
 from pados.corpus.ingestion import normalize_text
@@ -89,19 +88,16 @@ class PdfTextExtractor:
     media_types = frozenset({"application/pdf"})
 
     def health(self) -> CapabilityHealth:
-        try:
-            import pypdf  # noqa: F401
-        except ImportError:
-            return CapabilityHealth.UNAVAILABLE
-        return CapabilityHealth.READY
+        # Located, never imported: pypdf only runs in the isolated worker.
+        return CapabilityHealth.READY if find_spec("pypdf") is not None else CapabilityHealth.UNAVAILABLE
 
     def extract(self, content: bytes, *, media_type: str) -> ExtractionResult:
-        from pados.corpus.pdf import parse_pdf
+        from pados.corpus.pdf import failure_code, parse_pdf_bytes
 
-        with tempfile.TemporaryDirectory(prefix="pados-extract-") as tmp:
-            path = Path(tmp) / "source.pdf"
-            path.write_bytes(content)
-            parsed = parse_pdf(path)
+        parsed = parse_pdf_bytes(content)  # bounded isolated worker (P2-11); never pypdf in this process
+        failed = failure_code(parsed)
+        if failed is not None:
+            raise ExtractionUnavailable(failed)  # a closed PDF_* code; nothing partial is admitted
         pages = tuple(
             ExtractedRegion(page.page_number, page.text, page.normalized_text, section=page.section)
             for page in parsed.pages if page.normalized_text
