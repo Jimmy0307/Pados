@@ -15,18 +15,29 @@ What the worker adds:
 * **A real kill.** A request that misses its deadline kills the whole worker process group; no runaway thread is
   left behind, and the next call starts a fresh worker.
 * **Bounded resources.** One request at a time; request and response lines are size-limited; a watchdog kills the
-  worker when its resident memory passes the pin's ``max_ram_mb`` (polled; Linux additionally drops core dumps and
-  caps open files). This is a monitored bound, not a kernel-enforced cap: a Windows Job Object or a cgroup is the
-  production follow-up.
+  worker tree when its resident memory passes the pin's ``max_ram_mb`` (polled every 100 ms:
+  ``MODEL_WORKER_MEMORY_LIMIT``). With ``os_isolation`` (the default whenever the worker is used) the kernel also
+  enforces a hard ceiling a little above ``max_ram_mb`` (``worker_isolation``): on Windows a Job Object (committed
+  memory of the whole tree, kill-on-close, an active-process limit sealed at READY), entered while the worker is
+  still suspended; on Linux ``RLIMIT_AS`` plus ``RLIMIT_CORE = 0`` and ``RLIMIT_NOFILE``, which the worker applies
+  to itself before it reads anything. An allocation the kernel refuses in Python is ``MODEL_WORKER_MEMORY_REFUSED``
+  and the worker exits; one refused inside native code is ``LOCAL_MODEL_FAILED`` or ``MODEL_WORKER_EXITED``.
 * **Network policy.** The worker runs with an empty environment plus ``HF_HUB_OFFLINE`` / ``TRANSFORMERS_OFFLINE``
-  (no proxies, tokens or user variables) and refuses any socket connection in-process before the engine is
-  imported. That is defense in depth, not OS isolation (a network namespace or firewall rule is an owner decision).
-* **Cleanup.** The worker is killed on close, on garbage collection and at interpreter exit; its private model copy
-  is removed.
+  and thread-count variables (no proxies, tokens or user variables) and refuses Python-level connect, send-to and
+  name resolution in-process before the engine is imported (defense in depth: native code bypasses it). On Linux
+  ``os_isolation`` adds a seccomp filter: ``socket()`` fails for every family, also in children (kernel-enforced).
+  Windows has no OS network control yet; the sealed job only stops it from starting a helper process. AppContainer
+  or a firewall rule is an owner decision (``docs/packs/document_intelligence/MODEL_WORKER_ISOLATION.md``).
+* **Fail closed.** Isolation that cannot be set up, or that the parent cannot confirm from outside after READY
+  (job membership; ``/proc`` limits and seccomp mode), is ``MODEL_WORKER_ISOLATION_FAILED``.
+* **Cleanup.** The worker is killed on close, on garbage collection and at interpreter exit (on Windows also when
+  the parent's job handle closes); its private model copy is removed.
+
+The worker is opt-in: nothing in PADOS passes ``subprocess_factory`` as an engine factory.
 
 Protocol: one JSON object per line on stdin and stdout. Requests ``{"op": "embed", "texts": [...]}`` and
-``{"op": "rerank", "query": ..., "texts": [...]}``; replies ``{"ok": true, "result": ...}`` or
-``{"ok": false, "code": "<CLOSED_CODE>"}``. The worker never echoes input text.
+``{"op": "rerank", "query": ..., "texts": [...]}`` (the test engine alone also answers ``probe``); replies
+``{"ok": true, "result": ...}`` or ``{"ok": false, "code": "<CLOSED_CODE>"}``. The worker never echoes input text.
 """
 from __future__ import annotations
 
@@ -195,15 +206,15 @@ def _reply(stream: IO[str], payload: dict[str, Any]) -> None:
     stream.flush()
 
 
-def _enter_isolation(token: str) -> bool:
-    """POSIX: the worker limits itself before it reads anything (no ``preexec_fn`` in the parent). ``token`` is
+def _enter_isolation(setting: str) -> bool:
+    """POSIX: the worker limits itself before it reads anything (no ``preexec_fn`` in the parent). ``setting`` is
     ``off`` or the address-space limit in bytes (which also installs the socket filter)."""
-    if token != "off" and not (token.isdigit() and len(token) <= 15 and int(token) > 0):
+    if setting != "off" and not (setting.isdigit() and len(setting) <= 15 and int(setting) > 0):
         return False
     if sys.platform == "win32":
-        return token == "off"  # the parent placed this process in its Job Object before it ran
+        return setting == "off"  # the parent placed this process in its Job Object before it ran
     try:
-        apply_worker_limits(None if token == "off" else int(token))
+        apply_worker_limits(None if setting == "off" else int(setting))
     except IsolationError:
         return False
     return True

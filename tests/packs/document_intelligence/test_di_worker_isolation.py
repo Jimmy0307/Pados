@@ -51,6 +51,7 @@ EXPECTED_ENVIRONMENT = {"HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "OMP_NUM_THREA
                         "PYTHONUTF8", *(() if WINDOWS else ("MALLOC_ARENA_MAX",))}
 PASSED_THROUGH = {"SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATH"}
 VENV_LAUNCHER = "__PYVENV_LAUNCHER__"  # added by the Windows venv launcher to its interpreter child
+LOCALE_COERCION = "LC_CTYPE"  # set by the interpreter itself in a C locale (PEP 538), never inherited
 
 
 def _pin(tmp_path: Path, **overrides: object) -> tuple[ModelPin, Path]:
@@ -106,9 +107,9 @@ def test_an_unknown_arch_has_no_filter() -> None:
         seccomp_program("riscv64")
 
 
-@pytest.mark.parametrize("token", ["", "0", "-5", "1e9", "abc", "9" * 16])
-def test_a_malformed_isolation_token_is_refused_before_anything_applies(token: str) -> None:
-    assert model_worker._enter_isolation(token) is False
+@pytest.mark.parametrize("setting", ["", "0", "-5", "1e9", "abc", "9" * 16])
+def test_a_malformed_isolation_setting_is_refused_before_anything_applies(setting: str) -> None:
+    assert model_worker._enter_isolation(setting) is False
 
 
 # -- memory: the kernel refuses an allocation past the cap ----------------------------------------------------
@@ -258,7 +259,7 @@ def test_the_worker_network_guarantees(tmp_path: Path, listener: int, monkeypatc
     finally:
         backend.close()
     environment = set(seen["environment"])
-    assert EXPECTED_ENVIRONMENT <= environment <= EXPECTED_ENVIRONMENT | PASSED_THROUGH | {VENV_LAUNCHER}
+    assert EXPECTED_ENVIRONMENT <= environment <= EXPECTED_ENVIRONMENT | PASSED_THROUGH | {VENV_LAUNCHER, LOCALE_COERCION}
     assert seen["offline"] == {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
     assert seen["connect"] == seen["resolve"] == "REFUSED_IN_PROCESS"  # in-process refusal, every platform
     if os_isolation and LINUX:

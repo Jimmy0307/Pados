@@ -9,8 +9,9 @@ headroom constants and what remains an owner decision.
 * **Windows: a Job Object.** The worker is created SUSPENDED, assigned to a fresh job and only then resumed, so
   no instruction of it (and no child such as the interpreter a venv launcher starts) runs outside the job.
   Limits: ``JOB_OBJECT_LIMIT_JOB_MEMORY`` (committed memory of every process in the job together),
-  ``JOB_OBJECT_LIMIT_ACTIVE_PROCESS`` (two while starting, a venv launcher plus its interpreter; then exactly the
-  processes alive at READY, so the worker can start no helper process), ``KILL_ON_JOB_CLOSE`` (the parent closing
+  ``JOB_OBJECT_LIMIT_ACTIVE_PROCESS`` (while starting, two behind a venv launcher, else one; at READY sealed to
+  the processes then alive, not counting the console host the kernel never limits, so the worker can start no
+  helper process), ``KILL_ON_JOB_CLOSE`` (the parent closing
   its handle, or dying, ends the whole tree) and ``DIE_ON_UNHANDLED_EXCEPTION`` (no error-reporting dialog keeps
   a crashed worker alive).
 * **Linux: limits the worker applies to itself first.** Before it reads the pin or imports the engine, the
