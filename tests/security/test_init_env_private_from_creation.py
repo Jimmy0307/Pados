@@ -72,3 +72,39 @@ def test_init_leaves_no_temporary_credential_file_behind(tmp_path: Path) -> None
     assert _init(tmp_path) == 0
     assert _init(tmp_path, "--force") == 0
     assert sorted(path.name for path in tmp_path.iterdir()) == [".env", "runtime"]
+    local = tmp_path / "runtime" / "local"
+    assert sorted(path.name for path in local.iterdir()) == ["artifacts", "control.token", "objects", "workspace"]
+
+
+# The control token is a credential as well (its hash is in .env): the same rules apply to runtime/local/control.token.
+def _token_path(directory: Path) -> Path:
+    path = directory / "runtime" / "local" / "control.token"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def test_force_replaces_a_hard_linked_control_token_instead_of_writing_through_it(tmp_path: Path) -> None:
+    other = tmp_path / "token-shared-elsewhere.txt"
+    other.write_text("keep me", encoding="utf-8")
+    (tmp_path / ".env").write_text("PADOS_ENV=local\n", encoding="utf-8")
+    try:
+        os.link(other, _token_path(tmp_path))
+    except OSError:
+        pytest.skip("hard links are not supported on this file system")
+    assert _init(tmp_path, "--force") == 0
+    assert other.read_text(encoding="utf-8") == "keep me"
+    assert _token_path(tmp_path).read_text(encoding="utf-8").strip() not in ("", "keep me")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_force_does_not_write_the_control_token_into_a_world_readable_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = _token_path(tmp_path)
+    token.write_text("old\n", encoding="utf-8")
+    os.chmod(token, 0o644)
+    (tmp_path / ".env").write_text("PADOS_ENV=local\n", encoding="utf-8")
+    monkeypatch.setattr(os, "chmod", lambda *_args, **_kwargs: None)
+    assert _init(tmp_path, "--force") == 0
+    assert token.read_text(encoding="utf-8").strip() != "old"
+    assert stat.S_IMODE(os.stat(token).st_mode) & 0o077 == 0
