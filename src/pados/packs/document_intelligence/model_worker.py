@@ -217,7 +217,7 @@ class SubprocessModelBackend:
         argv = [sys.executable, "-I", "-m", "pados.packs.document_intelligence.model_worker", str(pin_file),
                 str(self._copy), self.engine]
         options: dict[str, Any] = {}
-        if os.name == "nt":
+        if sys.platform == "win32":
             options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
         else:
             options["start_new_session"] = True
