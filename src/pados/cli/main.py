@@ -821,12 +821,31 @@ def init(
         "# PADOS_MODEL_CATALOG=<operator model catalog holding accepted measured profiles>",
         "# PADOS_LOCAL_INFERENCE_TIMEOUT_SECONDS=30",
     ]
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _replace_private_text(env_path, "\n".join(lines) + "\n")
     for private in (token_file, env_path):  # both hold credentials or their hashes; owner-only where the OS allows
         os.chmod(private, 0o600)
     typer.echo(json.dumps({"env": str(env_path), "control_token_file": str(token_file),
                            "next": ["pados doctor", "alembic upgrade (see docs/product/QUICKSTART.md)", "pados serve"]},
                           indent=2))
+
+
+def _replace_private_text(path: Path, text: str) -> None:
+    """Atomically replace ``path`` with ``text`` that is owner-only from its first byte.
+
+    The content goes to a fresh sibling file (``mkstemp``: exclusive create, mode 0600), which then replaces
+    ``path``. It is never written through an existing file, so neither its old mode nor a hard link to it can
+    expose the credentials.
+    """
+    import tempfile
+
+    fd, staged = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        os.replace(staged, path)
+    except BaseException:
+        Path(staged).unlink(missing_ok=True)
+        raise
 
 
 @app.command()
