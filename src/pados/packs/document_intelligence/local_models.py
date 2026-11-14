@@ -138,7 +138,9 @@ class _PinnedEngine:
     role: ModelRole
 
     def __init__(self, pin: ModelPin, directory: Path, *, factory: Factory,
-                 identity: EngineIdentity | None | object = _AUTO) -> None:
+                 identity: EngineIdentity | None | object = _AUTO, private_copy: bool = False) -> None:
+        self.private_copy = private_copy  # DI-2: load from a verified private copy, never the operator directory
+        self._copy: Path | None = None
         self.pin = pin
         self.directory = directory
         self._factory = factory
@@ -214,12 +216,36 @@ class _PinnedEngine:
             raise LocalModelError(reason)
         if self._backend is None:
             # A load reads ~100 MB and builds the session: it gets its own, longer deadline.
-            loaded = self._run(lambda: self._factory(self.pin, self.directory),
+            source = self._materialize() if self.private_copy else self.directory
+            loaded = self._run(lambda: self._factory(self.pin, source),
                                deadline=self.pin.timeout_seconds * LOAD_DEADLINE_FACTOR)
             if loaded is None:
                 raise LocalModelError("LOCAL_MODEL_FAILED")
             self._backend = loaded
         return self._backend
+
+    def _materialize(self) -> Path:
+        from pados.packs.document_intelligence.materialize import MaterializeError, discard, materialize_verified
+
+        if self._copy is not None:
+            discard(self._copy)
+            self._copy = None
+        try:
+            self._copy = materialize_verified(self.pin, self.directory)
+        except MaterializeError as exc:
+            raise LocalModelError(exc.code) from None
+        return self._copy
+
+    def close(self) -> None:
+        """Release the engine: a worker backend is stopped and a private model copy removed (idempotent)."""
+        backend, self._backend = self._backend, None
+        if backend is not None and callable(getattr(backend, "close", None)):
+            backend.close()
+        if self._copy is not None:
+            from pados.packs.document_intelligence.materialize import discard
+
+            discard(self._copy)
+            self._copy = None
 
     def _batches(self, texts: list[str]) -> list[list[str]]:
         size = self.pin.max_batch
@@ -266,8 +292,8 @@ class PinnedTextEmbedder(_PinnedEngine):
     role = ModelRole.EMBEDDING
 
     def __init__(self, pin: ModelPin, directory: Path, *, factory: Factory = fastembed_embedding,
-                 identity: EngineIdentity | None | object = _AUTO) -> None:
-        super().__init__(pin, directory, factory=factory, identity=identity)
+                 identity: EngineIdentity | None | object = _AUTO, private_copy: bool = False) -> None:
+        super().__init__(pin, directory, factory=factory, identity=identity, private_copy=private_copy)
 
     def embed(self, texts: Sequence[str]) -> EmbeddingResult:
         bounded, truncated = self._bounded(texts)
@@ -287,8 +313,8 @@ class PinnedCrossEncoder(_PinnedEngine):
     role = ModelRole.CROSS_ENCODER
 
     def __init__(self, pin: ModelPin, directory: Path, *, factory: Factory = fastembed_cross_encoder,
-                 identity: EngineIdentity | None | object = _AUTO) -> None:
-        super().__init__(pin, directory, factory=factory, identity=identity)
+                 identity: EngineIdentity | None | object = _AUTO, private_copy: bool = False) -> None:
+        super().__init__(pin, directory, factory=factory, identity=identity, private_copy=private_copy)
 
     def score(self, query: str, texts: Sequence[str]) -> tuple[float, ...]:
         (bounded_query,), _ = self._bounded([query])
