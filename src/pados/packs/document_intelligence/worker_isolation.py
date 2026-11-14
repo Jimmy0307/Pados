@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import ntpath
 import platform
 import sys
 from pathlib import Path
@@ -74,7 +75,7 @@ def expected_workers(root: int, interpreter: int, members: list[tuple[int, int, 
     that answered READY), and at most one console host whose image is the system's own conhost.exe. Anything
     else (a helper started before READY) fails closed."""
     pids = {pid for pid, _, _, _ in members}
-    system_conhost = str(Path(system_root, "System32", CONSOLE_HOST_IMAGE)).lower() if system_root else None
+    system_conhost = ntpath.join(system_root, "System32", CONSOLE_HOST_IMAGE).lower() if system_root else None
     consoles = [pid for pid, parent, name, image in members
                 if name.lower() == CONSOLE_HOST_IMAGE and image.lower() == system_conhost and parent in pids]
     workers = {pid: parent for pid, parent, _, _ in members if pid not in consoles}
