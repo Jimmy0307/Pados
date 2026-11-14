@@ -42,7 +42,10 @@ MEMORY_REFUSED: Final = "MODEL_WORKER_MEMORY_REFUSED"
 MIB: Final = 1024 * 1024
 # Measured headroom above the pin's max_ram_mb (see MODEL_WORKER_ISOLATION.md, "Headroom"). The RSS watchdog
 # still enforces max_ram_mb itself; the kernel cap is the hard ceiling a fast spike cannot pass between polls.
-LINUX_ADDRESS_SPACE_HEADROOM_MB: Final = 1536  # ORT/numpy/glibc reserve address space they never touch
+# Measured: peak address space above peak RSS was 333-527 MiB (VM, real engines, MALLOC_ARENA_MAX=2), so 1024 MiB
+# leaves about twice the largest measured gap. Windows: commit exceeded RSS by at most 281 MiB, so 512 MiB.
+LINUX_ADDRESS_SPACE_HEADROOM_MB: Final = 1024  # ORT, tokenizers and glibc reserve address space they never touch
+MALLOC_ARENAS: Final = 2  # without it the gap reached 1108 MiB and grows with the thread count
 WINDOWS_COMMIT_HEADROOM_MB: Final = 512  # commit charge above the resident set (both processes of the job)
 MAX_OPEN_FILES: Final = 256
 VENV_LAUNCHER_PROCESSES: Final = 2  # a Windows venv ``python.exe`` is a launcher that starts the real interpreter

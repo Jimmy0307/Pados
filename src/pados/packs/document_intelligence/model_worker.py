@@ -52,6 +52,7 @@ from pados.packs.document_intelligence.worker_isolation import (
     CREATE_SUSPENDED,
     ISOLATION_FAILED,
     MEMORY_REFUSED,
+    MALLOC_ARENAS,
     IsolationError,
     WindowsJob,
     apply_worker_limits,
@@ -256,7 +257,9 @@ def worker_main(argv: list[str]) -> int:
 # --------------------------------------------------------------------------------------------- parent side
 def _worker_environment(threads: int) -> dict[str, str]:
     environment = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "OMP_NUM_THREADS": str(threads),
-                   "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+                   "RAYON_NUM_THREADS": str(threads), "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    if sys.platform != "win32":  # glibc reserves 64 MiB of address space per thread arena; bounded under RLIMIT_AS
+        environment["MALLOC_ARENA_MAX"] = str(MALLOC_ARENAS)
     for name in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATH"):  # what the interpreter itself needs to start
         if name in os.environ:
             environment[name] = os.environ[name]

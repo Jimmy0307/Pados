@@ -47,7 +47,8 @@ needs_windows = pytest.mark.skipif(not WINDOWS, reason="Job Object containment e
 needs_linux = pytest.mark.skipif(not (LINUX and supported()),
                                  reason="RLIMIT_AS + seccomp containment needs Linux on x86_64 or aarch64")
 needs_os_cap = pytest.mark.skipif(not supported(), reason="no OS-enforced isolation on this platform (fails closed)")
-EXPECTED_ENVIRONMENT = {"HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "OMP_NUM_THREADS", "PYTHONIOENCODING", "PYTHONUTF8"}
+EXPECTED_ENVIRONMENT = {"HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "OMP_NUM_THREADS", "RAYON_NUM_THREADS", "PYTHONIOENCODING",
+                        "PYTHONUTF8", *(() if WINDOWS else ("MALLOC_ARENA_MAX",))}
 PASSED_THROUGH = {"SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATH"}
 VENV_LAUNCHER = "__PYVENV_LAUNCHER__"  # added by the Windows venv launcher to its interpreter child
 
