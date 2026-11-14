@@ -123,6 +123,7 @@ class Workbench:
     encoder: PinnedCrossEncoder
     run_ids: Any
     last: Any = None  # (task, plan, result) of the latest evidence run
+    clock: Any = None  # the executor clock (a fixed test clock unless a caller measures wall time)
 
     def put_document(self, cases: tuple[corpus.Case, ...], *, project_id: str = PROJECT,
                      classification: DataClassification = DataClassification.CONFIDENTIAL) -> ArtifactRef:
@@ -166,7 +167,8 @@ class Workbench:
 
     def executor(self) -> CapabilityExecutor:
         return CapabilityExecutor(self.wiring.registry, self.store, self.grants, templates=self.wiring.templates,
-                                  verifier=self.wiring.verifier, clock=FixedClock(), run_ids=self.run_ids,
+                                  verifier=self.wiring.verifier, clock=self.clock or FixedClock(),
+                                  run_ids=self.run_ids,
                                   planner_config=self.wiring.planner_config, inventory=inventory(),
                                   provenance=self.provenance)
 
