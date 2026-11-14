@@ -47,7 +47,8 @@ MAX_SCORED_BYTES = 1024 * 1024
 _SHA256 = r"^[0-9a-f]{64}$"
 _PASSAGE = r"^[a-z][a-z0-9.-]{0,63}$"
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
-SCORED_KEYS = frozenset({"schema", "semantic_authority", "method", "source_document_sha256", "source_sha256",
+COSINE_BOUND: Final = 1.000001
+SCORED_KEYS = frozenset({"rerank_outcome", "schema", "semantic_authority", "method", "source_document_sha256", "source_sha256",
                          "query_sha256", "query_terms", "tokenizer", "unicode_version", "text_view",
                          "passages_total", "top_k", "input_rankings", "model_pin_id", "model_pin_digest", "engine",
                          "rerank_mode", "fusion_k", "truncated_inputs", "results", "shadow_order"})
@@ -97,10 +98,11 @@ class ScoredRanking(BaseModel):
     model_pin_digest: str | None = Field(default=None, pattern=_SHA256)
     engine: str | None = Field(default=None, max_length=160)
     rerank_mode: Literal["SHADOW", "ACTIVE"] | None = None
+    rerank_outcome: Literal["APPLIED", "SHADOW_SCORED", "SHADOW_FAILED"] | None = None
     fusion_k: int | None = Field(default=None, ge=1, le=1000)
     truncated_inputs: int = Field(default=0, ge=0, le=MAX_PASSAGES + 1)
     results: tuple[ScoredPassage, ...] = Field(max_length=MAX_RESULTS)
-    shadow_order: tuple[str, ...] = Field(default=(), max_length=MAX_RESULTS)
+    shadow_order: tuple[Annotated[str, Field(pattern=_PASSAGE)], ...] = Field(default=(), max_length=MAX_RESULTS)
 
     @model_validator(mode="after")
     def _coherent(self) -> ScoredRanking:
@@ -114,14 +116,20 @@ class ScoredRanking(BaseModel):
         model = self.method in ("DENSE_COSINE", "CROSS_ENCODER")
         if model != (self.model_pin_id is not None and self.model_pin_digest is not None and bool(self.engine)):
             raise ValueError("SCORED_MODEL_IDENTITY_INVALID")
-        if (self.method == "CROSS_ENCODER") != (self.rerank_mode is not None):
+        if (self.method == "CROSS_ENCODER") != (self.rerank_mode is not None) or (
+                self.rerank_mode is None) != (self.rerank_outcome is None) or (
+                (self.rerank_mode == "ACTIVE") != (self.rerank_outcome == "APPLIED")):
             raise ValueError("SCORED_RERANK_MODE_INVALID")
+        if self.method == "DENSE_COSINE" and any(
+                abs(value) > COSINE_BOUND for item in results for value in (item.score, item.model_score or 0.0)):
+            raise ValueError("SCORED_COSINE_OUT_OF_RANGE")
         if (self.method == "RRF_FUSION") != (self.fusion_k is not None):
             raise ValueError("SCORED_FUSION_INVALID")
         if (self.method == "DENSE_COSINE") == bool(self.input_rankings):
             raise ValueError("SCORED_INPUTS_INVALID")
         if self.rerank_mode == "SHADOW":
-            if sorted(self.shadow_order) != sorted(item.passage_id for item in results):
+            # The reranker's own top-k over the same candidates (it may name passages the prior cut off).
+            if len(self.shadow_order) != len(results) or len(set(self.shadow_order)) != len(self.shadow_order):
                 raise ValueError("SCORED_SHADOW_INVALID")
         elif self.shadow_order:
             raise ValueError("SCORED_SHADOW_INVALID")

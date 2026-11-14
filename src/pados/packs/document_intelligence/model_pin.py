@@ -116,7 +116,8 @@ def _file_digest(path: Path, limit: int) -> tuple[int, str] | None:
 
 
 def verify_model_dir(pin: ModelPin, directory: Path) -> str | None:
-    """``None`` when ``directory`` holds exactly the pinned bytes for every pinned file, else a closed code."""
+    """``None`` when ``directory`` holds exactly the pinned bytes for every pinned file and no other file (the
+    fetch tool's ``.cache`` metadata aside), else a closed code."""
     try:
         if directory.is_symlink() or not directory.is_dir():
             return "MODEL_DIR_MISSING"
@@ -142,9 +143,32 @@ def verify_model_dir(pin: ModelPin, directory: Path) -> str | None:
                 return "MODEL_FILE_SIZE_MISMATCH"
             if measured[1] != item.sha256:
                 return "MODEL_FILE_DIGEST_MISMATCH"
+        if _unpinned(pin, directory):
+            return "MODEL_DIR_UNPINNED_FILE"
     except OSError:
         return "MODEL_DIR_UNREADABLE"
     return None
+
+
+FETCH_CACHE_DIR: Final = ".cache"  # hub download metadata; never loaded by an engine
+MAX_DIR_ENTRIES = 1024
+
+
+def _unpinned(pin: ModelPin, directory: Path) -> bool:
+    """True when the directory holds any file the pin does not name (outside the fetch tool's ``.cache``), so no
+    sibling file (external ONNX data, another tokenizer) can be picked up beside the pinned ones."""
+    pinned = {PurePosixPath(item.path) for item in pin.files}
+    count = 0
+    for path in directory.rglob("*"):
+        count += 1
+        relative = PurePosixPath(path.relative_to(directory).as_posix())
+        if count > MAX_DIR_ENTRIES:
+            return True
+        if relative.parts[0] == FETCH_CACHE_DIR or path.is_dir() and not path.is_symlink():
+            continue
+        if relative not in pinned:
+            return True
+    return False
 
 
 def _files(*entries: tuple[str, int, str]) -> tuple[ModelFile, ...]:

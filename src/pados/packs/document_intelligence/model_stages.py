@@ -99,7 +99,8 @@ MODEL_FAILURES = ("DI_PARAMETERS_INVALID", "DI_INPUT_COUNT_INVALID", "DI_INPUT_N
                   "DI_INPUT_UNREADABLE", "DI_NO_PASSAGES", "DI_TOO_MANY_PASSAGES", "DI_QUERY_EMPTY",
                   "DI_QUERY_TOO_LONG", "DI_SEED_NOT_APPLICABLE", "DI_RANKING_NOT_MINIMIZED", "DI_INPUT_NOT_RANKING",
                   "DI_INPUT_RANKING_INVALID", "DI_RANKING_DOCUMENT_MISMATCH", "DI_RANKING_QUERY_MISMATCH",
-                  "DI_RERANK_FAILED", "DI_UNEXPECTED_ERROR", "ENGINE_NOT_INSTALLED", "ENGINE_POISONED",
+                  "DI_RERANK_FAILED", "DI_UNEXPECTED_ERROR", "LOCAL_MODEL_INPUT_TOO_LARGE", "ENGINE_NOT_INSTALLED",
+                  "ENGINE_POISONED", "MODEL_DIR_UNPINNED_FILE",
                   "MODEL_PIN_ROLE_MISMATCH", "MODEL_DIR_MISSING", "MODEL_DIR_UNREADABLE", "MODEL_FILE_MISSING",
                   "MODEL_FILE_SYMLINK", "MODEL_FILE_INVALID", "MODEL_FILE_SIZE_MISMATCH",
                   "MODEL_FILE_DIGEST_MISMATCH", "LOCAL_MODEL_INPUT_INVALID", "LOCAL_MODEL_DIMENSION_MISMATCH",
@@ -311,23 +312,30 @@ class CrossEncoderRerankAdapter:
         prior_rank = {item.passage_id: item.rank for item in prior.results}
         prior_score = {item.passage_id: item.score for item in prior.results}
         if mode is RerankMode.ACTIVE:
+            # Equal model scores keep the prior order (never the passage-id spelling).
+            ordered = sorted(ordered, key=lambda pair: (-(pair[1] or 0.0), prior_rank[pair[0]]))
             kept = ordered[:parameters.top_k]
             results = self._results(kept, by_id, prior_rank, lambda pid, model: float(model or 0.0))
             shadow: tuple[str, ...] = ()
-            outcome = "APPLIED"
+            outcome: Literal["APPLIED", "SHADOW_SCORED", "SHADOW_FAILED"] = "APPLIED"
         else:
             kept = ordered[:parameters.top_k]
             results = self._results(kept, by_id, prior_rank, lambda pid, _model: prior_score[pid])
-            keep = {pid for pid, _ in kept}
-            shadow = tuple(pid for pid in report.get("shadow_ranking", [pid for pid, _ in kept]) if pid in keep)
-            outcome = "SHADOW_FAILED" if "error" in report else "SHADOW_SCORED"
+            failed = "error" in report
+            if failed:
+                shadow = tuple(pid for pid, _ in kept)
+            else:  # the reranker's own top-k over ALL candidates, ties in prior order (as ACTIVE would publish)
+                scores = dict(ordered)
+                shadow = tuple(sorted(scores, key=lambda pid: (-(scores[pid] or 0.0), prior_rank[pid]))
+                               [:parameters.top_k])
+            outcome = "SHADOW_FAILED" if failed else "SHADOW_SCORED"
         pin = self._encoder.pin
         ranking = ScoredRanking(
             method="CROSS_ENCODER", source_document_sha256=ref.sha256, source_sha256=document.source.sha256,
             query_sha256=query_sha256, query_terms=terms, unicode_version=unicode_version(),
             passages_total=len(units), top_k=parameters.top_k, input_rankings=(prior_ref.sha256,),
             model_pin_id=pin.pin_id, model_pin_digest=pin.digest, engine=_engine_label(self._encoder.identity),
-            rerank_mode=parameters.mode, results=results, shadow_order=shadow)
+            rerank_mode=parameters.mode, rerank_outcome=outcome, results=results, shadow_order=shadow)
         return _output(self.manifest, context, ranking, ref.sha256, outcome,
                        {"candidates": float(len(candidates)), "results": float(len(results)),
                         "latency_ms": float(report.get("latency_ms", 0.0))})

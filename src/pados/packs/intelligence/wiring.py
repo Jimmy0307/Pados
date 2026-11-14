@@ -243,6 +243,8 @@ def wire_pipeline(provenance: InputProvenance, *, operator: str, clock: Callable
         installed = extension(registry, templates, schemas, references)
         if set(installed) & set(adapters):
             raise WiringError("PIPELINE_EXTENSION_ADAPTER_CONFLICT")
+        if any(not registry.is_registered(adapter_id) for adapter_id in installed):
+            raise WiringError("PIPELINE_EXTENSION_ADAPTER_NOT_REGISTERED")  # it may only report what it registered
         adapters.update(installed)
     config = PlannerConfig(preferences={DOCUMENT_OCR: (TEXT_LAYER_ADAPTER_ID,)}, advice_enabled=advice_enabled)
     return PipelineWiring(registry, templates, VerificationEngine(schemas=schemas, references=references), config,

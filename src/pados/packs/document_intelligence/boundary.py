@@ -31,8 +31,8 @@ def closed(run: Callable[[StageRequest, StageContext], StageOutput], request: St
         raise
     except (DocumentIntelligenceError, LocalModelError) as exc:
         code, retryable = exc.code, exc.retryable
-    except RetrievalError as exc:
-        code = exc.code
+    except RetrievalError as exc:  # from passage extraction or a ranking load: mapped to declared codes
+        code = "DI_TOO_MANY_PASSAGES" if exc.code == "RETRIEVAL_TOO_MANY_PASSAGES" else "DI_INPUT_RANKING_INVALID"
     except AlgorithmError:
         code = "DI_PARAMETERS_INVALID"
     except OcrContractError:

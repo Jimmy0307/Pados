@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
+import tempfile
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -27,14 +30,30 @@ from pados.packs.document_intelligence.model_pin import BUILTIN_PINS, ModelPin, 
 
 
 def fetch(pin: ModelPin, root: Path) -> str | None:
+    """Download into a fresh staging directory, verify there, then move into place; a failure is quarantined
+    under a unique name and never left where an engine looks."""
     from huggingface_hub import hf_hub_download
 
-    directory = root / pin.pin_id
-    for item in pin.files:
-        hf_hub_download(pin.source_repo, item.path, revision=pin.revision, local_dir=str(directory))
-    refusal = verify_model_dir(pin, directory)
-    if refusal is not None:  # quarantine, never leave unverified bytes where an engine could look
-        shutil.move(str(directory), str(root / f"{pin.pin_id}.refused"))
+    for variable in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_ENDPOINT"):
+        os.environ.pop(variable, None)  # public pinned files only, from the default hub endpoint
+    target = root / pin.pin_id
+    if target.is_symlink():
+        return "MODEL_DIR_SYMLINK"
+    root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{pin.pin_id}.staging-", dir=root))
+    refusal: str | None
+    try:
+        for item in pin.files:
+            hf_hub_download(pin.source_repo, item.path, revision=pin.revision, local_dir=str(staging))
+        refusal = verify_model_dir(pin, staging)
+    except Exception as exc:  # noqa: BLE001 - a failed download is a refusal, never a partial install
+        refusal = f"MODEL_FETCH_FAILED:{type(exc).__name__}"
+    if refusal is None:
+        if target.exists():
+            shutil.move(str(target), str(root / f"{pin.pin_id}.replaced-{uuid.uuid4().hex[:8]}"))
+        os.replace(staging, target)
+    else:
+        shutil.move(str(staging), str(root / f"{pin.pin_id}.refused-{uuid.uuid4().hex[:8]}"))
     return refusal
 
 

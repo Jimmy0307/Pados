@@ -8,12 +8,16 @@ directory matching the pin, the engine reports a refusal from ``status()`` and i
 Guarantees:
 
 * **No download.** The engine is constructed with ``specific_model_path`` (FastEmbed returns that directory
-  before any hub code runs) and ``local_files_only=True``, and only after ``verify_model_dir`` passes.
-* **Bounded.** At most ``MAX_TEXTS`` inputs per call; each input is cut to the pin's ``max_input_chars`` (the
-  count is reported); batches are the pin's ``max_batch``; the engine runs with the pin's thread count.
-* **Deadline.** Every call (and the load) runs on the engine's single worker thread and must finish within the
-  pin's ``timeout_seconds``. CPython cannot stop that thread, so a late call POISONS the engine: every later call
-  is refused (``ENGINE_POISONED``) and at most one runaway computation exists per engine.
+  before any hub code runs), ``local_files_only=True`` and ``HF_HUB_OFFLINE=1``, and only after
+  ``verify_model_dir`` passes. Verification is cached on a stat fingerprint of the directory; any change
+  re-verifies and unloads. (The files are hashed, then reopened by the engine: keep the model root writable only
+  by the operator. Residual DI-2.)
+* **Bounded.** At most ``MAX_TEXTS`` inputs and ``MAX_TOTAL_CHARS`` characters per call; each input is cut to the
+  pin's ``max_input_chars`` (the count is reported); the engine runs with the pin's thread count.
+* **Deadline.** Each batch of ``max_batch`` inputs runs on a daemon thread and must finish within the pin's
+  ``timeout_seconds``; a load gets ``LOAD_DEADLINE_FACTOR`` times that. CPython cannot stop the thread, so a late
+  batch makes the engine refuse (``ENGINE_POISONED``) until that computation has returned; it then reloads.
+  At most one runaway computation exists per engine, and it never blocks interpreter exit.
 * **Validated output.** Count, dimension and finiteness are checked; embeddings are L2-normalized; every number is
   quantized to 6 decimals so the result schema is stable. Any engine exception becomes ``LOCAL_MODEL_FAILED``
   with an empty exception chain (input text is never echoed).
@@ -30,9 +34,8 @@ import math
 import os
 import threading
 from collections.abc import Callable, Iterable, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Final, Protocol
 
@@ -42,6 +45,8 @@ from pados.enterprise.rerank import RerankCandidate, RerankError
 from pados.packs.document_intelligence.model_pin import ModelPin, ModelRole, verify_model_dir
 
 MAX_TEXTS: Final = 4096
+MAX_TOTAL_CHARS: Final = 1_000_000  # per call, after per-text truncation
+LOAD_DEADLINE_FACTOR: Final = 5
 QUANTUM_DIGITS: Final = 6
 PROVIDERS: Final = ("CPUExecutionProvider",)
 MODEL_ROOT_ENV: Final = "PADOS_MODEL_ROOT"
@@ -103,7 +108,14 @@ def fastembed_identity(threads: int) -> EngineIdentity | None:
         return None
 
 
+def _offline() -> None:
+    """Belt and braces beside ``specific_model_path``: the hub client in this process stays offline."""
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+
 def _fastembed_kwargs(pin: ModelPin, directory: Path) -> dict[str, Any]:
+    _offline()
     return {"model_name": pin.model_name, "specific_model_path": str(directory), "local_files_only": True,
             "threads": pin.threads, "providers": list(PROVIDERS), "cuda": False, "lazy_load": False}
 
@@ -133,51 +145,103 @@ class _PinnedEngine:
         self.identity: EngineIdentity | None = (fastembed_identity(pin.threads) if identity is _AUTO
                                                 else identity)  # type: ignore[assignment]
         self._backend: Any = None
-        self._poisoned = False
-        self._verified = False
+        self._runaway: threading.Thread | None = None
+        self._checked: tuple[tuple[Any, ...], str | None] | None = None
         self._lock = threading.Lock()
-        self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"pados-model-{pin.pin_id}")
+
+    def _fingerprint(self) -> tuple[Any, ...]:
+        """Cheap identity of the directory's current state: every file's path, size, mtime and file id."""
+        entries: list[tuple[str, int, int, int]] = []
+        try:
+            for path in sorted(self.directory.rglob("*")):
+                info = path.lstat()
+                entries.append((path.as_posix(), info.st_size, info.st_mtime_ns, info.st_ino))
+                if len(entries) > 1024:
+                    break
+        except OSError:
+            return ("UNREADABLE",)
+        return tuple(entries)
 
     def status(self) -> str | None:
-        """``None`` when the engine may run; otherwise the closed reason it may not (no side effects)."""
-        if self._poisoned:
-            return "ENGINE_POISONED"
+        """``None`` when the engine may run; otherwise the closed reason it may not.
+
+        Verification is cached on a stat fingerprint of the model directory (sizes, mtimes, file ids): unchanged
+        files are not re-hashed, and any change re-verifies before the next use and unloads a loaded engine whose
+        files no longer match."""
+        if self._runaway is not None:
+            if self._runaway.is_alive():
+                return "ENGINE_POISONED"
+            self._runaway = None  # the late call has returned: nothing is computing any more; reload cleanly
+            self._backend = None
         if self.identity is None:
             return "ENGINE_NOT_INSTALLED"
         if self.pin.role is not self.role:
             return "MODEL_PIN_ROLE_MISMATCH"
-        return None if self._verified else verify_model_dir(self.pin, self.directory)
+        fingerprint = self._fingerprint()
+        if self._checked is None or self._checked[0] != fingerprint:
+            self._checked = (fingerprint, verify_model_dir(self.pin, self.directory))
+        if self._checked[1] is not None:
+            self._backend = None
+        return self._checked[1]
 
-    def _run(self, call: Callable[[], Any]) -> Any:
-        future: Future[Any] = self._worker.submit(call)
-        try:
-            return future.result(timeout=self.pin.timeout_seconds)
-        except FutureTimeout:
-            self._poisoned = True  # the thread cannot be stopped: refuse everything after this
+    def _run(self, call: Callable[[], Any], *, deadline: float) -> Any:
+        """Run ``call`` on a fresh DAEMON thread (it never blocks interpreter exit) within ``deadline`` seconds."""
+        box: dict[str, Any] = {}
+
+        def target() -> None:
+            try:
+                box["value"] = call()
+            except BaseException as exc:  # noqa: BLE001 - recorded, mapped to a closed code below
+                box["error"] = exc
+
+        worker = threading.Thread(target=target, name=f"pados-model-{self.pin.pin_id}", daemon=True)
+        worker.start()
+        worker.join(deadline)
+        if worker.is_alive():
+            self._runaway = worker  # cannot be stopped: refuse until it returns (status() then recovers)
             failure = "LOCAL_MODEL_TIMEOUT"
-        except LocalModelError:
-            raise
-        except Exception:  # noqa: BLE001 - closed boundary: engine text never escapes
+        elif isinstance(box.get("error"), LocalModelError):
+            raise box["error"]
+        elif "error" in box:
             failure = "LOCAL_MODEL_FAILED"
+        else:
+            return box.get("value")
         raise LocalModelError(failure) from None
 
     def _backend_ready(self) -> Any:
         reason = self.status()
         if reason is not None:
             raise LocalModelError(reason)
-        self._verified = True
         if self._backend is None:
-            self._backend = self._run(lambda: self._factory(self.pin, self.directory))
-            if self._backend is None:
+            # A load reads ~100 MB and builds the session: it gets its own, longer deadline.
+            loaded = self._run(lambda: self._factory(self.pin, self.directory),
+                               deadline=self.pin.timeout_seconds * LOAD_DEADLINE_FACTOR)
+            if loaded is None:
                 raise LocalModelError("LOCAL_MODEL_FAILED")
+            self._backend = loaded
         return self._backend
+
+    def _batches(self, texts: list[str]) -> list[list[str]]:
+        size = self.pin.max_batch
+        return [texts[index:index + size] for index in range(0, len(texts), size)]
 
     def _bounded(self, texts: Sequence[str]) -> tuple[list[str], int]:
         if (not isinstance(texts, Sequence) or isinstance(texts, str) or not 1 <= len(texts) <= MAX_TEXTS
                 or any(not isinstance(text, str) for text in texts)):
             raise LocalModelError("LOCAL_MODEL_INPUT_INVALID")
         limit = self.pin.max_input_chars
-        return [text[:limit] for text in texts], sum(1 for text in texts if len(text) > limit)
+        bounded = [text[:limit] for text in texts]
+        if sum(len(text) for text in bounded) > MAX_TOTAL_CHARS:
+            raise LocalModelError("LOCAL_MODEL_INPUT_TOO_LARGE")
+        return bounded, sum(1 for text in texts if len(text) > limit)
+
+
+def _embed_batch(backend: Any, batch: list[str]) -> list[list[float]]:
+    return [list(vector) for vector in backend.embed(batch, batch_size=len(batch))]
+
+
+def _rerank_batch(backend: Any, query: str, batch: list[str]) -> list[float]:
+    return [float(score) for score in backend.rerank(query, batch, batch_size=len(batch))]
 
 
 @dataclass(frozen=True)
@@ -211,8 +275,9 @@ class PinnedTextEmbedder(_PinnedEngine):
         assert dimension is not None  # an EMBEDDING pin always has one (validated)
         with self._lock:
             backend = self._backend_ready()
-            raw = self._run(lambda: [list(vector) for vector in backend.embed(bounded,
-                                                                              batch_size=self.pin.max_batch)])
+            raw: list[list[float]] = []
+            for batch in self._batches(bounded):  # the deadline applies per batch, never to the whole call
+                raw += self._run(partial(_embed_batch, backend, batch), deadline=self.pin.timeout_seconds)
         if len(raw) != len(bounded):
             raise LocalModelError("LOCAL_MODEL_OUTPUT_INVALID")
         return EmbeddingResult(tuple(_unit(vector, dimension) for vector in raw), truncated)
@@ -230,8 +295,10 @@ class PinnedCrossEncoder(_PinnedEngine):
         bounded, _ = self._bounded(texts)
         with self._lock:
             backend = self._backend_ready()
-            raw = self._run(lambda: [float(score) for score in backend.rerank(bounded_query, bounded,
-                                                                              batch_size=self.pin.max_batch)])
+            raw: list[float] = []
+            for batch in self._batches(bounded):
+                raw += self._run(partial(_rerank_batch, backend, bounded_query, batch),
+                                 deadline=self.pin.timeout_seconds)
         if len(raw) != len(bounded) or not all(math.isfinite(score) for score in raw):
             raise LocalModelError("LOCAL_MODEL_OUTPUT_INVALID")
         return tuple(round(score, QUANTUM_DIGITS) for score in raw)

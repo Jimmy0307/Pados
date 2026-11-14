@@ -71,10 +71,12 @@ def _subjects(profile: ProblemSolvingProfile) -> frozenset[str]:
     return frozenset(subject for section in profile.sections for subject in section.subjects)
 
 
-def passage_items(passage: Passage, *, case_id: str, source_id: str,
+def passage_items(passage: Passage, *, rank: int, case_id: str, source_id: str,
                   subjects: frozenset[str]) -> list[tuple[EvidenceItem, int | None]]:
+    """Evidence items of one ranked passage. Ids are ``ev.<rank>.<n>`` (bounded length whatever the block id);
+    the evidence map names the passage each id came from."""
     digest = hashlib.sha256(passage.text.encode("utf-8")).hexdigest()
-    base = f"ev.{passage.passage_id}"
+    base = f"ev.{rank:02d}"
     items: list[tuple[EvidenceItem, int | None]] = []
     seen: set[tuple[str, str]] = set()
     for index, line in enumerate(passage.text.splitlines()):
@@ -105,8 +107,11 @@ def build_evidence(ranked: Sequence[Passage], *, case_id: str, source_id: str, p
     items: list[EvidenceItem] = []
     mapped: list[MappedItem] = []
     facts: set[tuple[Any, ...]] = set()
-    for passage in ranked:
-        for item, line in passage_items(passage, case_id=case_id, source_id=source_id, subjects=subjects):
+    for rank, passage in enumerate(ranked, start=1):
+        if len(items) >= max_items:
+            break
+        for item, line in passage_items(passage, rank=rank, case_id=case_id, source_id=source_id,
+                                        subjects=subjects):
             fact = (item.content_digest, item.subject, item.assertion,
                     item.statement if item.subject is None else None)
             if fact in facts:  # the same material stating the same thing is one piece of evidence
