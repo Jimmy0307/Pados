@@ -59,6 +59,7 @@ CLI, HTTP and PowerShell 5.1. **Browser** means the live Playwright spec `web/e2
 | `tests/identity` after A2+A3 (head `6bd39d2`) | 316 passed, 7 skipped (5 POSIX-only, 1 POSIX mode test, 1 symlink privilege) |
 | `tests/identity/oidc` after A4 (includes the actor logout tests) | 155 passed |
 | `tests/operability/test_op004_mutation_inventory.py` | passed |
+| `tests/security` (head `7e4cb15`) | 447 passed, 13 skipped (platform), 3 failed: `test_p6_6_adversarial.py` cases that need a password-protected PostgreSQL on 5432; they fail identically on `main` |
 | Web: Vitest | 185 passed (13 files) |
 | Web: mocked Playwright `control-center-identity.spec.ts` (isolated port, proxy to a dead port) | 6 tests; 5 + 1 on the full run (the last test timed out in `page.goto` under host memory pressure), then 6/6 on `--repeat-each=3` of the affected tests |
 | Linux | Not re-run for A2–A4 on this host; the POSIX branches are covered by tests that skip on win32 and by `mypy --platform linux` |
