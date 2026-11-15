@@ -137,22 +137,23 @@ if sys.platform == "win32":
 
     def current_user_sid() -> str:
         """The user SID of this process's access token (never a user name or an environment value)."""
-        token = wintypes.HANDLE()
-        if not _advapi32.OpenProcessToken(_kernel32.GetCurrentProcess(), _TOKEN_QUERY, ctypes.byref(token)):
+        process_handle = wintypes.HANDLE()
+        if not _advapi32.OpenProcessToken(_kernel32.GetCurrentProcess(), _TOKEN_QUERY, ctypes.byref(process_handle)):
             raise StoreInsecure("token_unavailable")
         try:
             needed = wintypes.DWORD(0)
-            _advapi32.GetTokenInformation(token, _TOKEN_USER_CLASS, None, 0, ctypes.byref(needed))
+            _advapi32.GetTokenInformation(process_handle, _TOKEN_USER_CLASS, None, 0, ctypes.byref(needed))
             if ctypes.get_last_error() != _ERROR_INSUFFICIENT_BUFFER or needed.value == 0:
                 raise StoreInsecure("token_unreadable")
             buffer = ctypes.create_string_buffer(needed.value)
-            if not _advapi32.GetTokenInformation(token, _TOKEN_USER_CLASS, buffer, needed, ctypes.byref(needed)):
+            if not _advapi32.GetTokenInformation(process_handle, _TOKEN_USER_CLASS, buffer, needed,
+                                                 ctypes.byref(needed)):
                 raise StoreInsecure("token_unreadable")
             # TOKEN_USER starts with SID_AND_ATTRIBUTES, whose first member is the PSID.
             sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
             return _sid_string(sid)
         finally:
-            _kernel32.CloseHandle(token)
+            _kernel32.CloseHandle(process_handle)
 
     def create_private_directory(path: Path) -> None:
         """Create ``path`` with the protected descriptor from its first moment (no window with an inherited ACL)."""

@@ -70,7 +70,7 @@ def test_the_sid_comes_from_the_process_token_not_the_user_name(monkeypatch: pyt
     expected = _token_sid_from_whoami()
     monkeypatch.setenv("USERNAME", "someone-else")
     monkeypatch.setenv("USERDOMAIN", "ELSEWHERE")
-    monkeypatch.setenv("USERPROFILE", r"C:\Users\someone-else")
+    monkeypatch.setenv("USERPROFILE", r"D:\profiles\someone-else")
     assert fs_security.current_user_sid() == expected
 
 
