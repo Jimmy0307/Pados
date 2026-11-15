@@ -37,6 +37,7 @@ DEVICE_ID_PATTERN = r"^dev_[0-9a-f]{16}$"
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 # One process-wide lock: the store is a single document, so every read-modify-write is serialised.
 _LOCK = threading.RLock()
+_PHASE_TWO_MAPS = ("actor_sessions", "oidc_states")
 
 DeviceId = Annotated[str, StringConstraints(pattern=DEVICE_ID_PATTERN)]
 
@@ -70,12 +71,44 @@ class PairingCodeRecord(_Record):
     label_hint: Annotated[str, StringConstraints(min_length=1, max_length=64)] | None = None
 
 
+ACTOR_ID_PATTERN = r"^[a-z0-9][a-z0-9._-]{0,63}$"
+ActorId = Annotated[str, StringConstraints(pattern=ACTOR_ID_PATTERN)]
+ProviderId = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9-]{0,31}$")]
+
+
+class ActorSessionRecord(_Record):
+    """An OIDC (phase 2) session. Kept apart from ``sessions``: the control plane never sees one (design §4)."""
+
+    auth_method: Literal["oidc"] = "oidc"
+    actor_id: ActorId
+    provider_id: ProviderId
+    issuer: Annotated[str, StringConstraints(min_length=1, max_length=512)]
+    subject: Annotated[str, StringConstraints(min_length=1, max_length=255)]
+    created_at: datetime
+    expires_at: datetime
+    last_seen_at: datetime
+    revoked_at: datetime | None = None
+    binding: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+
+class OidcStateRecord(_Record):
+    """A pending OIDC authorization, keyed by SHA-256(state). PKCE verifier and nonce are derived, never stored."""
+
+    provider_id: ProviderId
+    browser_binding: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]  # SHA-256(pre-auth cookie)
+    created_at: datetime
+    expires_at: datetime
+
+
 class StoreState(_Record):
     schema_version: Literal["pados.identity.store.v1"] = STORE_SCHEMA
     devices: dict[str, DeviceRecord] = Field(default_factory=dict)
     sessions: dict[str, SessionRecord] = Field(default_factory=dict)  # keyed by SHA-256(session id), hex
     pairing_codes: dict[str, PairingCodeRecord] = Field(default_factory=dict)  # keyed by SHA-256(code), hex
     pair_failures: tuple[datetime, ...] = ()
+    # Phase 2 (optional, additive): OIDC actor sessions and pending authorizations, keyed by SHA-256 hex.
+    actor_sessions: dict[str, ActorSessionRecord] = Field(default_factory=dict)
+    oidc_states: dict[str, OidcStateRecord] = Field(default_factory=dict)
 
 
 def _corrupt(reason: str) -> IdentityError:
@@ -85,7 +118,8 @@ def _corrupt(reason: str) -> IdentityError:
 
 
 def _validated(state: StoreState) -> StoreState:
-    if any(not _HASH.fullmatch(key) for key in (*state.sessions, *state.pairing_codes)):
+    if any(not _HASH.fullmatch(key) for key in (*state.sessions, *state.pairing_codes, *state.actor_sessions,
+                                                 *state.oidc_states)):
         raise _corrupt("key_shape")
     if any(key != device.device_id for key, device in state.devices.items()):
         raise _corrupt("device_key")
@@ -143,7 +177,11 @@ class IdentityStore:
             self._ensure_directory()
             if self.path.is_symlink():
                 raise _corrupt("symlink")
-            payload = json.dumps(_validated(state).model_dump(mode="json"), sort_keys=True, indent=1)
+            document = _validated(state).model_dump(mode="json")
+            for optional in _PHASE_TWO_MAPS:  # absent while empty: a phase 1 document stays byte-identical
+                if not document[optional]:
+                    del document[optional]
+            payload = json.dumps(document, sort_keys=True, indent=1)
             replace_private_bytes(self.path, payload.encode("utf-8"))
 
     @contextmanager

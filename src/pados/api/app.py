@@ -333,8 +333,9 @@ def create_app() -> FastAPI:
 
         return guarded(lambda: {"status": "ok", "messages": _list()})
 
-    @app.post("/control/work-requests")
-    def control_work_request(payload: WorkRequestCreate, _: ControlAuth) -> object:
+    def create_work_request_entry(payload: WorkRequestCreate) -> object:
+        """The one work-request creation path. Callers authorize first: ``control_auth`` for the control route, a
+        bound actor with ``contributor`` on the project for the identity actor route (design §4)."""
         control_security.assert_request_safe(payload.model_dump(), max_bytes=settings.control_request_max_bytes)
 
         def _create() -> dict[str, Any]:
@@ -349,6 +350,10 @@ def create_app() -> FastAPI:
                     session, payload, scope_version=scope_version, now=datetime.now(UTC)))
 
         return guarded(lambda: {"status": "ok", "work_request": _create()})
+
+    @app.post("/control/work-requests")
+    def control_work_request(payload: WorkRequestCreate, _: ControlAuth) -> object:
+        return create_work_request_entry(payload)
 
     @app.get("/control/work-requests/{request_id}")
     def control_get_work_request(request_id: str, _: ControlAuth) -> object:
@@ -726,8 +731,9 @@ def create_app() -> FastAPI:
     register_graph_routes(app, settings)
     register_product_loop_routes(app, settings)
     mount_remote(app, settings)
-    # Unified Identity & Session phase 1: /identity/v1 (IDENTITY_DISABLED unless PADOS_IDENTITY_SESSIONS_ENABLED).
-    mount_identity(app, settings)
+    # Unified Identity & Session: /identity/v1 (IDENTITY_DISABLED unless PADOS_IDENTITY_SESSIONS_ENABLED). Phase 2
+    # adds OIDC sign-in and the actor surface, whose one write delegates to the work-request entry above.
+    mount_identity(app, settings, create_work_request=create_work_request_entry)
     # OP-001: outermost layer, so the request context and error envelope also cover every route above.
     install_operability(app, component="api")
     return app

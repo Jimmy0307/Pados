@@ -193,6 +193,173 @@ These record choices the sections above left open, and the one addition (`IDENTI
     or result acceptance.
   - Result acceptance always requires the existing remote actor's WebAuthn step-up.
 
+### 4.1 Live validation status: NOT_LIVE_VALIDATED
+
+**Microsoft Entra ID and Google are NOT_LIVE_VALIDATED.** Phase 2 has been exercised only against a local fake
+issuer: TEST ONLY RSA keys generated in-process, and fake discovery, JWKS and token endpoints behind an
+`httpx.MockTransport`. No real tenant, app registration, consent screen or provider-issued token has been used.
+Presets and claim rules follow the providers' published documentation. Until an owner signs in once against each
+real provider and records the result, treat SSO as a configured-but-unproven path. Setup steps are in
+[OIDC_SETUP.md](OIDC_SETUP.md).
+
+### 4.2 Implementation notes (phase 2 as built)
+
+**Code.**
+
+| Module | Content |
+| --- | --- |
+| `src/pados/identity/oidc/config.py` | Configuration, the three presets, refusal of plaintext credentials |
+| `src/pados/identity/oidc/jws.py` | Compact JWS parsing, JWK selection, pure-Python RS256 verification |
+| `src/pados/identity/oidc/provider.py` | Discovery, the JWKS cache, the code exchange |
+| `src/pados/identity/oidc/idtoken.py` | Claim checks |
+| `src/pados/identity/oidc/flow.py` | Start and callback, the state store |
+| `src/pados/identity/oidc/routes.py` | The two OIDC routes |
+| `src/pados/identity/actors.py` | Actor bindings and roles |
+| `src/pados/identity/actor_sessions.py` | Actor sessions |
+| `src/pados/identity/actor_http.py` | Actor cookies and request rules |
+| `src/pados/identity/actor_routes.py` | `/me` and actor work requests |
+| `src/pados/identity/plaintext.py` | The plaintext-credential refusal shared by both configuration files |
+
+No new dependency, no database migration. Unchanged: the scheduler, router, CAS, ScopeVersion, ResultCandidate,
+`/remote/v1` authentication, step-up, and `control_auth`.
+
+**Configuration** (both files are owner-written JSON; both unset by default):
+
+- `PADOS_IDENTITY_OIDC_CONFIG`, schema `pados.identity.oidc.v1`:
+  - Top level: `{schema, post_login_redirect, providers[1..8]}`.
+  - A provider is `{id, kind, display_name?, issuer?, tenant?, allowed_tenant_ids?, client_id, client_secret_env,
+    redirect_uri, scopes?}`.
+  - `kind` is `entra`, `google` or `generic`. `scopes` defaults to `openid profile email` and must include `openid`.
+  - Unknown fields are refused.
+- `PADOS_IDENTITY_ACTORS_CONFIG`, schema `pados.identity.actors.v1`:
+  - Top level: `{schema, actors[]}`.
+  - An actor is `{actor_id, display_name?, issuer, subject, project_roles: {project_id: [role...]}}`.
+  - Roles are the closed set `viewer`, `contributor`, `approver`.
+  - An `actor_id` is unique, and an `(issuer, subject)` pair is bound to at most one actor.
+- **Credential references only.** `client_secret_env` names an environment variable, which must match
+  `PADOS_OIDC_[A-Z0-9_]+` so the configuration cannot point at an unrelated server credential. The value is read at
+  code-exchange time.
+  - A file holding a credential-shaped field (`client_secret`, `*_token`, `password`, `private_key`,
+    `client_assertion` ...) at any depth is refused whole with `IDENTITY_PLAINTEXT_CREDENTIAL_FORBIDDEN`. This
+    follows `src/pados/remote/auth.py`.
+  - Project ids under `project_roles` are data keys and are not inspected as field names.
+- **Presets.**
+  - Entra: the tenant must be a lower-case directory GUID, because tokens carry the GUID issuer and a domain name
+    could never match. `common` and `organizations` are accepted only with `allowed_tenant_ids`: the discovery
+    issuer must then be the `{tenantid}` template, and a token's `iss` must equal
+    `https://login.microsoftonline.com/<tid>/v2.0` for a pinned `tid`. `consumers` is refused.
+  - Google: both documented `iss` forms (`https://accounts.google.com` and `accounts.google.com`) are compared
+    exactly and recorded as one issuer, `https://accounts.google.com`.
+  - Generic: an HTTPS issuer.
+- **`redirect_uri`** must be HTTPS, or HTTP on `127.0.0.1`, `localhost` or `::1`, with exactly the path
+  `/identity/v1/oidc/<id>/callback`. Userinfo, query and fragment are refused.
+- **`post_login_redirect`** (default `/`) is a same-origin path or a URL on an allowlisted origin
+  (`PADOS_IDENTITY_ALLOWED_ORIGINS`). It has no query or fragment.
+- **A configuration that fails to load** is logged by code and reason word. Providers are then hidden, and every
+  OIDC endpoint answers its closed code. The app still starts.
+
+**Flow.**
+
+- `GET /identity/v1/oidc/{id}/start`:
+  1. Checks the flag, the loopback binding, `Origin` and `Sec-Fetch-Site` (a cross-site page cannot start a
+     sign-in), and that the provider is configured.
+  2. Fetches discovery over HTTPS (cached one hour). The discovery `issuer` must equal the expected one exactly,
+     every endpoint must be HTTPS, and an advertised `code_challenge_methods_supported`, `response_types_supported`
+     or `id_token_signing_alg_values_supported` must include `S256`, `code` and `RS256`.
+  3. Creates a 256-bit `state` and a 256-bit pre-auth value. The store keeps SHA-256(state) with the provider id,
+     SHA-256(pre-auth value) and a 10-minute expiry, at most 32 pending (the oldest is dropped). The PKCE verifier
+     (`HMAC(server key, "oidc-pkce:" + state)`, 43 characters) and the nonce (`HMAC(server key, "oidc-nonce:" +
+     state)`) are derived, never stored.
+  4. Answers 302 to the authorization endpoint with `response_type=code`, the exact `redirect_uri`, the scopes,
+     `state`, `nonce` and `code_challenge` (S256). It sets the pre-auth cookie: `pados_oidc_preauth`, or
+     `__Host-pados_oidc_preauth` over HTTPS; HttpOnly, `SameSite=Lax` (the return is a cross-site top-level
+     navigation), `Path=/`, `Max-Age=600`.
+- `GET /identity/v1/oidc/{id}/callback`:
+  1. A repeated query parameter counts as a missing state.
+  2. The state must exist, belong to this provider and be presented with the matching pre-auth cookie (constant-time
+     compare). Only then is it consumed. A state presented by another browser is refused without being consumed, and
+     the browser's pre-auth cookie is left alone, so a forged callback link cannot cancel a sign-in in progress. An
+     expired state is consumed and refused.
+  3. A provider `error` parameter becomes `OIDC_PROVIDER_ERROR`; its text is never read out.
+  4. The code is exchanged (form POST with `client_secret_post`, the derived `code_verifier` and the exact
+     `redirect_uri`). Redirects are not followed, responses are bounded at 1 MiB, and the HTTP client ignores proxy
+     and `.netrc` environment settings (`trust_env=False`). Access and refresh tokens are discarded unread.
+  5. The ID token is validated:
+     - Parse: at most 16 KiB, three non-empty unpadded base64url parts, JSON-object header and payload, `alg`
+       exactly `RS256`. `none`, `HS*`, `ES*` and `PS*` are refused before any key is read. `kid` is required. A
+       header carrying `jwk`, `jku`, `x5u`, `x5c` or `crit` is refused.
+     - Key: from the JWKS cache (one hour). An unknown `kid` triggers exactly one refetch, then a refusal. A JWK is
+       usable only with `kty: RSA`, a `use` of `sig` (if present), an `alg` of `RS256` (if present), a minimally
+       encoded modulus of 2048 to 8192 bits and an odd exponent. Duplicate `kid`s are dropped.
+     - Signature: `pow(s, e, n)`, then a constant-time comparison with the complete EMSA-PKCS1-v1_5 encoding (SHA-256
+       `DigestInfo` DER prefix included). The signature length must equal the modulus length, and `0 < s < n`.
+     - Claims: `iss` exact; `aud` contains the client id; `azp` required when there are several audiences and equal
+       to the client id whenever present; `exp`, `nbf` and `iat` within at most 120 s of skew; `nonce` exact; `sub`
+       present (at most 255 printable characters); for Entra, `tid` consistent with the pinned tenant.
+  6. The identity key `(issuer, subject)` is looked up in the actor directory. Email is never compared. If there is
+     no binding, no session is issued (`SSO_IDENTITY_NOT_BOUND`); the server log records the issuer and subject at
+     info level so the owner can bind it.
+  7. On success, an actor session is issued and the response is 302 to `post_login_redirect` with `?sso=ok`. On any
+     refusal it is 302 with `?sso_error=<CLOSED_CODE>` only.
+  8. Both OIDC responses carry `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+
+**Actor sessions.**
+
+- Built from the phase 1 machinery: a `secrets.token_urlsafe(32)` id stored only as SHA-256, the derived CSRF value,
+  the same absolute and idle lifetimes, the control-token binding (rotating the control token ends actor sessions
+  too) and the same store.
+- They are kept apart **structurally**:
+  - Records live in `actor_sessions` in the store document, never in `sessions`. `IdentityService.resolve`, the only
+    lookup `control_auth` performs, cannot find them.
+  - The cookie is `pados_actor` (`__Host-pados_actor` over HTTPS), which `control_auth` never reads.
+- A record carries `auth_method: "oidc"`, `actor_id`, `provider_id`, `issuer` and `subject`.
+- Limits: 4 live sessions per actor and 64 in total; beyond that the oldest is revoked. A new sign-in revokes the
+  actor session the browser presented (fixation).
+- Every actor request re-checks that the identity is still bound to the same actor and that its provider is still
+  configured. Removing a binding or a provider ends the session's authority immediately.
+- **Store document:** `actor_sessions` and `oidc_states` are additive optional maps, keyed by SHA-256 hex. They are
+  omitted while empty, so a phase 1 document stays byte-identical and phase 1 rollback (delete `sessions.json`) is
+  unchanged.
+
+**API additions** (closed codes, `pados.error.v1`):
+
+| Method and path | Auth | Purpose |
+| --- | --- | --- |
+| `GET /oidc/{provider_id}/start` | none (flag, loopback, Origin) | 302 to the provider; sets the pre-auth cookie |
+| `GET /oidc/{provider_id}/callback` | state + pre-auth cookie | 302 to the Control Center with `?sso=ok` or `?sso_error=CODE` |
+| `GET /me` | actor cookie (bound) | `{actor_id, display_name, auth_method:"oidc", provider_id, issuer, subject, projects:[{project_id, roles}], expires_at, idle_expires_at, csrf_token}` |
+| `POST /projects/{project_id}/work-requests` | actor cookie + CSRF + Origin, `contributor` on the project | `{title, body, idempotency_key (≤48), requested_capability?}` → the control route's response |
+
+- **`GET /session`** keeps its phase 1 meaning: `authenticated` is the device session, the only session the control
+  plane accepts. It now lists `providers` (`[{id, kind, display_name, start_url}]`, empty unless both configuration
+  files loaded) and, when an actor session is presented, `actor: {auth_method:"oidc", actor_id, provider_id, issuer,
+  subject, expires_at, idle_expires_at}`. `actor` is absent otherwise.
+- **`POST /logout`** without a device cookie ends the presented actor session (cookie, CSRF and Origin required).
+- **Work-request creation** delegates to the single creation function that `POST /control/work-requests` also
+  calls (`create_work_request_entry` in `src/pados/api/app.py`). The body forbids `project_id` and `actor_id`. The
+  idempotency key is namespaced as `actor:<actor_id>:<key>`.
+- **What each role grants:**
+  - `contributor`: creating a work request on its project, and nothing else.
+  - `viewer` and `approver`: reported by `/me`; they grant no action in phase 2.
+  - No role reaches `/control/*`, `/memory/*`, `/context/assemble`, device management, pairing codes, approvals or
+    `/remote/v1`. Tests enumerate every `/control/*` route.
+- **New closed codes:**
+  - `OIDC_PROVIDER_NOT_CONFIGURED` (404)
+  - `OIDC_CONFIG_INVALID` (503), `ACTORS_CONFIG_INVALID` (503), `IDENTITY_PLAINTEXT_CREDENTIAL_FORBIDDEN` (503)
+  - `OIDC_STATE_INVALID` (403), `OIDC_TOKEN_INVALID` (403)
+  - `OIDC_PROVIDER_ERROR` (502), `OIDC_PROVIDER_UNAVAILABLE` (503), `OIDC_CLIENT_CREDENTIAL_UNAVAILABLE` (503)
+  - `SSO_IDENTITY_NOT_BOUND` (403), `ACTOR_ROLE_REQUIRED` (403)
+
+**Logs.** OIDC events carry provider ids, actor ids, closed codes and fixed reason words. They never carry a code,
+state, nonce, verifier, ID token, client credential, session id or CSRF value.
+
+- With the identity flag on, `pados serve` also runs uvicorn with `access_log=False`, because uvicorn's access log
+  prints raw query strings (the callback carries the code and state). The app's own `http.request.finished` log
+  records the route template only.
+
+**Web.** No change. The existing Control Center already lists `providers` by label when the list is non-empty and
+ignores the additive `actor` field. A sign-in button and an actor view are follow-ups.
+
 ## 5. Windows Hello and trusted Windows SID (plan only, phase 3)
 
 - Windows Hello in the browser is already a WebAuthn platform authenticator. It can serve as the step-up device
@@ -210,6 +377,11 @@ These record choices the sections above left open, and the one addition (`IDENTI
 
 - `PADOS_IDENTITY_SESSIONS_ENABLED=false` (default). Off means: `/identity/v1` answers `IDENTITY_DISABLED` (except
   `GET /session`, which reports `enabled:false`); cookies are ignored; the token-in-memory UI is unchanged.
-- `PADOS_IDENTITY_OIDC_CONFIG` unset (default) means no SSO.
+- `PADOS_IDENTITY_OIDC_CONFIG` unset (default) means no SSO: `providers` is `[]` and every OIDC endpoint answers
+  `OIDC_PROVIDER_NOT_CONFIGURED`. `PADOS_IDENTITY_ACTORS_CONFIG` unset binds nobody, so every SSO sign-in is
+  refused with `SSO_IDENTITY_NOT_BOUND`. Both require `PADOS_IDENTITY_SESSIONS_ENABLED=true`.
+- **Rollback of phase 2:** unset `PADOS_IDENTITY_OIDC_CONFIG`, which removes the providers and ends the authority of
+  every actor session at its next request, or remove an actor's binding to end that actor's authority. No store or
+  database change is needed.
 - **Rollback:** set the flag to `false` (sessions stop working immediately), or delete `<store>/sessions.json` (all
   sessions revoked). No database migration is involved.

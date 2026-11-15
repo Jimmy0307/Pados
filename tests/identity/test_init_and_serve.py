@@ -37,5 +37,7 @@ def test_serve_disables_proxy_headers_only_with_identity_on(monkeypatch: pytest.
     assert len(started) == 1
     if enabled:
         assert started[0]["proxy_headers"] is False
+        assert started[0]["access_log"] is False  # raw query strings (OIDC code and state) never reach a log
     else:
         assert "proxy_headers" not in started[0]  # unchanged invocation with the flag off
+        assert "access_log" not in started[0]

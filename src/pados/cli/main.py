@@ -863,9 +863,11 @@ def serve() -> None:
     assert_localhost_binding(settings)
     assert_unique_control_token(settings)
     if settings.identity_sessions_enabled:
-        # The session cookie variant follows the request scheme: X-Forwarded-* must never rewrite it.
+        # The session cookie variant follows the request scheme: X-Forwarded-* must never rewrite it. The access
+        # log is off because it prints raw query strings (an OIDC callback carries the code and state); the
+        # app's own request log records the route template only.
         uvicorn.run("pados.api.app:app", host=settings.api_host, port=settings.api_port, log_level="info",
-                    proxy_headers=False)
+                    proxy_headers=False, access_log=False)
         return
     uvicorn.run("pados.api.app:app", host=settings.api_host, port=settings.api_port, log_level="info")
 
