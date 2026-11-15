@@ -4,9 +4,17 @@
 Minting a pairing code needs the control token header (a session cannot mint one). ``/pair`` needs a code and an
 allowlisted ``Origin``. ``GET /session`` is the only route that answers while the feature flag is off. The pairing
 code appears in exactly one response: the mint response.
+
+Phase 2 (design §4) mounts the OIDC routes (``pados.identity.oidc.routes``) and the actor surface
+(``pados.identity.actor_routes``) here. ``GET /session`` keeps its phase 1 meaning (``authenticated`` is the device
+session, the only one the control plane accepts), lists the configured providers, and reports a presented actor
+session separately under ``actor`` (``auth_method: "oidc"``; absent when there is none; its CSRF token comes from
+``GET /me``). ``POST /logout``
+ends a device session, or an actor session when no device cookie is sent.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -15,8 +23,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from pados.config import Settings
 from pados.control import security as control_security
+from pados.identity import actor_http
 from pados.identity import http as identity_http
+from pados.identity.actor_routes import mount_actor_routes
+from pados.identity.actor_sessions import ActorSessions
 from pados.identity.errors import IDENTITY_DISABLED, IDENTITY_STORE_CORRUPT, SESSION_REQUIRED, IdentityError
+from pados.identity.oidc.flow import OidcRuntime
+from pados.identity.oidc.routes import mount_oidc_routes
 from pados.identity.sessions import ActiveSession, IdentityService
 from pados.identity.tokens import display_code
 
@@ -42,8 +55,33 @@ def _session_body(service: IdentityService, active: ActiveSession) -> dict[str, 
             "csrf_token": service.csrf_for(active), "providers": []}
 
 
-def mount_identity(app: FastAPI, settings: Settings, *, service: IdentityService | None = None) -> None:
+def _providers(request: Request) -> list[dict[str, str]]:
+    runtime = actor_http.runtime_for(request)
+    return runtime.public_providers() if runtime is not None else []
+
+
+def _actor_summary(settings: Settings, request: Request, service: IdentityService) -> dict[str, Any] | None:
+    """The actor session presented with this request, still bound; ``None`` when there is none."""
+    if actor_http.presented_actor_session(settings, request) is None:
+        return None
+    try:
+        actor = actor_http.authorize_actor(settings, request, service)
+    except HTTPException as exc:
+        if exc.detail == IDENTITY_STORE_CORRUPT:
+            raise
+        return None
+    record = actor.session.record
+    return {"auth_method": record.auth_method, "actor_id": record.actor_id, "provider_id": record.provider_id,
+            "issuer": record.issuer, "subject": record.subject, "expires_at": record.expires_at.isoformat(),
+            "idle_expires_at": actor.session.idle_expires_at.isoformat()}
+
+
+def mount_identity(app: FastAPI, settings: Settings, *, service: IdentityService | None = None,
+                   oidc: OidcRuntime | None = None,
+                   create_work_request: Callable[[Any], object] | None = None) -> None:
     app.state.pados_identity = service or IdentityService(settings)
+    mount_oidc_routes(app, settings, runtime=oidc)
+    mount_actor_routes(app, settings, create_work_request=create_work_request)
 
     def active_service(request: Request) -> IdentityService:
         found = identity_http.service_for(request)
@@ -96,10 +134,12 @@ def mount_identity(app: FastAPI, settings: Settings, *, service: IdentityService
     @app.get(f"{PREFIX}/session")
     def session(request: Request) -> JSONResponse:
         service = identity_http.service_for(request)
-        anonymous = {"enabled": bool(service and service.enabled), "authenticated": False, "providers": []}
         if service is None or not service.enabled:
-            return identity_http.json_no_store(anonymous)
+            return identity_http.json_no_store({"enabled": False, "authenticated": False, "providers": []})
         identity_http.check_origin(settings, request)
+        actor = _actor_summary(settings, request, service)
+        phase_two: dict[str, Any] = {"providers": _providers(request), **({"actor": actor} if actor else {})}
+        anonymous = {"enabled": True, "authenticated": False, **phase_two}
         if identity_http.presented_session(settings, request) is None:
             return identity_http.json_no_store(anonymous)
         try:
@@ -108,13 +148,19 @@ def mount_identity(app: FastAPI, settings: Settings, *, service: IdentityService
             if exc.detail == IDENTITY_STORE_CORRUPT:
                 raise
             return identity_http.json_no_store(anonymous)
-        return identity_http.json_no_store(_session_body(service, active))
+        return identity_http.json_no_store({**_session_body(service, active), **phase_two})
 
     @app.post(f"{PREFIX}/logout")
     def logout(request: Request) -> JSONResponse:
         service = active_service(request)
         if identity_http.presented_session(settings, request) is None:
-            identity_http.refuse(SESSION_REQUIRED)
+            if actor_http.presented_actor_session(settings, request) is None:
+                identity_http.refuse(SESSION_REQUIRED)
+            actor = actor_http.resolve_actor_session(settings, request, service)
+            call(lambda: ActorSessions(service).logout(actor))
+            ended = identity_http.json_no_store({"status": "ok", "authenticated": False})
+            actor_http.clear_actor_cookie(ended, settings, request)
+            return ended
         active = identity_http.authorize_session(settings, request, service)
         call(lambda: service.logout(active))
         response = identity_http.json_no_store({"status": "ok", "authenticated": False})

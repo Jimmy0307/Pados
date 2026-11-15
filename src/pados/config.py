@@ -143,6 +143,10 @@ class Settings(BaseSettings):
     identity_allowed_origins: str = Field(
         default=IDENTITY_ALLOWED_ORIGINS_DEFAULT, alias="PADOS_IDENTITY_ALLOWED_ORIGINS"
     )
+    # Phase 2 (design §4): OIDC sign-in and PADOS actors. Both unset by default: no provider is offered and every
+    # OIDC endpoint answers OIDC_PROVIDER_NOT_CONFIGURED. The OIDC file names environment variables, never secrets.
+    identity_oidc_config: str = Field(default="", alias="PADOS_IDENTITY_OIDC_CONFIG")
+    identity_actors_config: str = Field(default="", alias="PADOS_IDENTITY_ACTORS_CONFIG")
 
     @field_validator("identity_cookie_secure", mode="before")
     @classmethod
