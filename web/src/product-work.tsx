@@ -266,6 +266,9 @@ function ResultPanel({ auth, onSessionLost, loop, projectId, onCheckAgain, onOpe
     {phase === "waiting_human" && <Blocked message={t("work.blocked.human")} next={t("work.blocked.next")}>
       <button className="control-button" type="button" onClick={onOpenProject}>{t("work.fixDocs")}</button>
       <button className="control-button product-primary" type="button" onClick={onCheckAgain}>{t("work.checkAgain")}</button></Blocked>}
+    {phase === "cancelled" && <div className="product-actions">
+      <button className="control-button" type="button" onClick={onOpenProject}>{t("work.fixDocs")}</button>
+      <button className="control-button" type="button" onClick={onCheckAgain}>{t("work.checkAgain")}</button></div>}
     {(phase === "blocked" || phase === "failed") && <Blocked message={`TaskLoop ${loop.status}`} next={t("work.blocked.next")}>
       <button className="control-button" type="button" onClick={onCheckAgain}>{t("work.checkAgain")}</button></Blocked>}
     {!state && (phase === "completed"

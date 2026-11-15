@@ -150,8 +150,10 @@ function Documents({ auth, onSessionLost, projectId, onSaved }: Access & { proje
   const docs = useLoad(() => listDocuments(auth, projectId), [auth, projectId], onSessionLost);
   const [editing, setEditing] = useState<{ path: string; content: string; sha: string | null } | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
+  const [lastSaved, setLastSaved] = useState<DocumentReceipt | null>(null);
   async function edit(path: string): Promise<void> {
     setLoadError(null);
+    setLastSaved(null);
     try {
       const { document } = await readDocument(auth, projectId, path);
       setEditing({ path: document.path, content: document.content, sha: document.sha256 });
@@ -171,26 +173,25 @@ function Documents({ auth, onSessionLost, projectId, onSaved }: Access & { proje
     {Boolean(loadError) && <Failed error={loadError} />}
     {docs.data && !writable && <Blocked message={t("docs.readOnly")} />}
     {docs.data && writable && <DocumentEditor key={editing ? `${editing.path}:${editing.sha}` : "new"} auth={auth} onSessionLost={onSessionLost} projectId={projectId}
-      initial={editing} onSaved={() => { setEditing(null); docs.reload(); onSaved(); }} />}
+      initial={editing} onSaved={(receipt) => { setLastSaved(receipt); setEditing(null); docs.reload(); onSaved(); }} />}
+    {lastSaved && <Completed message={t("docs.saved", { path: lastSaved.path, sha: lastSaved.sha256.slice(0, 12) })} />}
   </Section>;
 }
 
-function DocumentEditor({ auth, onSessionLost, projectId, initial, onSaved }: Access & { projectId: string; initial: { path: string; content: string; sha: string | null } | null; onSaved: () => void }): ReactElement {
+function DocumentEditor({ auth, onSessionLost, projectId, initial, onSaved }: Access & { projectId: string; initial: { path: string; content: string; sha: string | null } | null; onSaved: (receipt: DocumentReceipt) => void }): ReactElement {
   const t = useT();
   const [path, setPath] = useState(initial?.path || "guide.md");
   const [content, setContent] = useState(initial?.content || STARTER);
   const [key] = useState(() => newKey("web-doc"));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [saved, setSaved] = useState<DocumentReceipt | null>(null);
   async function save(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
       const { document } = await writeDocument(auth, projectId, { path, content, replace: Boolean(initial), expectedSha256: initial?.sha }, key);
-      setSaved(document);
-      onSaved();
+      onSaved(document);
     } catch (failure) {
       setError(failure);
       if (isSessionLost(failure)) onSessionLost?.(failure);
@@ -206,7 +207,6 @@ function DocumentEditor({ auth, onSessionLost, projectId, initial, onSaved }: Ac
       <div><span className="control-muted">{t("docs.preview")}</span><MarkdownPreview source={content} /><small className="control-muted">{t("docs.brokenHint")}</small></div>
     </div>
     <button className="control-button product-primary" type="submit" disabled={busy || !path.trim()}>{busy ? t("state.loading") : t("docs.save")}</button>
-    {saved && <Completed message={t("docs.saved", { path: saved.path, sha: saved.sha256.slice(0, 12) })} />}
     {Boolean(error) && <Failed error={error} />}
   </form>;
 }

@@ -161,7 +161,7 @@ const zhTW: Partial<Record<MessageKey, string>> = {
   "nav.work": "工作需求 → 執行",
   "state.loading": "載入中…",
   "state.disabled": "目前無法使用",
-  "state.blocked": "已暫停，需要處理",
+  "state.blocked": "需要您處理",
   "state.failed": "失敗",
   "state.completed": "已完成",
   "state.next": "下一步",
