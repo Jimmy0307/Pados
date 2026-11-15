@@ -88,7 +88,8 @@ def test_the_allowlist_is_only_get_and_post_of_the_control_center_contract() -> 
                 ("GET", "/control/projects/{project_id}/documents"),
                 ("GET", "/control/projects/{project_id}/documents/content"),
                 ("GET", "/control/projects/{project_id}/work"),
-                ("GET", "/control/jobs/{job_id}/artifacts/{artifact_type}/content")]:
+                ("GET", "/control/jobs/{job_id}/artifacts/{artifact_type}/content"),
+                ("GET", "/control/projects/{project_id}/work-map"), ("GET", "/control/resources")]:
         assert key in SESSION_ALLOWED, key
 
 

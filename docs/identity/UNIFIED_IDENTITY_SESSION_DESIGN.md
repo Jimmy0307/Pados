@@ -199,7 +199,7 @@ with `SESSION_SCOPE_DENIED` (403), so the rule fails closed.
   pairing codes. The actor surface (§4.2), `/remote/v1`, the product-loop and graph-run gates read only their own
   headers or cookies.
 
-Route classification (kept in step with `scopes.py`; 49 `control_auth` routes after the product work loop was integrated, plus the public `/control/health`):
+Route classification (kept in step with `scopes.py`; 51 `control_auth` routes after the product work loop and Work Map were integrated, plus the public `/control/health`):
 
 | Method | Route template | Control token | Device session | Rationale |
 | --- | --- | --- | --- | --- |
@@ -234,6 +234,8 @@ Route classification (kept in step with `scopes.py`; 49 `control_auth` routes af
 | POST | `/control/projects/{project_id}/documents` | allowed | allowed | Product work loop: `.md` only, ≤ 256 KiB, inside the project root, no silent overwrite, audited; CSRF + Origin |
 | GET | `/control/projects/{project_id}/documents/content` | allowed | allowed | Product work loop read (one Markdown document) |
 | GET | `/control/projects/{project_id}/work` | allowed | allowed | Product work loop read (projection only) |
+| GET | `/control/projects/{project_id}/work-map` | allowed | allowed | Work Map read (projection only) |
+| GET | `/control/resources` | allowed | allowed | Resources read: measured or UNKNOWN metrics and a cleanup preview; it deletes nothing |
 | GET | `/control/jobs/{job_id}/artifacts/{artifact_type}/content` | allowed | allowed | Evidence read: bounded text, only while its SHA-256 matches the receipt |
 | GET | `/control/projects/{project_id}` | allowed | allowed | Control Center read |
 | GET | `/control/projects/{project_id}/activity` | allowed | allowed | Control Center read |

@@ -49,6 +49,8 @@ _SESSION_READS: Final[tuple[str, ...]] = (
     "/control/projects/{project_id}/documents/content",
     "/control/projects/{project_id}/messages",
     "/control/projects/{project_id}/work",  # projection only
+    "/control/projects/{project_id}/work-map",  # projection only (Work Map)
+    "/control/resources",  # read-only measured/UNKNOWN metrics and a cleanup preview (no deletion)
     "/control/sync/events",
     "/control/task-goals/{goal_id}",
     "/control/task-plans/{plan_id}",
