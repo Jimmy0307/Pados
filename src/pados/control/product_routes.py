@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from pados.config import artifact_root
 from pados.control import project_documents as documents
-from pados.control import product_projects, work_projection
+from pados.control import product_projects, resource_summary, work_projection
 from pados.control import service as control_service
 from pados.control.product_errors import ProductControlError, require_uuid
 from pados.control.project_setup import ensure_local_proof_scope
@@ -182,6 +182,30 @@ def register_product_control_routes(app: FastAPI, settings: Any, *, control_auth
                     "step_up": work_projection.step_up_readiness(settings, checked)}
 
         return run(_work)
+
+    # PROJECTION ONLY (工作心智圖 / Work Map): the project's work projection plus its iterations, jobs and artifact
+    # receipts, read in one transaction. Never a second store and never an action: creating work from a node goes
+    # through POST /control/work-requests and the approval routes, exactly as the work-request page does.
+    # SESSION SCOPES: add to src/pados/identity/scopes.py (allowed for sessions) when integrated.
+    @app.get("/control/projects/{project_id}/work-map")
+    def control_project_work_map(project_id: str, _: ControlAuth) -> object:
+        def _map() -> dict[str, Any]:
+            checked = require_uuid(project_id)
+            with session_scope(settings) as session:
+                project = product_projects.project_view(session, checked)
+                work = work_projection.project_work(session, checked)
+                execution = work_projection.project_execution(session, checked)
+            return {"status": "ok", "project": project, **work, "projection": "pados.control.work-map.v1",
+                    "execution": execution, "step_up": work_projection.step_up_readiness(settings, checked)}
+
+        return run(_map)
+
+    # PROJECTION ONLY (資源與儲存 / Resources): measurements with source, unit, time and measured/UNKNOWN, the storage
+    # budget and a cleanup plan PREVIEW (never executed; evidence, decisions, audit and unique copies are never
+    # candidates). SESSION SCOPES: add to src/pados/identity/scopes.py (allowed for sessions) when integrated.
+    @app.get("/control/resources")
+    def control_resources(_: ControlAuth) -> object:
+        return run(lambda: {"status": "ok", **resource_summary.resources_summary(settings, session_scope)})
 
     # PROJECTION ONLY. SESSION SCOPES: add to src/pados/identity/scopes.py (allowed for sessions) when integrated.
     @app.get("/control/jobs/{job_id}/artifacts/{artifact_type}/content")

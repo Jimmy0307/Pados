@@ -261,3 +261,46 @@ def test_artifact_content_route(world: dict[str, Any], monkeypatch: pytest.Monke
     assert client.get(f"/control/jobs/{JOB}/artifacts/stderr/content").status_code == 403
     assert client.get("/control/jobs/x/artifacts/stderr/content", headers=TOKEN_HEADERS).status_code == 422
     assert seen == [(JOB, "stderr"), (JOB, "handoff_json")]
+
+
+def test_work_map_projection_joins_work_and_execution_read_only(world: dict[str, Any],
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    from pados.control import product_projects, work_projection
+
+    monkeypatch.setattr(product_projects, "project_view", lambda _s, pid: {"id": pid, "name": "Demo"})
+    monkeypatch.setattr(work_projection, "project_work", lambda _s, pid: {
+        "projection": "pados.control.project-work.v1", "authority": "PROJECTION_ONLY", "loops": [], "goals": []})
+    monkeypatch.setattr(work_projection, "project_execution", lambda _s, pid: {
+        "iterations": [{"id": "i1", "job_id": JOB}], "jobs": [{"id": JOB, "status": "SUCCEEDED"}],
+        "artifacts": [{"job_id": JOB, "artifact_type": "stderr", "sha256": "a" * 64}], "truncated": False})
+    client, _ = _session_client(world["harness"])
+    body = client.get(f"/control/projects/{PROJECT}/work-map").json()
+    assert body["projection"] == "pados.control.work-map.v1" and body["authority"] == "PROJECTION_ONLY"
+    assert body["execution"]["jobs"][0]["status"] == "SUCCEEDED" and body["project"]["name"] == "Demo"
+    assert body["step_up"]["remote_console"] == "NOT_CONFIGURED"
+    assert world["session"].statements == []  # the stand-ins answered: no statement reached the session
+    plain = world["harness"].client()
+    assert plain.get(f"/control/projects/{PROJECT}/work-map").status_code == 403
+    assert plain.get("/control/projects/not-a-uuid/work-map", headers=TOKEN_HEADERS).status_code == 422
+
+
+def test_resources_summary_route_is_read_only_and_needs_a_credential(world: dict[str, Any],
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    from pados.control import resource_summary
+
+    calls: list[object] = []
+
+    def summary(settings: object, scope: object) -> dict[str, Any]:
+        calls.append(settings)
+        return {"schema": "pados.control.resources.v1", "authority": "PROJECTION_ONLY", "metrics": [],
+                "cleanup_plan": {"deletes": False, "execute": {"available": False}}}
+
+    monkeypatch.setattr(resource_summary, "resources_summary", summary)
+    client, _ = _session_client(world["harness"])
+    body = client.get("/control/resources").json()
+    assert body["status"] == "ok" and body["authority"] == "PROJECTION_ONLY"
+    assert body["cleanup_plan"]["execute"]["available"] is False
+    token = world["harness"].client().get("/control/resources", headers=TOKEN_HEADERS)
+    assert token.status_code == 200
+    assert world["harness"].client().get("/control/resources").status_code == 403
+    assert len(calls) == 2
