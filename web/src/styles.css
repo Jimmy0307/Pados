@@ -138,3 +138,13 @@ code { color: #8de0d5; font-size: 11px; }
 .product-back { border: 0; margin: 0 0 8px; padding: 6px 0; }.control-locale { margin-top: 0; }
 @media (max-width: 900px) { .product-editor-panes { grid-template-columns: 1fr; } }
 @media (max-width: 600px) { .control-main { padding: 18px 14px 40px; }.product-actions .control-button { flex: 1 1 140px; }.control-input { width: 100%; }.control-form textarea { width: 100%; } }
+
+/* AI 模型與連線 (Providers): two separate status levels, reasons with expandable codes, the edit form. */
+.provider-rule { border-left: 4px solid #b7791f; }
+.provider-levels { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 8px 0; }
+.provider-levels > div { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.provider-reason { display: inline-flex; flex-direction: column; gap: 2px; }
+.provider-reason details summary { cursor: pointer; font-size: 0.85em; }
+.provider-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 16px; margin: 12px 0; }
+.provider-form label { display: flex; flex-direction: column; gap: 4px; }
+.provider-checks { margin-top: 8px; }

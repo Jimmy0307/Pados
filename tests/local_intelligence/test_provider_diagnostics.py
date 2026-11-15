@@ -161,7 +161,7 @@ def test_owner_setup_can_only_narrow_the_consumer_binding(env: Env) -> None:
 
 def test_setup_store_refuses_secrets_and_stale_revisions(tmp_path: Path) -> None:
     store = ProvidersSetupStore(tmp_path / "providers.json")
-    with pytest.raises(SetupError, match="PROVIDER_SETTINGS_CONTAIN_SECRET"):
+    with pytest.raises(SetupError, match="PROVIDER_SETTINGS_CONTAIN_KEY_VALUE"):
         parse_settings({"provider_id": "x", "kind": "ollama", "endpoint": "http://127.0.0.1:1",
                         "display_name": "sk-" + "a" * 20})
     with pytest.raises(SetupError, match="PROVIDER_ENDPOINT_MUST_BE_PRIVATE"):

@@ -100,7 +100,7 @@ class ProviderSettings(BaseModel):
         if self.contract_path is not None:
             raise ValueError("PROVIDER_CONTRACT_PATH_ONLY_FOR_GATEWAY")
         if self.endpoint is None or private_http_url(self.endpoint) is None:
-            raise ValueError("PROVIDER_ENDPOINT_MUST_BE_PRIVATE_WITHOUT_CREDENTIALS")
+            raise ValueError("PROVIDER_ENDPOINT_MUST_BE_PRIVATE")
         return self
 
     @property
@@ -151,7 +151,7 @@ def _closed_code(exc: ValidationError) -> str:
 
 def parse_settings(document: dict[str, Any]) -> ProviderSettings:
     if any(looks_like_secret(text) for text in _strings(document)):
-        raise SetupError("PROVIDER_SETTINGS_CONTAIN_SECRET")
+        raise SetupError("PROVIDER_SETTINGS_CONTAIN_KEY_VALUE")
     try:
         return ProviderSettings.model_validate(document)
     except ValidationError as exc:

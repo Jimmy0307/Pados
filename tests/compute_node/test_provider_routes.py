@@ -101,7 +101,7 @@ def test_setup_refuses_key_values_and_invalid_endpoints(world: Any) -> None:
     client, _, contract, _ = world
     leaked = _gateway_body(contract, 0, display_name="sk-" + "z" * 24)
     refused = client.put("/control/providers/sim-gw", headers=HEADERS, json=leaked)
-    assert refused.status_code == 422 and "PROVIDER_SETTINGS_CONTAIN_SECRET" in refused.text
+    assert refused.status_code == 422 and "PROVIDER_SETTINGS_CONTAIN_KEY_VALUE" in refused.text
     public = {"expected_revision": 0, "kind": "openai_compatible", "endpoint": "https://api.example.invalid"}
     assert "PROVIDER_ENDPOINT_MUST_BE_PRIVATE" in client.put("/control/providers/x", headers=HEADERS, json=public).text
     unknown = client.post("/control/providers/nope/diagnostics", headers=HEADERS, json={})
