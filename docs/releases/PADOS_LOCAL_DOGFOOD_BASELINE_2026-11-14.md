@@ -3,6 +3,9 @@
 This is the release baseline after the PR #20 → #25 stack landed on `main` atomically through PR #26, plus the
 follow-up security fixes. It records what was decided, by whom, what was verified, and what remains open.
 
+The full engineering report (timeline, inventory, evidence, performance, reuse) is
+[`PADOS_FINAL_ENGINEERING_REPORT_2026-11.md`](PADOS_FINAL_ENGINEERING_REPORT_2026-11.md).
+
 **Scope:** local, single-user, supervised dogfood with synthetic or non-sensitive data, loopback only.
 **Production: NOT_READY.** Nothing here is a production-readiness claim.
 

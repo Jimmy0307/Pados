@@ -13,6 +13,7 @@
 - PR #32: pypdf 6.21.4; untrusted PDFs parsed in a bounded isolated worker (P2-11).
 - PR #33: OS-enforced isolation for the opt-in model worker (Windows Job Object; Linux RLIMIT_AS and seccomp). Still disabled by default.
 - Release baseline, residual register and owner decisions: `docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md`.
+- Final engineering report: `docs/releases/PADOS_FINAL_ENGINEERING_REPORT_2026-11.md`.
 
 - Document Intelligence packs (PR #24, stacked on #22). Pinned local embedding (bge-small-en-v1.5) and
   cross-encoder (ms-marco-MiniLM-L-6-v2) engines via the optional `document-intelligence` extra. Governed
