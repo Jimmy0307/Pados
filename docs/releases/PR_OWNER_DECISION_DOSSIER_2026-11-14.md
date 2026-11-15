@@ -1,5 +1,7 @@
 # Owner decision dossier: PR #20 → #21 → #22 → #24 → #25 (2026-11-14)
 
+> **Outcome (2026-11-14, later):** owner authorization and risk acceptance recorded on PR #26; merged as `1fd5608`; human code review not performed. See `docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md`.
+
 This dossier lists what each PR needs before it can merge, read from GitHub and machine evidence on 2026-11-14.
 It decides nothing: merging requires owner review and repository approval. Author self-review is not an
 independent approval.

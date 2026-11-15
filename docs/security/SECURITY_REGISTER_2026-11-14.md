@@ -44,6 +44,11 @@ item), and N-1 (`src/pados/control/service.py`, `src/pados/operations/service.py
 | #23 | pypdf range `<7` to `<8` | Out of scope here (P2-11). |
 | #3 to #7, #9 to #14 | GitHub Actions, react, jsdom, typescript 7, @vitejs/plugin-react 6, mypy and structlog ranges | Not security fixes for the alerts above. No vitest 4 Dependabot PR is open. |
 
+## Status after merges (2026-11-14, later)
+
+- Merged: #27 (N-1), #28 (vite, source-map-js), #29 (`.env` and control token), #30 (certifi, Mako), #32 (pypdf 6.21.4 and the isolated PDF worker, closing the 14 pypdf alerts and P2-11).
+- Still open by decision: DB-2/3/4/5/12 (vitest 4 major), CodeQL dismissals, GAP-1.
+
 ## Owner decisions needed
 
 1. Whether to upgrade vitest from 3.2.x to 4.1.12 or later, a major upgrade, to close DB-2, DB-3, DB-4, DB-5 and

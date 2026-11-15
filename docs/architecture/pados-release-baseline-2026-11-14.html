@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PADOS Release Baseline</title>
+<!-- Standalone, offline: inline CSS only; no script, font or network request. Source of every value:
+     docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md (GitHub state and machine evidence bound to commits). -->
+<style>
+  :root { --bg:#f7f8f6; --panel:#ffffff; --fg:#1c2421; --muted:#5d6b66; --line:#d9dfdc; --accent:#2f6f5e;
+          --ok:#1f7a4d; --warn:#9a6a00; --bad:#b3261e; --na:#6b6f8a; color-scheme: light; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#121615; --panel:#1b2120; --fg:#e4ebe8;
+          --muted:#9db0a9; --line:#2e3836; --accent:#7cc4ae; --ok:#5fd39a; --warn:#e3b341; --bad:#ff8a80; --na:#a9acd0;
+          color-scheme: dark; } }
+  :root[data-theme="dark"] { --bg:#121615; --panel:#1b2120; --fg:#e4ebe8; --muted:#9db0a9; --line:#2e3836;
+          --accent:#7cc4ae; --ok:#5fd39a; --warn:#e3b341; --bad:#ff8a80; --na:#a9acd0; color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         padding: 24px 16px; }
+  main { max-width: 1120px; margin: 0 auto; display:grid; gap:20px; }
+  h1 { font-size: 1.7rem; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: 1.1rem; margin: 0 0 10px; }
+  p { margin: 0 0 8px; max-width: 75ch; }
+  .muted { color: var(--muted); font-size: 0.86rem; }
+  .card { background: var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; min-width:0; }
+  .grid { display:grid; gap:20px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr)); }
+  .scroll { overflow-x:auto; }
+  table { border-collapse: collapse; width:100%; font-size:0.86rem; font-variant-numeric: tabular-nums; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color: var(--muted); font-weight:600; white-space:nowrap; }
+  code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size:0.84em; overflow-wrap:anywhere; }
+  .pill { display:inline-block; border:1px solid currentColor; border-radius:999px; padding:0 8px; font-size:0.78rem; white-space:nowrap; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .na { color: var(--na); }
+  .kpis { display:grid; gap:12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); }
+  .kpi b { display:block; font-size:1.3rem; }
+  ul { margin: 0; padding-left: 1.2em; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>PADOS Release Baseline</h1>
+    <p>2026-11-14. The PR #20–#25 stack landed on <code>main</code> through PR #26 as merge commit <code>1fd5608</code> (tree identical to the validated RC <code>202df5c</code>), followed by focused security PRs. <code>main</code> is now <code>7043c63</code>.</p>
+    <p>Scope: <span class="pill ok">local-supervised dogfood</span> &nbsp; Production: <span class="pill bad">NOT_READY</span></p>
+    <p class="muted">Owner authorization and risk acceptance are recorded on PR #26. Human code review of the cumulative 195-file diff was <strong>not performed</strong>; reviews were independent agent reviews. Synthetic results are marked as synthetic.</p>
+  </header>
+
+  <section class="kpis" aria-label="Headline facts">
+    <div class="card kpi"><span class="muted">VMware Linux @ 1fd5608</span><b class="ok">19 / 19 + E2E</b><span class="muted">offline recipe, unmodified chain</span></div>
+    <div class="card kpi"><span class="muted">Windows gates @ 1fd5608</span><b class="ok">18 / 18 + E2E</b><span class="muted">PostgreSQL, Pester, Playwright PASS</span></div>
+    <div class="card kpi"><span class="muted">Windows full suite</span><b class="warn">163 failures</b><span class="muted">baseline-identical by test id; not PASS</span></div>
+    <div class="card kpi"><span class="muted">Dependabot alerts on main</span><b class="warn">19 open</b><span class="muted">was 27; 14 pypdf alerts fixed on main await rescan; 5 need vitest 4 (owner)</span></div>
+  </section>
+
+  <section class="card">
+    <h2>Post-merge evidence (bound to 1fd5608)</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Lane</th><th>Result</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td>GitHub CI (push)</td><td><span class="pill ok">PASS</span></td><td>every executed check</td></tr>
+        <tr><td>rc-ci (packaging, PostgreSQL, manifest)</td><td><span class="pill ok">PASS</span></td><td>dispatched, read-only</td></tr>
+        <tr><td>Windows 18 gates / E2E / PG / Pester / Playwright</td><td><span class="pill ok">PASS</span></td><td><code>windows_validate.py --profile full</code></td></tr>
+        <tr><td>Windows full pytest</td><td><span class="pill warn">FAIL, baseline-identical</span></td><td>4924 tests, 163 failures, 0 new (R19-3)</td></tr>
+        <tr><td>VMware 19 gates / E2E / full pytest</td><td><span class="pill ok">PASS</span></td><td>Ubuntu 24.04, offline</td></tr>
+        <tr><td>Lane gate: local-supervised-dogfood</td><td><span class="pill warn">NOT_READY (tool)</span></td><td>only <code>github-ci</code>: PR-only <code>dependency review</code> is skipped on push (OWNER-GATE-1). READY at the tree-identical RC.</td></tr>
+        <tr><td>Lane gate: production</td><td><span class="pill bad">NOT_READY</span></td><td>model and optional runtime lanes NOT_VALIDATED</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section class="card">
+    <h2>Follow-up pull requests</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>PR</th><th>Change</th><th>Status</th></tr></thead>
+      <tbody><tr><td>#27</td><td>N-1: step-up guard resolves on the search_path</td><td><span class="pill ok">merged</span> <code>2515c8a</code></td></tr><tr><td>#30</td><td>certifi 2026.10.23 (critical), Mako 1.4.3</td><td><span class="pill ok">merged</span> <code>282d343</code></td></tr><tr><td>#28</td><td>vite 7.3.7, source-map-js 1.2.2 (dev)</td><td><span class="pill ok">merged</span> <code>0f8d00b</code></td></tr><tr><td>#29</td><td>.env and control token owner-only from creation</td><td><span class="pill ok">merged</span> <code>f397135</code></td></tr><tr><td>#32</td><td>P2-11: pypdf 6.21.4, isolated PDF worker</td><td><span class="pill ok">merged</span> <code>95dcaa0</code></td></tr><tr><td>#31</td><td>Security register</td><td><span class="pill ok">merged</span> <code>f6db272</code></td></tr><tr><td>#33</td><td>Model worker OS isolation (opt-in)</td><td><span class="pill ok">merged</span> <code>7043c63</code></td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <h2>Capability status</h2>
+      <ul>
+        <li><span class="pill ok">Real runtime</span> authority layer, governed approval + WebAuthn step-up + single CAS, local dogfood E2E, dense retrieval and cross-encoder (pinned models), BM25 / RRF / evidence pack</li>
+        <li><span class="pill na">Synthetic</span> software WebAuthn authenticator, deterministic capability execution, deterministic problem-solving drafter, in-memory enterprise retrieval</li>
+        <li><span class="pill warn">Experimental, off</span> DI-1 model worker with OS isolation, OCR raster path, rerank ACTIVE templates</li>
+        <li><span class="pill na">Disabled</span> reranking (SHADOW), product loop</li>
+        <li><span class="pill bad">Blocked / NOT_VALIDATED</span> governed acceptance of model output (R19-6), REA / OpenMAIC / AI-Scientist-v3, OCR pack on Windows (R19-3), Windows worker network isolation</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h2>Owner-only decisions</h2>
+      <ul>
+        <li><b>OWNER-GATE-1</b> PR-only required checks on push commits</li>
+        <li><b>OWNER-WIN-JOB</b> Windows kernel caps for the PDF/OCR workers</li>
+        <li><b>OWNER-NET</b> worker network isolation on Windows (AppContainer, firewall rule, or accept)</li>
+        <li><b>OWNER-DI</b> DI-1, DI-4, embedder pin RAM, any default-on proposal</li>
+        <li><b>OWNER-DEP</b> vitest 4 major; CodeQL dismissals; Dependabot coverage of the runtime lock</li>
+        <li><b>OWNER-VM</b> VM internet and Tesseract (sudo)</li>
+        <li><b>OWNER-PUBLIC</b> legal review before public release</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer class="muted">No new scheduler, router, CAS or authority path. Company assets not copied. Rollback: <code>git revert -m 1 &lt;merge&gt;</code> through a PR.</footer>
+</main>
+</body>
+</html>

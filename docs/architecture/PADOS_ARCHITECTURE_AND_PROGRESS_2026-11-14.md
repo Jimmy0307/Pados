@@ -6,6 +6,8 @@ implemented. Dashed nodes or edges, labelled *proposed* or *pending*, do not exi
 
 ## 1. Where the code is
 
+> **Superseded later on 2026-11-14:** the stack below landed on `main` through PR #26 (`1fd5608`). Current state: `docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md` and `docs/architecture/pados-release-baseline-2026-11-14.html`.
+
 | Line | Head | Base | State | Readiness (lane gate, exact head) |
 | --- | --- | --- | --- | --- |
 | `main` | `69716ed` (PR #19 merge) | — | canonical | RC2 local-dogfood tag line |

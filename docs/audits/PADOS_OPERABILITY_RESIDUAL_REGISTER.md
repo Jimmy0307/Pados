@@ -276,5 +276,9 @@ The rows above stay open: these items are implemented in a branch, not accepted.
   buffer on every read, and the deterministic stages are now about 14× faster on Windows. This touches Core
   (`capability/artifacts.py`) with unchanged semantics, so it needs owner review.
 
+## Release baseline update (2026-11-14)
+
+PRs #20 to #25 landed on `main` through PR #26 (`1fd5608`). Closed since, each with a regression test that failed before the fix: N-1 (PR #27), P2-11 in-process PDF parsing (PR #32), `.env`/control-token write-through (PR #29). The consolidated open register and owner decisions are in `docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md` §6–§7; the dependency and code-scanning register is `docs/security/SECURITY_REGISTER_2026-11-14.md`.
+
 Rules: a residual leaves this table only with a commit that fixes it, a regression test that failed before the fix, and
 validation evidence. Merging a PR closes nothing on its own.

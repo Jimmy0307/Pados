@@ -112,6 +112,8 @@ An optional provider being unavailable does not block the platform. REA (capabil
 
 ## Implementation State
 
+Release baseline 2026-11-14: see `docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md` for what is implemented, validated synthetic, validated with a real runtime, experimental, disabled and blocked, with the diagrams in `docs/architecture/public/release-baseline-2026-11-14.mmd` and `capability-status-2026-11-14.mmd`. No authority path changed in that round.
+
 The P7 Authority Baseline is closed. The canonical baseline is `main@e550141` (PR #16, post-merge authorization and runtime hardening; PR #8 delivered the P7 capability discovery and learning loop). The authority layer is frozen: `TaskEnvelope`, the scheduler, `CapabilityRegistry`, `CapabilityExecutor`, the router, policy, authorization and approval, execution receipts, verification, `ResultCandidate`, CAS semantic acceptance, audit, state and memory, and the P7 session-binding authority. Core is not expanded further.
 
 The current phase is Capability Expansion: capabilities become governed, replaceable, measurable extensions around the frozen authority layer. The first deliverables are Capability Pack V1 and the Structured Problem Solving reference pack (8D as the first profile). AI Scientist (draft PR #17) follows as a Pack V1 consumer for `RESEARCH_CAMPAIGN`; its real runtime is not yet validated. The REA and OpenMAIC adapters are contract- and failure-tested against fakes in CI; neither has been validated against a live runtime (real-runtime gates: `NOT_VALIDATED`).

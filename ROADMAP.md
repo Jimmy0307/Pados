@@ -27,6 +27,10 @@ degrades only the capability that depends on it, fail-closed; it does not block 
 
 Close cross-platform validation for task protocols, residual completion, Work Graph projection, existing-scheduler integration, authenticated mobile intents, recommendation governance, and the deterministic end-to-end loop. Keep the accepted Core, policy, CAS, audit, memory, and Capability Fabric foundations frozen.
 
+## Release Baseline 2026-11-14
+
+`main` carries the PR #20 to #25 stack (PR #26) and the follow-up security fixes; local-supervised dogfood evidence passes on Windows 11 and VMware Linux and production is NOT_READY (docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md). Next, in order: owner decisions OWNER-GATE-1, OWNER-WIN-JOB, OWNER-NET and OWNER-DI; the tracked P2/P3 residuals; then any default-on proposal for the document-intelligence worker.
+
 ## Controlled Dogfood
 
 Begin only after critical and high findings are closed, the task-to-acceptance path is validated on Windows and VMware Linux, mobile remote intent behavior is verified, and repository/publication boundaries are reviewed.
@@ -64,8 +68,7 @@ Large models and optional OCR/Vision engines are runtime expansion work; they ar
 
 ## Engineering Operability
 
-The operability remediation (OP-001 to OP-010) is on `feat/operability-remediation-20261101`, in review and not
-merged; OP-004 (deadline propagation) is partial, with its limits listed. Status, remaining work and unblock conditions for each item and for the PR #19 residuals are in
+The operability remediation (OP-001 to OP-010) is on `main` (landed through PR #26 on 2026-11-14); OP-004 (deadline propagation) is partial, with its limits listed. Status, remaining work and unblock conditions for each item and for the PR #19 residuals are in
 `docs/audits/PADOS_OPERABILITY_RESIDUAL_REGISTER.md`. Infrastructure-dependent follow-ups:
 
 - Metrics exporter, dashboards and alerts (OP-008 names and labels are fixed first).
