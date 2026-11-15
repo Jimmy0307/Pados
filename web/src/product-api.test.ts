@@ -40,7 +40,7 @@ describe("product API client", () => {
     expect(body(sent[0])).toEqual({ name: "示範", description: "說明", idempotency_key: "web-project-1" });
     expect(header(sent[0].init, CSRF_HEADER)).toBe("csrf-1");
     expect(header(sent[0].init, CONTROL_TOKEN_HEADER)).toBeUndefined();
-    expect(sent[0].init.credentials).toBe("same-origin");
+    expect(sent[0].init).toMatchObject({ credentials: "same-origin" });
   });
 
   it("writes a document; a replace carries the SHA-256 it read", async () => {
