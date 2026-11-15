@@ -4,8 +4,10 @@ Canonical `main`: **`7043c63dae4796c0c62cfff2d94ec9f20cdc26fc`**, the merge of P
 Release baseline: [`PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md`](PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md).
 Dashboard: [`docs/architecture/pados-release-baseline-2026-11-14.html`](../architecture/pados-release-baseline-2026-11-14.html).
 
-**Verdict: local-supervised dogfood evidence passes on Windows 11 and VMware Linux, with explicit residuals.
-Production is NOT_READY.**
+**Summary: on `main`, every lane required for local-supervised dogfood passes on Windows 11, VMware Linux and
+GitHub except `github-ci`, whose only non-success is the pull-request-only `dependency review` job skipped on
+push. The runtime lane-gate tool therefore reports NOT_READY for local-supervised dogfood (OWNER-GATE-1).
+Production is NOT_READY. Engineering closure verdict: PASS_WITH_EXPLICIT_RESIDUALS (§8).**
 
 This report separates three evidence classes:
 
@@ -49,13 +51,15 @@ No completion percentage or cost saving is claimed, because neither has a measur
 | 2026-11-14 13:37 | #33 | OS-enforced isolation for the opt-in model worker | +1,285/−57, 8 | **`7043c63`** |
 | 2026-11-15 | #34 | Documentation closure (this report) | docs only | see PR |
 
-The 109 RC commits fall on 8 calendar days (2026-11-01, -02, -03, -04, -07, -09, -11, -14).
+The 109 RC commits fall on 8 calendar days in UTC (2026-11-01, -03, -04, -07, -09, -10, -11, -14).
 
 ## 3. Current architecture
 
-The authority layer is unchanged and singular: one `TaskEnvelope` intake, one scheduler (TaskLoop), one capability
+The authority layer remains singular, with no new authority path: one `TaskEnvelope` intake, one scheduler (TaskLoop), one capability
 router, one `CapabilityExecutor`, one CAS (StateProof). Packs add capabilities through manifests. Their outputs are
-candidates and never authority.
+candidates and never authority. Two changes touched it in this round: `decide_approval` was tightened (the control
+token can no longer decide a ResultCandidate approval, and the guard is schema-independent since #27), and DI-9
+bounded artifact reads in a Core file (owner-accepted, semantics unchanged).
 
 ```mermaid
 flowchart LR
@@ -96,11 +100,12 @@ Evidence classes:
 | Governance | WORK_ROUTE approval lifecycle (TTL, revoke, single use) | R | E2E negatives pass |
 | Governance | WebAuthn step-up for result acceptance; control token cannot decide it | R + S | Real P-256 software authenticator, not a hardware key; holds in non-default schemas (#27) |
 | Core capabilities | `READ_REPOSITORY`, `SEARCH_CONTEXT`, `SUMMARIZE`, `CLASSIFY_REQUEST`, `GENERATE_DOCUMENT_DRAFT`, `MODIFY_MARKDOWN`, `MODIFY_CODE`, `RUN_STATIC_ANALYSIS`, `RUN_TESTS`, `RUN_MIGRATIONS`, `BUILD_RELEASE`, `AUDIT_RELEASE`, `CREATE_ARTIFACT` | R for the deterministic probe path (`RUN_STATIC_ANALYSIS` / `markdown_reference_check` in the E2E); others contract-tested | Model-backed variants need a configured provider (none by default) |
-| Retrieval pack | `PASSAGE_RETRIEVAL` (BM25), `PASSAGE_RETRIEVAL_EMBEDDING`, `PASSAGE_RERANK` | S | Real engines on Windows and Linux, synthetic corpus only |
+| Retrieval pack | `PASSAGE_RETRIEVAL` (BM25) | S | Synthetic corpus |
+| Retrieval pack | `PASSAGE_RETRIEVAL_EMBEDDING`, `PASSAGE_RERANK` | B (contract only) | No engine installed: `available()` is False and execution refuses with `ENGINE_NOT_INSTALLED`; the real pinned engines are in the DI pack |
 | Document intelligence | `PASSAGE_RETRIEVAL_DENSE`, `PASSAGE_RANK_FUSION`, `PASSAGE_EVIDENCE_PACK` | X | EXPERIMENTAL, opt-in (the `document-intelligence` extra). Pinned models live on both platforms on a synthetic corpus only; not exercised through PostgreSQL |
 | Document intelligence | `PASSAGE_RERANK_CROSS_ENCODER` | D (SHADOW default) | ACTIVE only through a separate operator-chosen template (DI-7) |
 | Document intelligence | DI-1 subprocess model worker with OS isolation | X | #33; never enabled by `src/` or `scripts/` |
-| OCR pack | text layer (`DOCUMENT_OCR` via pypdf), structure, layout, tables, figures | R on Linux (isolated); B on Windows (fails closed, R19-3) | — |
+| OCR pack | text layer (`DOCUMENT_OCR` via pypdf), structure, layout, tables, figures | S on Linux (isolated worker, synthetic PDFs); B on Windows (fails closed, R19-3) | — |
 | OCR pack | Raster path (pypdfium2 + Tesseract) | X | Live only in a Docker image on the VM (earlier round) |
 | Corpus / URL ingest / enterprise extraction | Untrusted PDF parsing | S | Isolated bounded worker (#32): real worker processes on Windows and Linux CI, synthetic hostile PDFs; no kernel memory cap on Windows |
 | Problem solving pack | `STRUCTURED_PROBLEM_SOLVING` (8D profile), `ROOT_CAUSE` | S | Deterministic drafter only; model claim provider NOT_VALIDATED |
@@ -165,9 +170,9 @@ had. Merges needed updates against `main` because branch protection is strict.
 | --- | --- | --- |
 | #27 | rc-ci at head; local PostgreSQL gate with all 6 suites (D1 42 passed, 0 skipped) | none material (one P3 applied) |
 | #28 | rc-ci at an earlier head | none |
-| #29 | — | review P2 (control token written through an existing file) fixed; one public-export CI failure fixed |
+| #29 | — | review P2 (control token written through an existing file) fixed; two pr-ci failures on the public-export `secret_like` rule fixed |
 | #30 | rc-ci (hashed wheel locks installed) | none |
-| #32 | rc-ci at the final head | review P2-A (transient failures recorded as malformed) and P2-B (120 s slot wait) fixed |
+| #32 | rc-ci at the final head | review P2-B (120 s slot wait) fixed; P2-A (transient failures recorded as malformed) **only partly fixed**: see CORPUS-RETRY in §7; one pr-ci test failure (assertion scope) fixed |
 | #33 | VM run with real pinned models (142 passed) | review P2-1 (kill after reap) fixed |
 
 ### 6.4 Runtime lane gate (tool verdict, not reinterpreted)
@@ -194,6 +199,7 @@ changed. The decision is OWNER-GATE-1.
 | tinypool, vitest, @vitest/mocker (dev only) | — | Accepted residual until the vitest 4 major upgrade (owner decision) |
 | CodeQL #1, #2, #3, #4, #7 | Triaged false positives (security register) | Owner dismisses in GitHub |
 | P2-01, P2-03, P2-05, N-2 | — | Accepted for local use (baseline §6) |
+| CORPUS-RETRY: a transient PDF worker failure (busy, timeout, memory, worker unavailable) now records the document as `UNSUPPORTED` instead of `FAILED_MALFORMED`, but the batch is still published and `retry_batch` on a published batch returns without re-parsing, so the document is not retried. The comment in `corpus/pipeline.py` saying "a batch retry parses it again" is wrong. Not a regression (before #32 the document was `FAILED_MALFORMED` and also never re-parsed). Found by the automated Codex review of #32 after merge | — | **Open P2** (roadmap §9) |
 
 Alert counts:
 
@@ -205,10 +211,13 @@ Alert counts:
 ## 8. Readiness
 
 - **Local-supervised dogfood:**
-  - Every lane that executes code passes on `7043c63`: GitHub CI, rc-ci, Windows gates and E2E, VMware 19/19 and
+  - Every lane required for this target passes on `7043c63` except `github-ci` (only the PR-only
+    `dependency review` job is skipped on push): rc-ci, Windows gates and E2E, VMware 19/19 and
     E2E.
-  - The Windows full suite is baseline-identical FAIL (R19-3), which this target does not require.
-  - The lane-gate tool reports NOT_READY only because of OWNER-GATE-1. **Status: PASS_WITH_EXPLICIT_RESIDUALS.**
+  - The Windows full suite executes code and fails, baseline-identical (163, R19-3); this target does not require it.
+  - **Tool verdict: NOT_READY** (only `github-ci`; OWNER-GATE-1). This report does not change that verdict.
+  - **Engineering closure verdict: PASS_WITH_EXPLICIT_RESIDUALS.** This is the release lead's assessment of the
+    delivered scope, not a gate result. The residuals are listed in §7 and §9 and include CORPUS-RETRY.
 - **Production: NOT_READY.**
   - Failing required lanes: `github-ci` (OWNER-GATE-1) and `windows-full-suite` (163 baseline-identical failures, R19-3).
   - These lanes are NOT_VALIDATED: local-model governed acceptance (R19-6), measured LLM execution at this commit,
@@ -233,6 +242,8 @@ Alert counts:
    - #33 P2-2: kernel-level probes for the ptrace, io_uring and pidfd denials and the RLIMIT_AS refusal on Linux;
    - #33 P2-3: replace a source-text test;
    - #32 P3s: an output-overflow kill test, and a test of concurrent BUSY.
+   - CORPUS-RETRY (P2): keep a batch with transient parse failures retryable (or re-parse `UNSUPPORTED`
+     documents on retry), with a test; correct the `corpus/pipeline.py` comment.
 4. **Operations:**
    - reserve or move the VM chain's fixed ports (OPS-PORTS);
    - VM internet (OWNER-VM);
@@ -253,7 +264,7 @@ Alert counts:
 | --- | --- | --- |
 | DI-9: size-bounded artifact read (`ccc14e8`, Core file, semantics unchanged) | 7 governed BM25 → evidence tasks on Windows: 4.72 s → 0.34 s total (14×). Median BM25 stage 238 → 19 ms; evidence stage 434 → 21 ms (Linux: 11–13 ms) | `docs/packs/document_intelligence/EVALUATION_PROTOCOL.md` |
 | Retrieval quality (20 synthetic queries, identical on both platforms) | nDCG@5: BM25 0.436, dense 0.569, RRF 0.475, hybrid + cross-encoder 0.573. The reranker lowered keyword Success@1 from 0.67 to 0.44, so it stays SHADOW. | `docs/packs/document_intelligence/BENCHMARK_2026-11-14.md` |
-| Stage latency (median; Windows vs Linux; synthetic) | Whole task 3164 vs 869 ms; dense 1841 vs 718 ms; rerank (20 candidates) 569 vs 124 ms | same |
+| Stage latency (median; Windows vs Linux; synthetic; at `12765a4`, **before** the DI-9 fix) | Whole task 3164 vs 869 ms; dense 1841 vs 718 ms; rerank (20 candidates) 569 vs 124 ms. Not re-measured on current `main` | same |
 | Windows full-suite wall time | 551 s at `1fd5608` vs 427 s at `7043c63` (both on the same host and profile) | junit `time` fields. A single run each with host load not controlled, so this is not claimed as an improvement. |
 
 ## 11. Development efficiency and reuse
@@ -275,13 +286,16 @@ Measured denominators only:
   - Not built, because they already existed: an OCR framework, a reranker framework, an RRF implementation, a
     vector database, a new scheduler, router or CAS.
 - **Review yield:**
-  - 4 independent review runs covering 6 of the 7 follow-up PRs (#27; #28, #29 and #30 together; #32; #33). The
-    release lead reviewed #31 (docs).
-  - 4 P2 defects fixed before merge (#29 token, #32 P2-A and P2-B, #33 P2-1), each with a test that fails on the
+  - At least 6 independent agent review runs on the follow-up PRs: 4 PR-level runs recorded as PR comments (#27;
+    #28, #29 and #30 together; #32; #33), plus one earlier run each by the implementing agents of #32 and #33
+    (described in those PR bodies). Codex automated reviews also ran on #26–#33. #31 (docs) has only the Codex
+    review on record.
+  - 4 P2 findings addressed before merge (#29 token, #32 P2-A and P2-B, #33 P2-1). P2-A is only partly fixed
+    (CORPUS-RETRY, found after merge). Each fix has a test that fails on the
     previous code;
   - 0 P0 or P1 findings.
 - **Rework:**
-  - 2 CI cycles lost to the public-export `secret_like` rule (#29, #32);
+  - 3 failed pr-ci cycles: two on #29 (public-export `secret_like` rule) and one on #32 (a test assertion scope);
   - 1 VMware rerun for the stale offline npm cache.
 
 ## 12. Reproducible installation, startup and recovery
@@ -312,7 +326,7 @@ Measured denominators only:
 ## 13. Invariants preserved
 
 - One scheduler, one router, one CAS, and no new authority path.
-- Governance and authorization boundaries are unchanged. They are tightened at the control-token / step-up
+- Governance and authorization boundaries were not weakened. They were tightened at the control-token / step-up
   boundary and by schema-independent guards.
 - Experimental features are opt-in. Reranking is SHADOW by default.
 - No proprietary company imports and no company assets copied.

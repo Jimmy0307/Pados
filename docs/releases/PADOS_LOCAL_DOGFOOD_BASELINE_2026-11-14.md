@@ -28,7 +28,7 @@ No squash, rebase or force push was used. Branch protection was not changed.
   dogfood only, and recorded risk acceptance (PR #26 comment, 2026-11-14).
 - **Human code review of the cumulative 195-file diff: NOT PERFORMED.** The owner stated the authorization does not
   certify a personal review. Branch protection requires 0 approving reviews and no GitHub approval was created.
-- **Independent review:** agent reviews only. PR #26 had rounds 1–3. Four independent review runs covered #27, #28–#30 (one run), #32 and #33; their dispositions are PR comments on #27, #28, #29, #30, #32 and #33. The release lead reviewed #31 (docs).
+- **Independent review:** agent reviews only. PR #26 had rounds 1–3. Four PR-level independent review runs covered #27, #28–#30 (one run), #32 and #33; their dispositions are PR comments on #27, #28, #29, #30, #32 and #33 (those on #27, #28 and #30 were posted after merge). The implementing agents of #32 and #33 each ran one earlier review (PR bodies). Codex automated reviews also ran on #26–#33; #31 (docs) has only the Codex review on record.
   These are inputs, not a human approval.
 
 ### Recorded decisions
@@ -129,6 +129,7 @@ tinypool; dev-only) need the vitest 4 major upgrade (OWNER-DEP). CodeQL: 5 open,
 | GAP-1 | Dependabot does not read `requirements.lock` | P3 | Accepted | Owner chooses how runtime pins are surfaced to Dependabot |
 | R19-3 | 163 Windows full-suite failures (win32 fail-closed cases) | P2 | Baseline-tracked | Windows containment for the OCR worker, or tests marked platform-specific by the owner |
 | OPS-PORTS | VM chain fixed ports inside the ephemeral range (one-off bind conflict) | P3 | Open | Reserve or move the ports |
+| CORPUS-RETRY | CORPUS-RETRY: a transient PDF worker failure (busy, timeout, memory, worker unavailable) now records the document as `UNSUPPORTED` instead of `FAILED_MALFORMED`, but the batch is still published and `retry_batch` on a published batch returns without re-parsing, so the document is not retried. The comment in `corpus/pipeline.py` saying "a batch retry parses it again" is wrong. Not a regression (before #32 the document was `FAILED_MALFORMED` and also never re-parsed). Found by the automated Codex review of #32 after merge | P2 | Open | A batch with transient parse failures stays retryable (or retry re-parses `UNSUPPORTED` documents), with a regression test; the code comment corrected |
 
 ## 7. Owner-only decisions and blockers
 
