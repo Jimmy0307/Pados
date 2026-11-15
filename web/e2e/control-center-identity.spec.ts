@@ -112,3 +112,73 @@ test("with pairing off, the control token box is offered as before, with how to 
   expect(server.writes[0].headers()["x-pados-control-token"]).toBe("synthetic-control-value");
   expect(server.writes[0].headers()["x-pados-csrf"]).toBeUndefined();
 });
+
+// ---- Single sign-on (docs/identity/UNIFIED_IDENTITY_SESSION_DESIGN.md §3.10). Fixtures only: no provider is
+// contacted, and every /api, /control and /identity request is answered here, so nothing leaves the browser.
+const actorCsrf = "synthetic-actor-csrf";
+const entra = { id: "entra", kind: "entra", display_name: "Microsoft Entra ID", start_url: "/identity/v1/oidc/entra/start" };
+const actorSummary = { auth_method: "oidc", actor_id: "alice", provider_id: "entra",
+  issuer: "https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0", subject: "sub-1" };
+const me = { actor_id: "alice", display_name: "Alice Chen", auth_method: "oidc", provider_id: "entra",
+  issuer: actorSummary.issuer, subject: "sub-1", expires_at: "2026-11-17T10:00:00Z", idle_expires_at: "2026-11-16T12:00:00Z",
+  projects: [{ project_id: "proj-a", roles: ["viewer", "contributor"] }], csrf_token: actorCsrf };
+
+type SsoServer = { session: Record<string, unknown>; writes: Request[] };
+
+async function openWithSso(page: Page, server: SsoServer, query = ""): Promise<void> {
+  await page.route("**/api/**", (route) => route.fulfill({ json: {} }));
+  await page.route("**/control/**", (route) => route.fulfill({ json: { status: "ok" } }));
+  await page.route("**/identity/**", (route) => route.fulfill({ status: 404, json: {} }));
+  await page.route("**/api/projects", (route) => route.fulfill({ json: { projects: [] } }));
+  await page.route("**/api/projects?*", (route) => route.fulfill({ json: { projects: [{ id: projectId, name: "Synthetic" }], pagination: { total: 1 } } }));
+  await page.route("**/api/mission-control", (route) => route.fulfill({ json: mission }));
+  await page.route("**/api/decision-inbox", (route) => route.fulfill({ json: { count: 0, items: [] } }));
+  await page.route("**/identity/v1/session", (route) => route.fulfill({ json: server.session }));
+  await page.route("**/identity/v1/me", (route) => route.fulfill(server.session.actor ? { json: me }
+    : { status: 403, json: { error: { schema_version: "pados.error.v1", code: "SESSION_REQUIRED", message: "x", retryable: false, request_id: "srv-2", write_occurred: "NO" } } }));
+  await page.route("**/identity/v1/actor/logout", (route) => {
+    server.writes.push(route.request());
+    server.session = { enabled: true, authenticated: false, providers: [entra] };
+    return route.fulfill({ json: { status: "ok", authenticated: false } });
+  });
+  await page.goto(`/operator.html${query}`);
+}
+
+test("a refused sign-in is explained in zh-TW, the code is in the details, and the address bar is cleaned", async ({ page }) => {
+  const server: SsoServer = { session: { enabled: true, authenticated: false, providers: [entra] }, writes: [] };
+  await openWithSso(page, server, "?sso_error=SSO_IDENTITY_NOT_BOUND");
+  // The provider's redirect back opens the Control Center on the identity page by itself.
+  const section = page.getByRole("region", { name: "單一登入" });
+  await expect(section.getByRole("alert")).toContainText("尚未綁定到任何 PADOS 使用者");
+  await section.getByText("技術細節（Details）").click();
+  await expect(section.getByText("SSO_IDENTITY_NOT_BOUND")).toBeVisible();
+  await expect(section.getByRole("link", { name: "使用 Microsoft Entra ID 登入" })).toHaveAttribute("href", "/identity/v1/oidc/entra/start");
+  await expect.poll(() => page.evaluate(() => window.location.search)).toBe("");
+});
+
+test("a signed-in actor sees who, the issuer host and the roles, and can end only the SSO session", async ({ page }) => {
+  const server: SsoServer = { session: { ...paired, providers: [entra], actor: actorSummary }, writes: [] };
+  await openWithSso(page, server, "?sso=ok");
+  const section = page.getByRole("region", { name: "單一登入" });
+  await expect(section.getByText("已透過單一登入（SSO）完成登入。")).toBeVisible();
+  await expect(section.getByText("Alice Chen")).toBeVisible();
+  await expect(section.getByText("login.microsoftonline.com")).toBeVisible();
+  await expect(section.getByRole("table", { name: "專案角色" })).toContainText("proj-a");
+  await expect(section.getByRole("table", { name: "專案角色" })).toContainText("貢獻者（contributor）");
+  await section.getByRole("button", { name: "登出單一登入" }).click();
+  await expect(section.getByRole("link", { name: "使用 Microsoft Entra ID 登入" })).toBeVisible();
+  const logout = server.writes[0].headers();
+  expect(logout["x-pados-csrf"]).toBe(actorCsrf);
+  expect(logout["x-pados-control-token"]).toBeUndefined();
+  const stored = await page.evaluate(() => [window.localStorage.length, window.sessionStorage.length]);
+  expect(stored).toEqual([0, 0]);
+});
+
+test("with no provider configured the SSO section is not shown", async ({ page }) => {
+  const server: SsoServer = { session: { enabled: true, authenticated: false, providers: [] }, writes: [] };
+  await openWithSso(page, server);
+  await page.getByRole("button", { name: "Control Center" }).click();
+  await nav(page, "This browser & devices").click();
+  await expect(page.getByRole("button", { name: "Pair this browser", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "單一登入" })).toHaveCount(0);
+});

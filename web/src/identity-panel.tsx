@@ -9,6 +9,7 @@ import { ControlTokenPanel } from "./control-actions";
 import { hasControlAuth, type ControlAuth } from "./control-auth";
 import { HttpError } from "./http";
 import { pageHref } from "./page-links";
+import { SsoPanel } from "./sso-panel";
 import {
   ENABLE_INSTRUCTION,
   PAIR_COMMAND,
@@ -152,8 +153,10 @@ export function PairForm({ onPair }: { onPair: (code: string, label: string) => 
 
 function Providers({ providers }: { providers: IdentityProvider[] }): ReactElement | null {
   if (!providers.length) return null;
-  return <div className="control-providers"><p className="control-muted">Other sign-in options on this server:</p>
-    <ul>{providers.map((provider) => <li key={provider.id}>{provider.label}</li>)}</ul></div>;
+  // A pointer only: the sign-in links, the return message and the signed-in actor live in the SSO section of the
+  // "This browser & devices" page (sso-panel.tsx).
+  return <div className="control-providers"><p className="control-muted">Single sign-on is also offered on this server
+    ({providers.map((provider) => provider.label).join(", ")}): see <strong>This browser &amp; devices</strong>.</p></div>;
 }
 
 type AccessProps = { identity: Identity; controlValue: string; onControlValue: (value: string) => void };
@@ -268,6 +271,7 @@ export function IdentityPage({ identity, auth, controlValue, onControlValue }: A
   const devicesOffered = view.phase === "paired" || view.phase === "unpaired";
   return <>
     <ControlAccessPanel identity={identity} controlValue={controlValue} onControlValue={onControlValue} />
+    <SsoPanel />
     {devicesOffered && <DevicesPanel auth={auth} onSessionLost={identity.sessionLost}
       onCurrentRevoked={() => void identity.refresh("This browser's device was revoked: pair this browser again to make changes.")} />}
     <p className="control-muted">A paired session has exactly the control token's authority and never more: accepting a
