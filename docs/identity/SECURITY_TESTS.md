@@ -37,6 +37,10 @@ CLI, HTTP and PowerShell 5.1. **Browser** means the live Playwright spec `web/e2
 | Pairing lockout resistance | `test_pairing.py::test_failed_attempts_never_burn_the_operators_code`, `::test_a_code_is_single_use_under_concurrent_pairing` |
 | OIDC flood and outage handling | `test_oidc_hardening.py` (6 tests) |
 | Store integrity | `test_store.py` (8 tests) |
+| Session least privilege (A2) | `test_session_scopes.py`: every `control_auth` route classified, no stale entry; a session refused with `SESSION_SCOPE_DENIED` on `/context/assemble`, `/memory/facts`, `/memory/facts/{memory_id}/promote`, `/control/projections/render` (handlers never run); a session passes on all 39 allowlisted `control_auth` routes; the control token passes on all 43; decision by method and matched template, an unmatched route refused; result acceptance still refused |
+| Store protected from creation (A3) | `test_store_protection.py`: SID from the process token (env user name ignored); fresh store DACL is protected, owner + SYSTEM only, `OICI`; `sessions.json` and `server.key` inherit it; Everyone/Users read or write on a file or the directory gives `IDENTITY_STORE_INSECURE`; a pre-existing open directory is refused before any secret is written; Administrators accepted on load, never granted. ACLs are read and changed with `icacls` and SIDs, independent of the code under test and of the display language. POSIX: 0700/0600 whatever the umask; group/other bits refused (skipped on win32) |
+| Transport and cross-port (A3) | `test_transport_and_cross_port.py`: another localhost port's Origin or a same-site fetch cannot write even with the CSRF value; a foreign-Origin read is refused; no CORS header; host-only Strict HttpOnly cookie; non-loopback host fails closed in every cookie variant, and `pados serve` refuses to start |
+| SSO UI and actor logout (A4) | `tests/identity/oidc/test_oidc_actor_logout.py` (actor-only logout keeps the device session; needs CSRF and Origin); `web/src/sso.test.ts` (27 tests: providers and start-link validation, hidden states, return parsing and `replaceState` cleaning, zh-TW messages with the code in a detail, `/me` view and roles, actor logout headers, no storage); mocked Playwright `web/e2e/control-center-identity.spec.ts` (3 SSO scenarios) |
 | Route inventory (OP-004) | `tests/operability/test_op004_mutation_inventory.py` (it caught the unclassified actor route during E2E, fixed in `298d32f`) |
 
 ## Results (2026-11-16)
@@ -47,3 +51,15 @@ CLI, HTTP and PowerShell 5.1. **Browser** means the live Playwright spec `web/e2
 | Identity E2E, Windows 11 (head `eaeb9f4`, same identity source) | 26 PASS, 0 FAIL, 1 NOT_LIVE_VALIDATED (OIDC live sign-in) |
 | Live Playwright, Windows | 1 passed. Mocked specs: 24 passed, 6 skipped (they need a live environment). |
 | Linux (VMware Ubuntu 24.04) chain and E2E | See the PR body for the run at `298d32f` |
+
+## Results of the security closure (A2–A4, Windows 11, 2026-11-16)
+
+| Run | Result |
+| --- | --- |
+| `tests/identity` after A2+A3 (head `6bd39d2`) | 316 passed, 7 skipped (5 POSIX-only, 1 POSIX mode test, 1 symlink privilege) |
+| `tests/identity/oidc` after A4 (includes the actor logout tests) | 155 passed |
+| `tests/operability/test_op004_mutation_inventory.py` | passed |
+| `tests/security` (head `7e4cb15`) | 447 passed, 13 skipped (platform), 3 failed: `test_p6_6_adversarial.py` cases that need a password-protected PostgreSQL on 5432; they fail identically on `main` |
+| Web: Vitest | 185 passed (13 files) |
+| Web: mocked Playwright `control-center-identity.spec.ts` (isolated port, proxy to a dead port) | 6 tests; 5 + 1 on the full run (the last test timed out in `page.goto` under host memory pressure), then 6/6 on `--repeat-each=3` of the affected tests |
+| Linux | Not re-run for A2–A4 on this host; the POSIX branches are covered by tests that skip on win32 and by `mypy --platform linux` |

@@ -30,6 +30,7 @@ from pados.identity.actor_sessions import ActorSessions
 from pados.identity.errors import (
     IDENTITY_DISABLED,
     IDENTITY_STORE_CORRUPT,
+    IDENTITY_STORE_INSECURE,
     SESSION_EXPIRED,
     SESSION_REQUIRED,
     SESSION_REVOKED,
@@ -42,6 +43,8 @@ from pados.identity.tokens import display_code
 
 PREFIX = "/identity/v1"
 _DEAD_SESSION_CODES = frozenset({SESSION_EXPIRED, SESSION_REVOKED, SESSION_REQUIRED})
+# Store failures are never folded into "not signed in": the operator must see them (design §3.3, §3.9).
+_STORE_FAILURE_CODES = frozenset({IDENTITY_STORE_CORRUPT, IDENTITY_STORE_INSECURE})
 
 
 class PairingCodeRequest(BaseModel):
@@ -75,7 +78,7 @@ def _actor_summary(settings: Settings, request: Request, service: IdentityServic
     try:
         actor = actor_http.authorize_actor(settings, request, service)
     except HTTPException as exc:
-        if exc.detail == IDENTITY_STORE_CORRUPT:
+        if exc.detail in _STORE_FAILURE_CODES:
             raise
         return None
     record = actor.session.record
@@ -153,7 +156,7 @@ def mount_identity(app: FastAPI, settings: Settings, *, service: IdentityService
         try:
             active = identity_http.authorize_session(settings, request, service)
         except HTTPException as exc:
-            if exc.detail == IDENTITY_STORE_CORRUPT:
+            if exc.detail in _STORE_FAILURE_CODES:
                 raise
             return identity_http.json_no_store(anonymous)
         return identity_http.json_no_store({**_session_body(service, active), **phase_two})

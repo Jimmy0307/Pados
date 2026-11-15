@@ -39,6 +39,21 @@ Branch `feat/unified-identity-session-20261116`, based on `main` `9b975a9`. **No
   cooldown, and closed codes for malformed provider input. The Windows E2E run also found an unclassified mutating
   route (OP-004 inventory), fixed in `298d32f`.
 - **E2E:** `scripts/dogfood/identity_e2e.py` and `web/e2e/identity-live.spec.ts`.
+- **Security closure (A2–A4):**
+  - **A2, least privilege:** a paired browser session may call only the allowlisted Control Center routes
+    (`src/pados/identity/scopes.py`); everything else, including `/context/assemble`, memory writes and
+    projection rendering, is `SESSION_SCOPE_DENIED`. The control token keeps full authority. Design §3.8 has the
+    route table.
+  - **A3, store protection:** on Windows the store directory is created with an explicit protected DACL (token
+    user SID + SYSTEM, inherited by `sessions.json` and `server.key`) and every load refuses a store open to
+    another SID with `IDENTITY_STORE_INSECURE`; POSIX keeps 0700/0600 and gains the same check. Sessions off
+    loopback refuse unless the `__Host-` Secure cookie is forced, and the loopback-binding rule still refuses.
+    Design §3.9.
+  - **A4, SSO UI:** a 單一登入 (SSO) section on **This browser & devices**: provider sign-in links, zh-TW return
+    messages with the closed code in a detail (the address bar is cleaned), the signed-in actor with per-project
+    roles, and an actor-only logout (`POST /identity/v1/actor/logout`, new). Design §3.10.
+  - **Upgrade note:** an existing store directory that is readable by another account is now refused. Delete it
+    (every session is revoked, as in rollback step 2) and PADOS recreates it protected.
 - **No change:** no new dependency, no database migration, and no change to the scheduler, router, CAS, ScopeVersion,
   ResultCandidate, WebAuthn step-up or `/remote/v1`.
 
@@ -72,7 +87,9 @@ Branch `feat/unified-identity-session-20261116`, based on `main` `9b975a9`. **No
 | Microsoft Entra ID with a real tenant | **NOT_LIVE_VALIDATED** |
 | Google with a real client | **NOT_LIVE_VALIDATED** |
 | OIDC through an HTTP proxy | Not supported (`trust_env=False`) |
-| SSO sign-in button and actor view in the Control Center | Not built. Providers appear only when configured; the actor API is complete. |
+| SSO sign-in section, return messages, actor view and actor logout in the Control Center | **Validated synthetic** (Vitest and mocked Playwright). Real providers remain NOT_LIVE_VALIDATED. |
+| Session least privilege (`SESSION_SCOPE_DENIED`) | **Validated synthetic** (integration tests over every `control_auth` route). Not yet re-run in the real-runtime E2E. |
+| Windows store DACL from creation and fail-closed check | **Validated on Windows 11** with real ACLs (`icacls`, SIDs) in the integration tests. Not a Windows user authentication. |
 | Windows Hello as an identity factor; trusted Windows SID binding | **NOT_IMPLEMENTED** (design §5). The SID must come from an OS-attested named-pipe client token, never from a username, a header or browser JS. |
 | `approver` role | Reported by `/me`; it grants nothing yet. Approvals and result acceptance stay on their existing paths. |
 | Multi-process server | Not supported (the JSON store is per process). `pados serve` runs one worker. |

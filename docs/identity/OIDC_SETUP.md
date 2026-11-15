@@ -94,6 +94,10 @@ Save a JSON file somewhere only the owner can read, for example under `runtime/l
 - `post_login_redirect` is where the browser lands after the callback, with `?sso=ok` or `?sso_error=<CODE>`
   appended. It is a path on the API origin, or a full URL on an origin listed in `PADOS_IDENTITY_ALLOWED_ORIGINS`
   (for example `http://127.0.0.1:5173/` for the Vite dev server).
+  To see the result in the Control Center, point it at the operator console: `/operator.html` (or
+  `http://127.0.0.1:5173/operator.html`). The console then opens its single sign-on section, shows the result in
+  zh-TW with the closed code in a detail, and removes the parameter from the address bar. `/` is the Remote
+  console, which ignores it (design §3.10).
 - `kind: "generic"` takes an `issuer` (HTTPS) instead of a tenant, for any other OpenID Connect provider that signs
   ID tokens with RS256.
 

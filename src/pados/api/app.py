@@ -29,6 +29,7 @@ from pados.corpus.operator_config import operational_settings
 from pados.db import check_database, get_engine, session_scope
 from pados.graph import register_graph_routes
 from pados.identity import http as identity_http
+from pados.identity import scopes as identity_scopes
 from pados.identity.routes import mount_identity
 from pados.logging_config import configure_logging, get_logger
 from pados.loop import service as loop_service
@@ -69,10 +70,13 @@ def create_app() -> FastAPI:
         ] = None,
     ) -> None:
         # The control token header alone decides when it is present (an invalid one is refused, with no cookie
-        # fallback). Only without it, and only with PADOS_IDENTITY_SESSIONS_ENABLED, is a device session cookie
-        # tried; it grants exactly this dependency's authority. With the flag off this path is never taken.
+        # fallback) and keeps this dependency's full authority. Only without it, and only with
+        # PADOS_IDENTITY_SESSIONS_ENABLED, is a device session cookie tried; a valid session may then call only the
+        # (method, route template) pairs of pados.identity.scopes.SESSION_ALLOWED, anything else is
+        # SESSION_SCOPE_DENIED. With the flag off this path is never taken.
         if x_pados_control_token is None and identity_http.session_cookie_applies(settings, request):
             identity_http.authorize_control_session(settings, request)
+            identity_scopes.enforce_session_scope(request)
             return
         try:
             control_security.authorize_control_request(settings, x_pados_control_token)
@@ -80,6 +84,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     ControlAuth = Annotated[None, Depends(control_auth)]
+    # Exposed so tests can find every route guarded by this dependency (tests/identity/test_session_scopes.py).
+    app.state.pados_control_auth = control_auth
 
     def guarded(handler: Callable[[], dict[str, Any] | list[dict[str, Any]]]) -> object:
         try:

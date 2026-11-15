@@ -89,9 +89,26 @@ def check_origin(settings: Settings, request: Request) -> None:
         refuse(ORIGIN_NOT_ALLOWED)
 
 
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
+SECURE_COOKIE_REQUIRED = "IDENTITY_SECURE_COOKIE_REQUIRED"
+
+
+def assert_session_transport(settings: Settings) -> None:
+    """Sessions off loopback need the ``__Host-`` Secure cookie (design §3.9).
+
+    A plain ``pados_session`` cookie is sent over HTTP, so off loopback anyone on the path could read it. With a
+    non-loopback ``PADOS_API_HOST`` sessions refuse unless ``PADOS_IDENTITY_COOKIE_SECURE=always``. Even then the control
+    plane's own loopback-binding rule still refuses (``control api must bind to localhost``): both checks fail closed,
+    and there is no supported non-loopback session deployment in v1.
+    """
+    if settings.identity_sessions_enabled and settings.api_host not in LOOPBACK_HOSTS             and settings.identity_cookie_secure != "always":
+        raise PermissionError(f"{SECURE_COOKIE_REQUIRED}: a non-loopback bind needs PADOS_IDENTITY_COOKIE_SECURE=always")
+
+
 def assert_control_preconditions(settings: Settings) -> None:
-    """The control plane's own preconditions apply to the session path too (loopback binding, unique token)."""
+    """The control plane's own preconditions apply to the session path too (transport, loopback binding, token)."""
     try:
+        assert_session_transport(settings)
         control_security.assert_localhost_binding(settings)
         control_security.assert_unique_control_token(settings)
     except PermissionError as exc:
