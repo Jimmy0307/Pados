@@ -859,7 +859,10 @@ def serve() -> None:
 
     from pados.control.security import assert_localhost_binding, assert_unique_control_token
 
+    from pados.identity.http import assert_session_transport
+
     settings = get_settings()
+    assert_session_transport(settings)  # sessions off loopback need the __Host- Secure cookie (identity design §3.9)
     assert_localhost_binding(settings)
     assert_unique_control_token(settings)
     if settings.identity_sessions_enabled:

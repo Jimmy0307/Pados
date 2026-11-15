@@ -8,6 +8,11 @@ that atomically replaces the document (never a write through an existing file), 
 A document that cannot be read or does not validate fails closed: no session is valid and nothing is written until
 the operator removes it (rollback, design §6). ``server.key`` (32 random bytes) keys the CSRF derivation and the
 control-token binding; it is created once, atomically, and never replaced.
+
+File-system protection (design §3.9, ``pados.identity.fs_security``): the directory is created owner-only from its
+first moment (Windows: an explicit protected DACL for this process's user SID and SYSTEM, inherited by every file;
+POSIX: 0700, files 0600). Every load, save and key read re-checks the directory and both files and fails closed with
+``IDENTITY_STORE_INSECURE`` when any of them is readable or writable by someone else.
 """
 from __future__ import annotations
 
@@ -25,7 +30,8 @@ from typing import Annotated, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
-from pados.identity.errors import IDENTITY_STORE_CORRUPT, IdentityError
+from pados.identity import fs_security
+from pados.identity.errors import IDENTITY_STORE_CORRUPT, IDENTITY_STORE_INSECURE, IdentityError
 from pados.logging_config import get_logger
 
 STORE_SCHEMA: Final = "pados.identity.store.v1"
@@ -117,6 +123,12 @@ def _corrupt(reason: str) -> IdentityError:
     return IdentityError(IDENTITY_STORE_CORRUPT)
 
 
+def _insecure(reason: str) -> IdentityError:
+    # A fixed reason word only: never a path, a SID or an ACL dump.
+    get_logger("pados.identity").error("identity.store.insecure", error_code=IDENTITY_STORE_INSECURE, reason=reason)
+    return IdentityError(IDENTITY_STORE_INSECURE)
+
+
 def _validated(state: StoreState) -> StoreState:
     if any(not _HASH.fullmatch(key) for key in (*state.sessions, *state.pairing_codes, *state.actor_sessions,
                                                  *state.oidc_states)):
@@ -150,14 +162,31 @@ class IdentityStore:
 
     def _ensure_directory(self) -> None:
         if not self.directory.exists():
-            self.directory.mkdir(parents=True, exist_ok=True)
-            if os.name != "nt":
-                os.chmod(self.directory, 0o700)
+            try:
+                fs_security.make_private_directory(self.directory)
+            except fs_security.StoreInsecure as exc:
+                raise _insecure(exc.reason) from exc
+        self._check_protection()
+
+    def _check_protection(self) -> None:
+        """Fail closed unless the directory and each existing store file are owner-only (design §3.9)."""
+        for target in (self.directory, self.path, self.key_path):
+            if not os.path.lexists(target):
+                continue  # nothing there yet: nothing to protect
+            try:
+                reason = fs_security.problem(target)
+            except fs_security.StoreInsecure as exc:
+                reason = exc.reason
+            except OSError:
+                reason = "acl_unreadable"
+            if reason is not None:
+                raise _insecure(reason)
 
     def load(self) -> StoreState:
         with _LOCK:
             if self.path.is_symlink():
                 raise _corrupt("symlink")
+            self._check_protection()
             try:
                 raw = self.path.read_bytes()
             except FileNotFoundError:
@@ -174,9 +203,9 @@ class IdentityStore:
 
     def save(self, state: StoreState) -> None:
         with _LOCK:
-            self._ensure_directory()
             if self.path.is_symlink():
                 raise _corrupt("symlink")
+            self._ensure_directory()
             document = _validated(state).model_dump(mode="json")
             for optional in _PHASE_TWO_MAPS:  # absent while empty: a phase 1 document stays byte-identical
                 if not document[optional]:
@@ -193,6 +222,7 @@ class IdentityStore:
         with _LOCK:
             if self.key_path.is_symlink():
                 raise _corrupt("key_symlink")
+            self._check_protection()
             try:
                 key = self.key_path.read_bytes()
             except FileNotFoundError:
