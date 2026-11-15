@@ -35,6 +35,7 @@ from pados.enterprise.classification import DataClassification
 from pados.local_intelligence.catalog_store import CatalogStoreError, ModelCatalogStore
 from pados.local_intelligence.live import LiveLocalState
 from pados.local_intelligence.runtimes import default_runtime_endpoints
+from pados.providers.setup import ProvidersSetup, ProvidersSetupStore, SetupError
 from pados.resources.capability_profile import (
     BindingPolicy,
     CapabilityFloor,
@@ -69,6 +70,9 @@ MEASURED_INELIGIBLE = "MEASURED_INELIGIBLE"
 MEASURED_EXECUTION_CONFIG_MISMATCH = "MEASURED_EXECUTION_CONFIG_MISMATCH"
 MEASURED_EXECUTION_CONFIG_NOT_APPLIED = "MEASURED_EXECUTION_CONFIG_NOT_APPLIED"
 MEASURED_EXECUTION_INTENT_REQUIRED = "MEASURED_EXECUTION_INTENT_REQUIRED"
+PROVIDER_DISABLED = "PROVIDER_DISABLED"
+PROVIDER_PROJECT_NOT_IN_SCOPE = "PROVIDER_PROJECT_NOT_IN_SCOPE"
+PROVIDERS_SETUP_INVALID = "PROVIDERS_SETUP_INVALID"
 
 
 class ExecutionIntent(StrEnum):
@@ -177,6 +181,31 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _load_setup(settings: Settings) -> ProvidersSetup:
+    return ProvidersSetupStore(settings.providers_setup_path).load()
+
+
+SetupLoader = Callable[[Settings], ProvidersSetup]
+
+
+def _owner_narrowing(settings: Settings, project_id: str, setup_loader: SetupLoader) -> None:
+    """The owner's provider setup can only refuse: a disabled provider, or a project outside its scope. A provider
+    without a setup entry is not narrowed (the measured profile and the registration still decide)."""
+    try:
+        setup = setup_loader(settings)
+    except SetupError:
+        raise refuse(PROVIDERS_SETUP_INVALID) from None
+    family = settings.chat_provider.strip().casefold()
+    endpoint = record_endpoint(settings.ollama_base_url)
+    for item in setup.providers:
+        if item.kind != family or item.endpoint is None or record_endpoint(item.endpoint) != endpoint:
+            continue
+        if not item.enabled:
+            raise refuse(PROVIDER_DISABLED, (item.provider_id,))
+        if not item.admits_project(project_id):
+            raise refuse(PROVIDER_PROJECT_NOT_IN_SCOPE, (item.provider_id,))
+
+
 def _select_profile(settings: Settings, catalog_loader: CatalogLoader) -> ModelCapabilityProfile:
     path = settings.model_catalog_path.strip()
     if not path:
@@ -245,13 +274,15 @@ def resolve_bound_execution(settings: Settings, intent: ExecutionIntent, *, proj
                             catalog_loader: CatalogLoader = _load_catalog,
                             live_factory: LiveFactory = _live_state,
                             registrations_loader: RegistrationsLoader = _load_registrations,
-                            now: Callable[[], datetime] = _now) -> BoundExecution:
+                            now: Callable[[], datetime] = _now,
+                            setup_loader: SetupLoader = _load_setup) -> BoundExecution:
     """The measured execution the configured chat model may run for ``intent``; raises ``ExecutionBindingRefused``.
 
     The injection points exist for tests only; production uses the catalog store, the local live observer and
     the compute-node registry named by settings."""
     if not isinstance(intent, ExecutionIntent) or not project_id:
         raise refuse(MEASURED_EXECUTION_INTENT_REQUIRED)
+    _owner_narrowing(settings, project_id, setup_loader)
     profile = _select_profile(settings, catalog_loader)
     binding = _bind(profile, settings, live_factory, now)
     _authorize(profile, settings, intent, project_id, registrations_loader)
