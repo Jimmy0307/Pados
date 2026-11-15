@@ -3,7 +3,7 @@
 // - the control token path, unchanged: the token typed into this page travels only in X-PADOS-Control-Token;
 // - the paired browser session path: no control token at all. The HttpOnly session cookie travels by itself
 //   (same-origin only), and every state-changing request adds the session's CSRF token in X-PADOS-CSRF.
-// The CSRF token is held in page memory only, like the control token: never in browser storage, a URL or a log.
+// The CSRF token is held in page memory only, like the control token, and never in browser storage, a URL or a log.
 export const CONTROL_TOKEN_HEADER = "X-PADOS-Control-Token";
 export const CSRF_HEADER = "X-PADOS-CSRF";
 /** The session cookie is sent to this page's own origin only (the Vite dev server proxies to the API unchanged). */

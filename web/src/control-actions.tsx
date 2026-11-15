@@ -6,7 +6,7 @@
 // in the Remote console with a fresh WebAuthn step-up. A decision is sent only after the person confirms the exact
 // approval, project, summary and version. The token lives in this page's memory only; it is never stored.
 // When this browser is paired (docs/identity/UNIFIED_IDENTITY_SESSION_DESIGN.md §3), the same requests go without any
-// control token: the HttpOnly session cookie travels by itself and every write carries X-PADOS-CSRF (control-auth.ts).
+// control token. The HttpOnly session cookie travels by itself and every write carries X-PADOS-CSRF (control-auth.ts).
 // A session that turns out expired, revoked or refused is reported and read again; the write is never retried.
 import { useEffect, useState, type FormEvent, type ReactElement } from "react";
 import { HttpError, describeFailure, requestJson } from "./http";
@@ -47,7 +47,7 @@ function idempotencyKey(prefix: string): string {
 }
 
 /**
- * A /control request with the operator's control token, or with this browser's paired session (no token: the cookie,
+ * A /control request with the operator's control token, or with this browser's paired session (then no token, only the cookie,
  * plus X-PADOS-CSRF on writes). Errors keep the server's pados.error.v1 code.
  */
 export function controlRequest<T>(path: string, auth: ControlAuth, init: RequestInit = {}, fetcher?: typeof fetch): Promise<T> {
