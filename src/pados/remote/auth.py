@@ -147,6 +147,10 @@ class RemoteActorRegistry:
     def get(self, actor_id: str) -> RemoteActor | None:
         return self._actors.get(actor_id)
 
+    def actors(self) -> tuple[RemoteActor, ...]:
+        """Read-only view of the configured actors (for configuration status projections; grants nothing)."""
+        return tuple(self._actors.values())
+
 
 def authorize_project(session: RemoteSession, project_id: str) -> None:
     if project_id not in session.actor.projects:
