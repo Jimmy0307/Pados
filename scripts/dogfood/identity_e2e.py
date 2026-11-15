@@ -500,7 +500,7 @@ def oidc_configs(ctx: Context, project: str) -> dict[str, str]:
 
 
 def rotation(ctx: Context, server: subprocess.Popen[str], project: str) -> subprocess.Popen[str]:
-    """``pados init --force`` writes a new control token: every session bound to the old hash ends."""
+    """``pados init --force`` rotates the control token, which ends every session bound to the old hash."""
     run = ctx.run
     survivor = ctx.browser("E2E rotation browser")
     ctx.pair(survivor, ctx.mint_code("device_pair_rotation", "E2E rotation browser"))
