@@ -24,6 +24,7 @@ import {
 } from "./api";
 import { getAuthorizationEligibility } from "./authorization";
 import { ControlCenter } from "./control-center";
+import { openedBySsoReturn } from "./sso-panel";
 import { projectPlaceholder } from "./project-placeholder";
 import "./styles.css";
 
@@ -41,7 +42,7 @@ function App() {
   const [evidence, setEvidence] = useState<Record<string, unknown> | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState<ApiError | null>(null);
-  const [surface, setSurface] = useState<"operator" | "control">("operator");
+  const [surface, setSurface] = useState<"operator" | "control">(() => (openedBySsoReturn() ? "control" : "operator"));  // back from SSO sign-in
 
   const activeProject = useMemo(() => projects.find((item) => item.id === projectId), [projects, projectId]);
 

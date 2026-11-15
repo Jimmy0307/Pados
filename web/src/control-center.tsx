@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState, type ReactElement } from "react";
 import { ApprovalsPage, WorkRequestPage } from "./control-actions";
 import type { ControlAuth } from "./control-auth";
 import { ControlAccessPanel, IdentityPage, IdentityStatus, useIdentity } from "./identity-panel";
+import { openedBySsoReturn } from "./sso-panel";
 import { inboxAction } from "./page-links";
 import { DEFAULT_LOCALE, LocaleContext, translate, type Locale } from "./i18n";
 import { ProjectsPage as ProductProjectsPage } from "./product-projects";
@@ -189,7 +190,7 @@ function WorkRequestSurface({ access }: { access: WriteAccess }): ReactElement {
 }
 
 export function ControlCenter({ onBack }: { onBack: () => void }): ReactElement {
-  const [page, setPage] = useState<Page>("mission");
+  const [page, setPage] = useState<Page>(() => (openedBySsoReturn() ? "identity" : "mission"));  // SSO return message
   // The control token is held in this component's memory only (never in browser storage) and only sent to /control.
   const [controlValue, setControlValue] = useState("");
   // This browser's paired session (identity-panel.tsx): restored on every load; its CSRF token also lives in memory only.
