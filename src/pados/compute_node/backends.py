@@ -619,7 +619,15 @@ BACKEND_KINDS: dict[str, Callable[..., InferenceBackend]] = {
     # The same server driven natively: verifies the context window and translates the measured configuration.
     LLAMA_CPP_NATIVE: lambda backend_id, endpoint, **kw: LlamaCppServerBackend(backend_id, endpoint, **kw),
     "ollama": lambda backend_id, endpoint, **kw: OllamaBackend(backend_id, endpoint, **kw),
+    # A generic enterprise HTTP AI gateway described by a private contract file (pados.compute_node.gateway).
+    "enterprise_gateway": lambda backend_id, **kw: _enterprise_gateway(backend_id, **kw),
 }
+
+
+def _enterprise_gateway(backend_id: str, **kwargs: Any) -> InferenceBackend:
+    from pados.compute_node.gateway import gateway_backend  # imported late: the gateway module imports this one
+
+    return gateway_backend(backend_id, **kwargs)
 
 
 def run_items(backend: InferenceBackend, capability: NodeCapability, backend_model: str,
