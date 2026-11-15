@@ -1,0 +1,21 @@
+%% PADOS release baseline on main, 2026-11-14. Reproducible: render with any Mermaid renderer.
+%% Solid = landed and validated; dashed = open or owner-decision. Bound to the commits named on each node.
+flowchart TB
+  subgraph Stack["Release candidate (PR #26, head 202df5c, 109 commits)"]
+    P20["#20 operability OP-001..010"] --> P21["#21 local usability"] --> P22["#22 runtime hardening"]
+    P22 --> P24["#24 document intelligence"] --> P25["#25 DI hardening"]
+  end
+  M0["main 69716ed"] --> MC
+  P25 --> MC["merge commit 1fd5608<br/>tree d7982f0 == RC tree"]
+  MC --> V["Post-merge evidence @ 1fd5608<br/>GitHub CI + rc-ci PASS<br/>Windows 18/18, E2E, PG, Pester, Playwright PASS<br/>Windows full suite: 163 baseline-identical FAIL<br/>VMware 19/19 + E2E PASS"]
+  MC --> F27["#27 N-1 search_path guard"]
+  F27 --> F30["#30 certifi / Mako pins"] --> F28["#28 vite / source-map-js"] --> F29["#29 .env + token owner-only"]
+  F29 --> F32["#32 P2-11 isolated PDF worker, pypdf 6.21.4"]
+  F32 --> F31["#31 security register (doc)"] --> F33["#33 model worker OS isolation (opt-in)"]
+  F33 --> MAIN["main baseline (local-supervised dogfood)<br/>production NOT_READY"]
+  G1["OWNER-GATE-1: PR-only dependency review<br/>on push commits"]:::owner -.-> MAIN
+  W1["OWNER-WIN-JOB / OWNER-NET:<br/>Windows kernel caps, worker network isolation"]:::owner -.-> PROD["Production readiness"]:::pending
+  D1["OWNER-DI: DI-1, DI-4, default-on proposals"]:::owner -.-> PROD
+  MAIN -.-> PROD
+  classDef owner stroke:#a60,stroke-width:2px
+  classDef pending stroke-dasharray: 5 5

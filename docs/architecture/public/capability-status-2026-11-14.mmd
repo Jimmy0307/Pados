@@ -1,0 +1,35 @@
+%% PADOS capability status by evidence class, main baseline 2026-11-14. Reproducible Mermaid source.
+flowchart LR
+  subgraph RT["Validated with real runtime (Windows + VMware Linux, real PostgreSQL)"]
+    A1[Authority layer: envelope, scheduler, registry, executor, CAS]
+    A2[Governed approval + WebAuthn step-up + single CAS]
+    A3[Local dogfood E2E: install to restart recovery]
+  end
+  subgraph SY["Validated synthetic"]
+    S1[WebAuthn device = software authenticator]
+    S2[Deterministic capability execution, no provider]
+    S3[Structured problem solving, deterministic drafter]
+    S4[Enterprise retrieval stack, in-memory]
+    S5[BM25 retrieval pack, synthetic corpus]
+    S6[Isolated PDF parsing: real worker processes, synthetic PDFs]
+  end
+  subgraph EX["Experimental (opt-in, disabled by default)"]
+    E0[Document intelligence: dense, RRF fusion, cross-encoder, evidence pack; pinned models on a synthetic corpus]
+    E1[DI-1 subprocess model worker + OS isolation]
+    E2[OCR raster path: pypdfium2 + Tesseract]
+    E3[Rerank ACTIVE templates]
+  end
+  subgraph DS["Disabled / SHADOW"]
+    D1[Reranking: SHADOW by default]
+    D2[Product loop: PADOS_PRODUCT_LOOP_ENABLED=false]
+  end
+  subgraph BL["Blocked or NOT_VALIDATED"]
+    B1[Local model governed acceptance: R19-6]
+    B2[REA / OpenMAIC / AI-Scientist-v3 runtimes]
+    B3[OCR pack on Windows: R19-3, needs Job Object]
+    B4[Windows worker network isolation: owner decision]
+  end
+  RT --> PROD{{Production: NOT_READY}}
+  SY --> PROD
+  EX -.-> PROD
+  BL -.-> PROD
