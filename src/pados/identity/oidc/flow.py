@@ -38,6 +38,7 @@ from pados.identity.errors import (
     OIDC_PROVIDER_ERROR,
     OIDC_PROVIDER_NOT_CONFIGURED,
     OIDC_STATE_INVALID,
+    OIDC_START_RATE_LIMITED,
     SSO_IDENTITY_NOT_BOUND,
     IdentityError,
 )
@@ -53,6 +54,9 @@ from pados.logging_config import get_logger
 
 STATE_TTL = timedelta(minutes=10)
 MAX_PENDING_STATES = 32
+# New sign-ins per minute across all providers. With MAX_PENDING_STATES this bounds how fast an unauthenticated
+# local caller can consume the pending table; pending states are never evicted (see _pending_states).
+MAX_STARTS_PER_MINUTE = 10
 _STATE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 _CODE = re.compile(r"^[\x21-\x7E]{1,4096}$")
 
@@ -84,9 +88,14 @@ class StartedAuthorization:
 
 
 def _pending_states(state: StoreState, now: Any) -> dict[str, OidcStateRecord]:
+    """Live pending sign-ins. They are never evicted to make room: an unauthenticated caller flooding /start
+    must not be able to cancel a user's sign-in in progress (review P2). A full table refuses new starts instead."""
     live = {k: r for k, r in state.oidc_states.items() if r.expires_at > now}
-    ordered = sorted(live.items(), key=lambda item: item[1].created_at)
-    return dict(ordered[max(0, len(ordered) - (MAX_PENDING_STATES - 1)):])
+    if len(live) >= MAX_PENDING_STATES:
+        raise IdentityError(OIDC_START_RATE_LIMITED)
+    if sum(1 for r in live.values() if now - r.created_at < timedelta(minutes=1)) >= MAX_STARTS_PER_MINUTE:
+        raise IdentityError(OIDC_START_RATE_LIMITED)
+    return live
 
 
 class OidcRuntime:
