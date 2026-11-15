@@ -87,4 +87,10 @@ MUTATIONS: dict[tuple[str, str], MutationKind] = {
     ("POST", "/api/graph/workspaces/{workspace_id}/ideas/{node_id}/incubate"): _RECONCILE,
     ("POST", "/api/graph/incubation/{item_id}/process"): _RECONCILE,
     ("POST", "/api/graph/workspaces/{workspace_id}/capabilities/{capability_id}/reuse"): _RECONCILE,
+    # Unified Identity & Session (docs/identity/UNIFIED_IDENTITY_SESSION_DESIGN.md). Each mint issues a new code and
+    # each pair consumes a code into a new device and session: never retried automatically.
+    ("POST", "/identity/v1/pairing-codes"): _RECONCILE,
+    ("POST", "/identity/v1/pair"): _RECONCILE,
+    ("POST", "/identity/v1/logout"): _STATE,  # a revoked session stays revoked
+    ("POST", "/identity/v1/devices/{device_id}/revoke"): _STATE,  # a revoked device stays revoked
 }

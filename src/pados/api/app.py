@@ -27,6 +27,8 @@ from pados.corpus.api import register_corpus_routes
 from pados.corpus.operator_config import operational_settings
 from pados.db import check_database, get_engine, session_scope
 from pados.graph import register_graph_routes
+from pados.identity import http as identity_http
+from pados.identity.routes import mount_identity
 from pados.logging_config import configure_logging, get_logger
 from pados.loop import service as loop_service
 from pados.loop import acceptance as loop_acceptance
@@ -60,10 +62,17 @@ def create_app() -> FastAPI:
                   lifespan=connectivity_lifespan(settings.connectivity_config))
 
     def control_auth(
+        request: Request,
         x_pados_control_token: Annotated[
             str | None, Header(alias=control_security.CONTROL_TOKEN_HEADER)
         ] = None,
     ) -> None:
+        # The control token header alone decides when it is present (an invalid one is refused, with no cookie
+        # fallback). Only without it, and only with PADOS_IDENTITY_SESSIONS_ENABLED, is a device session cookie
+        # tried; it grants exactly this dependency's authority. With the flag off this path is never taken.
+        if x_pados_control_token is None and identity_http.session_cookie_applies(settings, request):
+            identity_http.authorize_control_session(settings, request)
+            return
         try:
             control_security.authorize_control_request(settings, x_pados_control_token)
         except PermissionError as exc:
@@ -717,6 +726,8 @@ def create_app() -> FastAPI:
     register_graph_routes(app, settings)
     register_product_loop_routes(app, settings)
     mount_remote(app, settings)
+    # Unified Identity & Session phase 1: /identity/v1 (IDENTITY_DISABLED unless PADOS_IDENTITY_SESSIONS_ENABLED).
+    mount_identity(app, settings)
     # OP-001: outermost layer, so the request context and error envelope also cover every route above.
     install_operability(app, component="api")
     return app

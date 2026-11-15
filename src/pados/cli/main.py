@@ -27,6 +27,7 @@ from pados.config import (
 )
 from pados.db import check_database, get_engine, session_scope
 from pados.db.relations import relation_visible
+from pados.identity.cli import device_app
 from pados.logging_config import configure_logging, get_logger, resolve_log_level
 from pados.operability.context import bind_context, context_from_headers
 from pados.loop import service as loop_service
@@ -53,6 +54,7 @@ app.add_typer(node_app, name="node")
 app.add_typer(loop_app, name="loop")
 app.add_typer(storage_app, name="storage")
 app.add_typer(machine_app, name="machine")
+app.add_typer(device_app, name="device")
 
 EVENT_TYPE_HELP = "Allowed values: " + ", ".join(sorted(memory_service.VALID_EVENT_PAYLOAD_KEYS))
 
@@ -815,6 +817,8 @@ def init(
         f"PADOS_ARTIFACT_ROOT={local / 'artifacts'}",
         "PADOS_PRODUCT_LOOP_PROVIDER=AUTO",
         "PADOS_CONTROL_API_TOKEN_HASH=" + hashlib.sha256(control_value.encode("utf-8")).hexdigest().upper(),
+        # Unified Identity & Session (browser pairing): off until the operator enables it.
+        f"PADOS_IDENTITY_STORE_DIR={local / 'identity'}", "PADOS_IDENTITY_SESSIONS_ENABLED=false",
         "# Optional extensions (unset = not configured; never affects Core readiness):",
         "# PADOS_ENTERPRISE_CONFIG=examples/config/enterprise-synthetic.json",
         "# PADOS_COMPUTE_NODES_CONFIG=examples/config/compute-nodes-loopback.json",
@@ -858,6 +862,11 @@ def serve() -> None:
     settings = get_settings()
     assert_localhost_binding(settings)
     assert_unique_control_token(settings)
+    if settings.identity_sessions_enabled:
+        # The session cookie variant follows the request scheme: X-Forwarded-* must never rewrite it.
+        uvicorn.run("pados.api.app:app", host=settings.api_host, port=settings.api_port, log_level="info",
+                    proxy_headers=False)
+        return
     uvicorn.run("pados.api.app:app", host=settings.api_host, port=settings.api_port, log_level="info")
 
 

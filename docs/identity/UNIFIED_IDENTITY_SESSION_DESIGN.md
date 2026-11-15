@@ -51,8 +51,11 @@ widened.
 ### 3.3 Sessions and devices
 
 - **Session id:** 32 random bytes (`secrets.token_urlsafe(32)`). Only `SHA-256(session id)` is stored.
-- **CSRF token:** `HMAC-SHA256(server_key, "csrf:" + session_id)`, URL-safe base64. It is never stored; it is
-  recomputed on demand. The server key is 32 random bytes in `<store>/server.key` (owner-only, created atomically).
+- **CSRF value:** the derived CSRF value is `HMAC-SHA256(server_key, "csrf:" + session_id)`, URL-safe base64. It is
+  never stored; it is recomputed on demand. The server key is 32 random bytes in `<store>/server.key` (owner-only,
+  created atomically).
+- **Control-token binding:** each session records `HMAC-SHA256(server_key, control-token hash)` at pairing. Rotating
+  the control token (`pados init --force`) therefore ends every session (`SESSION_REVOKED`).
 - **Lifetimes:**
   - absolute TTL `PADOS_IDENTITY_SESSION_TTL_SECONDS` (default 86400);
   - idle timeout `PADOS_IDENTITY_IDLE_TIMEOUT_SECONDS` (default 7200), sliding on authenticated use;
@@ -111,11 +114,13 @@ widened.
 
 Closed error codes:
 
-- `IDENTITY_DISABLED`
-- `PAIRING_CODE_INVALID`, `PAIRING_CODE_EXPIRED`, `PAIRING_RATE_LIMITED`
-- `SESSION_REQUIRED`, `SESSION_EXPIRED`, `SESSION_REVOKED`
-- `CSRF_INVALID`, `ORIGIN_NOT_ALLOWED`
-- `DEVICE_NOT_FOUND`, `DEVICE_LIMIT`
+- `IDENTITY_DISABLED` (404)
+- `PAIRING_CODE_INVALID` (403), `PAIRING_CODE_EXPIRED` (403), `PAIRING_RATE_LIMITED` (429)
+- `SESSION_REQUIRED` (403), `SESSION_EXPIRED` (403), `SESSION_REVOKED` (403)
+- `CSRF_INVALID` (403), `ORIGIN_NOT_ALLOWED` (403)
+- `DEVICE_NOT_FOUND` (404), `DEVICE_LIMIT` (409; reserved: phase 1 revokes the oldest device instead, see §3.3)
+- `IDENTITY_STORE_CORRUPT` (503): added in implementation. The store failed closed (§3.3); no session is valid and
+  nothing is written until the operator removes the file.
 
 `PAIRING_CODE_INVALID` covers both an unknown code and a wrong code, so the response does not reveal which.
 
@@ -127,6 +132,38 @@ Closed error codes:
 
 These commands use the control token file and the loopback API. They print no secret other than the pairing code
 itself.
+
+### 3.7 Implementation notes (phase 1 as built)
+
+These record choices the sections above left open, and the one addition (`IDENTITY_STORE_CORRUPT`).
+
+- **Code:** `src/pados/identity/` (`store.py`, `pairing.py`, `sessions.py`, `tokens.py`, `http.py`, `routes.py`,
+  `cli.py`). The session path lives inside the single `control_auth` dependency in `src/pados/api/app.py`, so every
+  route that uses it (`/control/*`, `/memory/*` and `/context/assemble`) accepts a session and nothing else does.
+  The product-loop, graph-run and `/remote/v1` gates read only their own headers and are unchanged.
+- **No header, no cookie:** the control routes answer exactly as before (`missing control token`). With a cookie and
+  no header, refusals use the closed codes. An unknown or malformed cookie is `SESSION_REQUIRED`.
+- **Pairing-code input:** every non-alphanumeric ASCII character is dropped, case is folded and the Crockford aliases
+  I/L→1 and O→0 apply before hashing, so `ABCDE-FGHJK`, `abcde fghjk` and `abcdefghjk` are the same code.
+- **Failed attempts:** a failed pair attempt counts against every outstanding code (a guesser guesses all of them);
+  a code reaching 5 is burned. Minting a fourth outstanding code drops the oldest. An expired code is kept for one
+  hour so that its holder hears `PAIRING_CODE_EXPIRED`; it still counts as a failed attempt.
+- **`pados device pair --label`:** a default label carried by the code, used when `/pair` sends no `device_label`.
+- **Cookie:** `Max-Age` equals the absolute TTL, so a reload after a browser restart still restores the session.
+  `never` over HTTPS is refused by using the `__Host-` Secure variant anyway. With the flag on, `pados serve` runs
+  uvicorn with `proxy_headers=False`, so `X-Forwarded-Proto` can never change the request scheme.
+- **Responses:** every `/identity/v1` response is `Cache-Control: no-store`. `POST /logout` returns
+  `{status:"ok", authenticated:false}` and clears the cookie. `POST /devices/{id}/revoke` returns
+  `{device_id, revoked_at}`, is idempotent, and clears the cookie when the caller revoked its own device. Both accept
+  an empty JSON body (`{}`). An `Origin` or `Sec-Fetch-Site` violation on `GET /session` is `ORIGIN_NOT_ALLOWED`.
+- **Store document:** `<store>/sessions.json`, schema `pados.identity.store.v1`, holds devices, session hashes,
+  pairing-code hashes and the recent failure times. Ended sessions are pruned 7 days after they end, and revoked
+  devices 30 days after revocation. A symbolic link in place of the document or the key is treated as corruption.
+- **Windows:** `os.chmod` cannot express owner-only. The store relies on the per-user ACL of `runtime/local` there,
+  as `control.token` already does. The POSIX mode test is skipped on win32 for that reason.
+- **CLI token file:** `--token-file`, else `<PADOS_IDENTITY_STORE_DIR>/../control.token` (the `pados init` layout),
+  else `<PADOS_HOME>/config/control.token` (installer layout). `--base-url` must be a loopback address. Refusals
+  print one closed code on standard error and exit 1.
 
 ## 4. Phase 2: OIDC (Microsoft Entra ID, Google) and PADOS actors
 
