@@ -10,17 +10,25 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from pados.config import Settings
 from pados.control import security as control_security
 from pados.identity import http as identity_http
-from pados.identity.errors import IDENTITY_DISABLED, IDENTITY_STORE_CORRUPT, SESSION_REQUIRED, IdentityError
+from pados.identity.errors import (
+    IDENTITY_DISABLED,
+    IDENTITY_STORE_CORRUPT,
+    SESSION_EXPIRED,
+    SESSION_REQUIRED,
+    SESSION_REVOKED,
+    IdentityError,
+)
 from pados.identity.sessions import ActiveSession, IdentityService
 from pados.identity.tokens import display_code
 
 PREFIX = "/identity/v1"
+_DEAD_SESSION_CODES = frozenset({SESSION_EXPIRED, SESSION_REVOKED, SESSION_REQUIRED})
 
 
 class PairingCodeRequest(BaseModel):
@@ -115,7 +123,17 @@ def mount_identity(app: FastAPI, settings: Settings, *, service: IdentityService
         service = active_service(request)
         if identity_http.presented_session(settings, request) is None:
             identity_http.refuse(SESSION_REQUIRED)
-        active = identity_http.authorize_session(settings, request, service)
+        try:
+            active = identity_http.authorize_session(settings, request, service)
+        except HTTPException as exc:
+            # A dead session (expired, revoked, unknown) is refused as before, but its cookie is cleared so the
+            # browser stops presenting it. Origin and CSRF refusals keep the cookie: they are not the cookie's fault.
+            if exc.detail not in _DEAD_SESSION_CODES:
+                raise
+            cleared = Response()
+            identity_http.clear_session_cookie(cleared, settings, request)
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail,
+                                headers={**(exc.headers or {}), "set-cookie": cleared.headers["set-cookie"]}) from exc
         call(lambda: service.logout(active))
         response = identity_http.json_no_store({"status": "ok", "authenticated": False})
         identity_http.clear_session_cookie(response, settings, request)

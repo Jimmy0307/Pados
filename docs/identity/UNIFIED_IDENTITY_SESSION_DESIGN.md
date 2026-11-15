@@ -41,10 +41,11 @@ widened.
 
 - 10 characters of Crockford base32 (about 50 bits), shown grouped as `XXXXX-XXXXX`.
 - Stored only as SHA-256. TTL 300 s. Single use.
-- At most 5 failed attempts per code (the code is then burned).
 - At most 3 outstanding codes.
-- A global limit of 20 failed pair attempts per 10 minutes, after which pairing pauses with
-  `PAIRING_RATE_LIMITED`.
+- A global limit of 30 failed pair attempts per 60 seconds, after which pairing pauses with `PAIRING_RATE_LIMITED`
+  until the window clears. Failed attempts never burn a code (review P2-1): `/pair` is unauthenticated, so burning
+  would let any local process destroy the operator's code. At most about 150 guesses fit in a code's life
+  against 2^50 codes. Residual: a process that keeps flooding can delay pairing (availability only).
 - Minting a code requires the control token (header) and the feature flag. It is refused with a session cookie
   alone: a session cannot mint pairing codes, so a stolen session cannot pair more devices.
 
@@ -145,10 +146,13 @@ These record choices the sections above left open, and the one addition (`IDENTI
   no header, refusals use the closed codes. An unknown or malformed cookie is `SESSION_REQUIRED`.
 - **Pairing-code input:** every non-alphanumeric ASCII character is dropped, case is folded and the Crockford aliases
   I/L→1 and O→0 apply before hashing, so `ABCDE-FGHJK`, `abcde fghjk` and `abcdefghjk` are the same code.
-- **Failed attempts:** a failed pair attempt counts against every outstanding code (a guesser guesses all of them);
-  a code reaching 5 is burned. Minting a fourth outstanding code drops the oldest. An expired code is kept for one
+- **Failed attempts:** they only feed the global 60 s failure window; outstanding codes are never burned. Minting a
+  fourth outstanding code drops the oldest. An expired code is kept for one
   hour so that its holder hears `PAIRING_CODE_EXPIRED`; it still counts as a failed attempt.
 - **`pados device pair --label`:** a default label carried by the code, used when `/pair` sends no `device_label`.
+- **One server process:** the store's lock is per process, so `pados serve` must run a single worker (it does).
+  Several workers could lose updates or double-spend a code; a database-backed store is the multi-process option.
+- **Logout of a dead session:** refused with its code (for example `SESSION_EXPIRED`) and the cookie is cleared.
 - **Cookie:** `Max-Age` equals the absolute TTL, so a reload after a browser restart still restores the session.
   `never` over HTTPS is refused by using the `__Host-` Secure variant anyway. With the flag on, `pados serve` runs
   uvicorn with `proxy_headers=False`, so `X-Forwarded-Proto` can never change the request scheme.

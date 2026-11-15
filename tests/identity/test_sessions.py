@@ -74,6 +74,22 @@ def test_logout_requires_csrf_and_origin(harness: Harness) -> None:
     assert anonymous.status_code == 403 and _code(anonymous.json()) == "SESSION_REQUIRED"
 
 
+def test_logout_with_a_dead_session_clears_the_cookie(harness: Harness) -> None:
+    """Review P3: an expired or revoked session is refused, and its cookie is cleared so it stops being sent."""
+    client = harness.client()
+    paired = harness.paired(client)
+    harness.clock.advance(7201)  # past the idle timeout
+    response = client.post("/identity/v1/logout", headers={"Origin": ORIGIN, "X-PADOS-CSRF": paired["csrf_token"]})
+    assert response.status_code == 403 and _code(response.json()) == "SESSION_EXPIRED"
+    cookie = response.headers["set-cookie"].lower()
+    assert cookie.startswith("pados_session=") and "max-age=0" in cookie
+    # A CSRF or Origin refusal on a live session keeps the cookie (not the cookie's fault).
+    live = harness.client()
+    harness.paired(live)
+    refused = live.post("/identity/v1/logout", headers={"Origin": ORIGIN})
+    assert _code(refused.json()) == "CSRF_INVALID" and "set-cookie" not in refused.headers
+
+
 def test_device_list_by_token_and_by_session(harness: Harness) -> None:
     client = harness.client()
     paired = harness.paired(client)

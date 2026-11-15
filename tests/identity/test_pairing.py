@@ -124,33 +124,45 @@ def test_wrong_and_unknown_codes_are_indistinguishable(harness: Harness) -> None
     assert wrong.json()["detail"] == malformed.json()["detail"] == "PAIRING_CODE_INVALID"
 
 
-def test_five_failed_attempts_burn_the_code(harness: Harness) -> None:
+def test_failed_attempts_never_burn_the_operators_code(harness: Harness) -> None:
+    """Review P2-1: an unauthenticated local process guessing must not destroy a freshly minted code."""
     client = harness.client()
     code = harness.mint(client)
-    for _ in range(5):
+    for _ in range(29):  # just under the global pause
         assert harness.pair(client, "ZZZZZ-ZZZZZ").status_code == 403
-    burned = harness.pair(client, code)
-    assert burned.status_code == 403 and _code(burned.json()) == "PAIRING_CODE_INVALID"
-
-
-def test_four_failures_leave_the_code_usable(harness: Harness) -> None:
-    client = harness.client()
-    code = harness.mint(client)
-    for _ in range(4):
-        harness.pair(client, "ZZZZZ-ZZZZZ")
     assert harness.pair(client, code).status_code == 200
 
 
-def test_the_global_failure_limit_pauses_pairing(harness: Harness) -> None:
+def test_the_global_failure_limit_pauses_pairing_briefly(harness: Harness) -> None:
     client = harness.client()
-    for _ in range(20):
-        assert harness.pair(client, "ZZZZZ-ZZZZZ").status_code == 403
     code = harness.mint(client)
+    for _ in range(30):
+        assert harness.pair(client, "ZZZZZ-ZZZZZ").status_code == 403
     paused = harness.pair(client, code)
     assert paused.status_code == 429 and _code(paused.json()) == "PAIRING_RATE_LIMITED"
-    harness.clock.advance(601)
-    fresh = harness.mint(client)
-    assert harness.pair(client, fresh).status_code == 200
+    harness.clock.advance(61)  # the pause clears with the 60 s window, and the code survived it
+    assert harness.pair(client, code).status_code == 200
+
+
+def test_a_code_is_single_use_under_concurrent_pairing(harness: Harness) -> None:
+    """Review P2-2: several threads racing the same code yield exactly one session (one server process)."""
+    import threading
+
+    code = harness.mint(harness.client())
+    clients = [harness.client() for _ in range(8)]
+    statuses: list[int] = []
+    barrier = threading.Barrier(len(clients))
+
+    def race(client: object) -> None:
+        barrier.wait()
+        statuses.append(harness.pair(client, code).status_code)  # type: ignore[arg-type]
+
+    threads = [threading.Thread(target=race, args=(client,)) for client in clients]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert sorted(statuses) == [200] + [403] * (len(clients) - 1)
 
 
 def test_at_most_three_codes_are_outstanding(harness: Harness) -> None:

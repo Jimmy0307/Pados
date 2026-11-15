@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Pairing codes (design §3.2) as pure transitions of the store state.
 
-A code is 10 Crockford base32 characters, stored only as SHA-256, valid for 300 s and consumed by its first
-successful use. Every failed pair attempt counts against every outstanding code (an attacker guessing is guessing
-all of them at once); a code that reaches 5 failed attempts is burned. At most 3 codes are outstanding: minting a
-fourth drops the oldest. 20 failed attempts within 10 minutes pause pairing (``PAIRING_RATE_LIMITED``).
+A code is 10 Crockford base32 characters (about 50 bits), stored only as SHA-256, valid for 300 s and consumed by its
+first successful use. At most 3 codes are outstanding: minting a fourth drops the oldest.
+
+Failed attempts never burn a code. ``/pair`` is unauthenticated and any local process can call it, so burning codes
+on failures would let that process destroy the operator's freshly minted code. Guessing is bounded instead by a short
+global pause: 30 failures within 60 s pause pairing (``PAIRING_RATE_LIMITED``) until the window clears. That allows
+at most about 150 guesses over a code's 300 s life against 2^50 codes. A process that keeps flooding can still delay
+pairing (availability only; the control-token path is unaffected), which is a documented residual.
 """
 from __future__ import annotations
 
@@ -16,10 +20,9 @@ from pados.identity.store import PairingCodeRecord, StoreState
 from pados.identity.tokens import digest, new_pairing_code, normalize_code
 
 CODE_TTL = timedelta(seconds=300)
-MAX_FAILED_ATTEMPTS_PER_CODE = 5
 MAX_OUTSTANDING_CODES = 3
-GLOBAL_FAILURE_LIMIT = 20
-GLOBAL_FAILURE_WINDOW = timedelta(minutes=10)
+GLOBAL_FAILURE_LIMIT = 30
+GLOBAL_FAILURE_WINDOW = timedelta(seconds=60)
 # An expired code is kept a while so its holder hears PAIRING_CODE_EXPIRED rather than PAIRING_CODE_INVALID.
 EXPIRED_CODE_RETENTION = timedelta(hours=1)
 
@@ -79,12 +82,5 @@ def attempt(state: StoreState, now: datetime, presented: str) -> PairAttempt:
 
 
 def _record_failure(state: StoreState, now: datetime) -> StoreState:
-    codes: dict[str, PairingCodeRecord] = {}
-    for key, record in state.pairing_codes.items():
-        if record.expires_at <= now:
-            codes[key] = record
-            continue
-        failed = record.failed_attempts + 1
-        if failed < MAX_FAILED_ATTEMPTS_PER_CODE:  # at the limit the code is burned (dropped)
-            codes[key] = record.model_copy(update={"failed_attempts": failed})
-    return state.model_copy(update={"pairing_codes": codes, "pair_failures": (*state.pair_failures, now)})
+    # Only the global failure window grows; outstanding codes are left intact (see the module docstring).
+    return state.model_copy(update={"pair_failures": (*state.pair_failures, now)})
