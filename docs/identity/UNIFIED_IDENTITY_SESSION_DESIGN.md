@@ -15,7 +15,8 @@ widened.
 
 1. **The trust anchor stays the control token.** Only a caller holding the control token (the operator who can read
    `runtime/local/control.token`) can mint a pairing code. Pairing converts one proof of that possession into a
-   device session. A session grants **exactly** the authority of the control token on the control plane, never more.
+   device session. A session never grants more than the control token. Since the security closure (§3.8) it grants
+   **less**: only the explicitly allowlisted Control Center routes.
 2. **Loopback is not identity.** The API binding to 127.0.0.1 remains a precondition, but pairing always needs a code.
 3. **Sessions are server-side.** The browser holds only an opaque, random, HttpOnly cookie. The server stores only
    hashes.
@@ -122,6 +123,11 @@ Closed error codes:
 - `DEVICE_NOT_FOUND` (404), `DEVICE_LIMIT` (409; reserved: phase 1 revokes the oldest device instead, see §3.3)
 - `IDENTITY_STORE_CORRUPT` (503): added in implementation. The store failed closed (§3.3); no session is valid and
   nothing is written until the operator removes the file.
+- `SESSION_SCOPE_DENIED` (403): security closure (§3.8). A valid device session called a control-plane route that is
+  not on the session allowlist.
+- `IDENTITY_STORE_INSECURE` (503): security closure (§3.9). The store directory or one of its files is readable or
+  writable by someone other than the owner (Windows: another SID; POSIX: group or others). No session is valid and
+  nothing is written.
 
 `PAIRING_CODE_INVALID` covers both an unknown code and a wrong code, so the response does not reveal which.
 
@@ -139,8 +145,9 @@ itself.
 These record choices the sections above left open, and the one addition (`IDENTITY_STORE_CORRUPT`).
 
 - **Code:** `src/pados/identity/` (`store.py`, `pairing.py`, `sessions.py`, `tokens.py`, `http.py`, `routes.py`,
-  `cli.py`). The session path lives inside the single `control_auth` dependency in `src/pados/api/app.py`, so every
-  route that uses it (`/control/*`, `/memory/*` and `/context/assemble`) accepts a session and nothing else does.
+  `cli.py`). The session path lives inside the single `control_auth` dependency in `src/pados/api/app.py`. Only
+  routes that use it (`/control/*`, `/memory/*` and `/context/assemble`) can accept a session, and since §3.8 only
+  the allowlisted ones do.
   The product-loop, graph-run and `/remote/v1` gates read only their own headers and are unchanged.
 - **No header, no cookie:** the control routes answer exactly as before (`missing control token`). With a cookie and
   no header, refusals use the closed codes. An unknown or malformed cookie is `SESSION_REQUIRED`.
@@ -163,11 +170,177 @@ These record choices the sections above left open, and the one addition (`IDENTI
 - **Store document:** `<store>/sessions.json`, schema `pados.identity.store.v1`, holds devices, session hashes,
   pairing-code hashes and the recent failure times. Ended sessions are pruned 7 days after they end, and revoked
   devices 30 days after revocation. A symbolic link in place of the document or the key is treated as corruption.
-- **Windows:** `os.chmod` cannot express owner-only. The store relies on the per-user ACL of `runtime/local` there,
-  as `control.token` already does. The POSIX mode test is skipped on win32 for that reason.
+- **Windows:** `os.chmod` cannot express owner-only. Superseded by §3.9: the store directory now gets an explicit,
+  protected DACL when it is created, and every load checks it.
 - **CLI token file:** `--token-file`, else `<PADOS_IDENTITY_STORE_DIR>/../control.token` (the `pados init` layout),
   else `<PADOS_HOME>/config/control.token` (installer layout). `--base-url` must be a loopback address. Refusals
   print one closed code on standard error and exit 1.
+
+### 3.8 Least privilege for device sessions (security closure A2)
+
+A device session no longer carries the control token's full authority. `src/pados/identity/scopes.py` holds one
+**allowlist** of `(method, route template)` pairs a session may call (`SESSION_ALLOWED`). Anything else is refused
+with `SESSION_SCOPE_DENIED` (403), so the rule fails closed.
+
+- **Where it is enforced:** inside the single `control_auth` dependency (`src/pados/api/app.py`), on the cookie path
+  only, after the session is authenticated (so a dead cookie still gets its own code, such as `SESSION_EXPIRED`).
+- **What is compared:** the template FastAPI matched (`request.scope["route"].path`), never the raw URL. A request
+  without a matched route is refused. `HEAD` is treated as `GET`.
+- **The control token header** is unchanged byte for byte and keeps full authority on every route.
+- **Logs:** a denial logs `identity.session.scope_denied` with the method and the route template only.
+- **Classification test:** `SESSION_DENIED` records the routes kept from sessions on purpose, each with its reason.
+  It grants nothing; it exists so that `tests/identity/test_session_scopes.py` can enumerate every route that
+  depends on `control_auth` and fail when one is neither allowed nor denied, when a denial names a route that is not
+  there, or when an allowlist entry names a route that is not mounted.
+- **Extending it:** add the pair to `SESSION_ALLOWED` in the same change as the route, with a row below and a test
+  case. A marked placeholder in `scopes.py` reserves the planned `POST /control/projects` and project-document
+  routes from another branch; they are **not** listed, because this branch does not mount them.
+- **Not affected:** `/identity/v1/*` keeps its own rules (§3.5): a session may list and revoke devices but never mint
+  pairing codes. The actor surface (§4.2), `/remote/v1`, the product-loop and graph-run gates read only their own
+  headers or cookies.
+
+Route classification (kept in step with `scopes.py`; 57 `control_auth` routes after the product work loop, Work Map and providers were integrated, plus the public `/control/health`):
+
+| Method | Route template | Control token | Device session | Rationale |
+| --- | --- | --- | --- | --- |
+| POST | `/context/assemble` | allowed | **denied** | Assembles a context packet from the memory store across scopes; an operator (control token) action, not a browser one |
+| GET | `/control/approvals` | allowed | allowed | Control Center read |
+| POST | `/control/approvals` | allowed | allowed | Control Center action (CSRF + Origin) |
+| GET | `/control/approvals/{approval_id}` | allowed | allowed | Control Center read |
+| POST | `/control/approvals/{approval_id}/approve` | allowed | allowed | Approval decision; a ResultCandidate approval still needs WebAuthn step-up (`RESULT_ACCEPTANCE_REQUIRES_STEP_UP`) |
+| POST | `/control/approvals/{approval_id}/reject` | allowed | allowed | Approval decision; a ResultCandidate approval still needs WebAuthn step-up (`RESULT_ACCEPTANCE_REQUIRES_STEP_UP`) |
+| POST | `/control/approvals/{approval_id}/revise` | allowed | allowed | Approval decision; a ResultCandidate approval still needs WebAuthn step-up (`RESULT_ACCEPTANCE_REQUIRES_STEP_UP`) |
+| POST | `/control/approvals/{approval_id}/revoke` | allowed | allowed | Control Center action (CSRF + Origin) |
+| GET | `/control/health` | public | allowed | Public health probe (no `control_auth`); listed for the UI contract |
+| GET | `/control/jobs` | allowed | allowed | Control Center read |
+| GET | `/control/jobs/{job_id}` | allowed | allowed | Control Center read |
+| GET | `/control/jobs/{job_id}/artifacts` | allowed | allowed | Control Center read |
+| POST | `/control/jobs/{job_id}/cancel` | allowed | allowed | Control Center action (CSRF + Origin) |
+| GET | `/control/loops` | allowed | allowed | Control Center read |
+| POST | `/control/loops` | allowed | allowed | Control Center action (CSRF + Origin) |
+| GET | `/control/loops/{loop_id}` | allowed | allowed | Control Center read |
+| POST | `/control/loops/{loop_id}/cancel` | allowed | allowed | Control Center action (CSRF + Origin) |
+| GET | `/control/loops/{loop_id}/events` | allowed | allowed | Control Center read |
+| GET | `/control/loops/{loop_id}/iterations` | allowed | allowed | Control Center read |
+| POST | `/control/loops/{loop_id}/pause` | allowed | allowed | Control Center action (CSRF + Origin) |
+| POST | `/control/loops/{loop_id}/result-candidate` | allowed | allowed | Submits a candidate for review; acceptance stays with step-up |
+| POST | `/control/loops/{loop_id}/resume` | allowed | allowed | Control Center action (CSRF + Origin) |
+| POST | `/control/loops/{loop_id}/start` | allowed | allowed | Control Center action (CSRF + Origin) |
+| POST | `/control/loops/{loop_id}/step` | allowed | allowed | Control Center action (CSRF + Origin) |
+| POST | `/control/projections/render` | allowed | **denied** | Writes projection files into the vault on disk |
+| GET | `/control/projects` | allowed | allowed | Control Center read |
+| POST | `/control/projects` | allowed | allowed | Product work loop: creates a project folder under the approved workspace root (no path or id typed); CSRF + Origin |
+| GET | `/control/projects/{project_id}/documents` | allowed | allowed | Product work loop read (Markdown list with size and SHA-256) |
+| POST | `/control/projects/{project_id}/documents` | allowed | allowed | Product work loop: `.md` only, ≤ 256 KiB, inside the project root, no silent overwrite, audited; CSRF + Origin |
+| GET | `/control/projects/{project_id}/documents/content` | allowed | allowed | Product work loop read (one Markdown document) |
+| GET | `/control/projects/{project_id}/work` | allowed | allowed | Product work loop read (projection only) |
+| GET | `/control/projects/{project_id}/work-map` | allowed | allowed | Work Map read (projection only) |
+| GET | `/control/resources` | allowed | allowed | Resources read: measured or UNKNOWN metrics and a cleanup preview; it deletes nothing |
+| GET | `/control/providers` | allowed | allowed | Providers read: reachable vs authorized-and-measured states; never a key value |
+| GET | `/control/providers/{provider_id}` | allowed | allowed | Providers read |
+| POST | `/control/providers/{provider_id}/diagnostics` | allowed | allowed | Observes health, discovery and identity; writes only content-free attempt receipts |
+| POST | `/control/providers/{provider_id}/enable` | allowed | allowed | Only within the operator's configured setup; authorizes no model |
+| POST | `/control/providers/{provider_id}/disable` | allowed | allowed | Narrows |
+| PUT | `/control/providers/{provider_id}` | allowed | **denied** | Operator configuration that can repoint a runtime endpoint or a gateway contract; control token (CLI) only |
+| GET | `/control/jobs/{job_id}/artifacts/{artifact_type}/content` | allowed | allowed | Evidence read: bounded text, only while its SHA-256 matches the receipt |
+| GET | `/control/projects/{project_id}` | allowed | allowed | Control Center read |
+| GET | `/control/projects/{project_id}/activity` | allowed | allowed | Control Center read |
+| GET | `/control/projects/{project_id}/context-summary` | allowed | allowed | Control Center read |
+| GET | `/control/projects/{project_id}/messages` | allowed | allowed | Control Center read |
+| POST | `/control/projects/{project_id}/messages` | allowed | allowed | Control Center action (CSRF + Origin) |
+| GET | `/control/sync/events` | allowed | allowed | Control Center read |
+| POST | `/control/task-goals` | allowed | allowed | Control Center action (CSRF + Origin) |
+| GET | `/control/task-goals/{goal_id}` | allowed | allowed | Control Center read |
+| POST | `/control/task-plans` | allowed | allowed | Control Center action (CSRF + Origin) |
+| GET | `/control/task-plans/{plan_id}` | allowed | allowed | Control Center read |
+| POST | `/control/work-requests` | allowed | allowed | Control Center action (CSRF + Origin) |
+| GET | `/control/work-requests/{request_id}` | allowed | allowed | Control Center read |
+| POST | `/control/work-requests/{request_id}/route` | allowed | allowed | Control Center action (CSRF + Origin) |
+| GET | `/control/workers` | allowed | allowed | Control Center read |
+| GET | `/control/workers/{worker_id}/health` | allowed | allowed | Control Center read |
+| POST | `/memory/facts` | allowed | **denied** | Memory write: adds a fact to long-term memory |
+| POST | `/memory/facts/{memory_id}/promote` | allowed | **denied** | Memory write: promotes a fact's trust level |
+| GET | `/memory/search` | allowed | allowed | Read-only memory search for the project views |
+
+### 3.9 File-system protection of the store and transport limits (security closure A3)
+
+**Windows: protected from creation.** `src/pados/identity/fs_security.py` creates the store directory with
+`CreateDirectoryW` and a `SECURITY_ATTRIBUTES` descriptor built by
+`ConvertStringSecurityDescriptorToSecurityDescriptorW` from
+
+```
+O:<user SID>D:P(A;OICI;FA;;;<user SID>)(A;OICI;FA;;;SY)
+```
+
+- `<user SID>` comes from this process's access token (`OpenProcessToken`, `GetTokenInformation(TokenUser)`,
+  `ConvertSidToStringSidW`). It never comes from `USERNAME` or any other environment value.
+- `P` (protected) blocks inheritance from the parent. `OICI` makes both ACEs inherit to every file created inside
+  (`sessions.json`, `server.key` and their `mkstemp` staging files), so a secret file is protected from its first
+  byte. `os.replace` and `os.link` keep that descriptor.
+- `Administrators` is **not** granted at creation.
+
+**Windows: checked on every load.** Every `load`, `save` and server-key read calls `GetNamedSecurityInfoW` on the
+directory and on each existing store file. It fails closed with `IDENTITY_STORE_INSECURE` when:
+
+- the owner is not this user, `SYSTEM` or `Administrators`;
+- the DACL is NULL (which grants everyone everything);
+- an allow ACE grants another SID anything beyond synchronize, read-control, read-attributes or traverse. Read and
+  write data, extended attributes, attributes, delete, `WRITE_DAC`, `WRITE_OWNER`, generic rights and
+  `MAXIMUM_ALLOWED` all count, and inherit-only ACEs count too, because new files would receive them;
+- an ACE type is not understood (object or compound ACEs). Deny ACEs only restrict and are ignored.
+
+**Why `Administrators` is accepted on load.** It appears on every Windows user profile's inherited ACL, so a store
+created before this check or by an elevated shell carries it. Its members already control the machine (the backup
+and take-ownership privileges bypass any DACL). The installer's owner-only contract (`packages/cli/lib/home.js`,
+`classifyWindowsAcl`) accepts it on the same grounds. `CREATOR OWNER` and `OWNER RIGHTS` are accepted because they
+resolve to the (checked) owner.
+
+**A directory that already exists** is checked, never re-permissioned. If it is open to others the store refuses
+before writing anything; the operator removes it, and PADOS recreates it protected. The reason word is logged
+(`identity.store.insecure`), never a path, a SID or an ACL dump.
+
+**POSIX.** The directory is created by `os.mkdir(path, 0o700)` (then made exactly `0700`), and files are `0600` from
+`mkstemp`. Every load requires the effective uid as owner and no group or other bits.
+
+**What this does not claim.** It protects the store's files. It does not authenticate a Windows user: binding a
+session to a Windows account still needs the OS-attested channel of §5.
+
+**Transport limits.**
+
+- **Non-loopback hosts.** With `PADOS_IDENTITY_SESSIONS_ENABLED=true` and a non-loopback `PADOS_API_HOST`, sessions
+  refuse (`IDENTITY_SECURE_COOKIE_REQUIRED`) unless `PADOS_IDENTITY_COOKIE_SECURE=always`, so only the `__Host-`
+  Secure cookie could ever be issued. With `always`, the control plane's loopback-binding rule still refuses
+  (`control api must bind to localhost`).
+- Both `pados serve` and every path that issues or honours a session (pairing, the session cookie on control and identity routes, actor routes, OIDC start and callback) apply both checks, so
+  every combination fails closed. v1 has no supported non-loopback session deployment.
+- **Cross-port localhost.** Browsers scope cookies by host, not port, and every `http://127.0.0.1:<port>` page is
+  *same-site* with the Control Center, so `SameSite=Strict` does not stop another local web app from sending the
+  cookie. The defences:
+  - A state-changing request needs an allowlisted `Origin`, the CSRF header (which that page cannot read) and
+    `Sec-Fetch-Site` of `same-origin` or `none`.
+  - A read carrying a foreign `Origin` is refused.
+  - No CORS header is ever sent, so a no-cors read is opaque to the page that made it.
+  - **Residual:** such a page can trigger side-effect-free session reads and learn only their timing.
+- Tests: `tests/identity/test_store_protection.py` and `tests/identity/test_transport_and_cross_port.py`.
+
+### 3.10 Single sign-on in the Control Center (security closure A4)
+
+- **Where:** a **單一登入 (SSO)** section on the **This browser & devices** page (`web/src/sso.ts`,
+  `web/src/sso-panel.tsx`). It lists the providers from `GET /identity/v1/session`, keeping only a `start_url` equal
+  to `/identity/v1/oidc/<id>/start` (same-origin, exact). It is hidden when there is no provider and no actor
+  session. The pairing panel only points to it.
+- **Return from the provider:** `?sso=ok` or `?sso_error=<CODE>` is read once per page load. The message is zh-TW
+  first, with the closed code in an expandable 技術細節 detail; a malformed code is shown as
+  `SSO_ERROR_UNRECOGNIZED`. `history.replaceState` then removes both parameters and keeps every other parameter and
+  the fragment. Such a return opens the Control Center on that page. Set `post_login_redirect` to `/operator.html`
+  so the browser lands on the operator console (`/` is the Remote console, which ignores the parameters).
+- **Signed in:** with an actor session the section shows, from `GET /identity/v1/me`, the display name, actor id,
+  provider, issuer **host**, expiry and a per-project roles table. It states that the roles grant no control-token
+  authority and no result acceptance. An actor the server no longer binds is shown as signed out.
+- **Logout:** `POST /identity/v1/actor/logout` (new, §4.2) ends only the actor session. `POST /logout` would end the
+  device session whenever a paired device cookie travels too.
+- **Browser storage:** the actor CSRF value stays in React state. Nothing is written to `localStorage`,
+  `sessionStorage`, IndexedDB or `document.cookie`, which the Vitest suite checks.
 
 ## 4. Phase 2: OIDC (Microsoft Entra ID, Google) and PADOS actors
 
@@ -329,6 +502,7 @@ No new dependency, no database migration. Unchanged: the scheduler, router, CAS,
 | `GET /oidc/{provider_id}/callback` | state + pre-auth cookie | 302 to the Control Center with `?sso=ok` or `?sso_error=CODE` |
 | `GET /me` | actor cookie (bound) | `{actor_id, display_name, auth_method:"oidc", provider_id, issuer, subject, projects:[{project_id, roles}], expires_at, idle_expires_at, csrf_token}` |
 | `POST /projects/{project_id}/work-requests` | actor cookie + CSRF + Origin, `contributor` on the project | `{title, body, idempotency_key (≤48), requested_capability?}` → the control route's response |
+| `POST /actor/logout` | actor cookie + CSRF + Origin (no binding check) | Ends only the presented actor session and clears its cookie; a device session is untouched (security closure A4, §3.10) |
 
 - **`GET /session`** keeps its phase 1 meaning: `authenticated` is the device session, the only session the control
   plane accepts. It now lists `providers` (`[{id, kind, display_name, start_url}]`, empty unless both configuration
@@ -357,8 +531,7 @@ state, nonce, verifier, ID token, client credential, session id or CSRF value.
   prints raw query strings (the callback carries the code and state). The app's own `http.request.finished` log
   records the route template only.
 
-**Web.** No change. The existing Control Center already lists `providers` by label when the list is non-empty and
-ignores the additive `actor` field. A sign-in button and an actor view are follow-ups.
+**Web.** Built in the security closure: see §3.10 (sign-in section, return messages, actor view, actor logout).
 
 ## 5. Windows Hello and trusted Windows SID (plan only, phase 3)
 

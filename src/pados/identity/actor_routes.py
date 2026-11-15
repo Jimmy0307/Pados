@@ -5,8 +5,10 @@
 | --- | --- |
 | ``GET /identity/v1/me`` | a live actor session whose identity is still bound |
 | ``POST /identity/v1/projects/{project_id}/work-requests`` | the same, plus ``contributor`` on that project, CSRF and Origin |
+| ``POST /identity/v1/actor/logout`` | the actor session cookie, its CSRF and Origin; ends that actor session only |
 
-Nothing else accepts an actor session. Work-request creation delegates to the very function the control route
+Nothing else accepts an actor session. ``/actor/logout`` only takes authority away: it ends the presented actor
+session even when a paired device session cookie travels too (``POST /logout`` would end the device session then). Work-request creation delegates to the very function the control route
 ``POST /control/work-requests`` uses (passed in by ``pados.api.app``), so there is no second creation path and no
 scheduler, router, CAS or ScopeVersion change. The actor's idempotency key is namespaced
 (``actor:<actor_id>:<key>``) so one actor can never replay or read back another caller's request through a key.
@@ -27,7 +29,7 @@ from pados.identity import http as identity_http
 from pados.identity.actor_sessions import ActorSessions
 from pados.identity.actors import CREATE_WORK_REQUEST, PROJECT_ID_PATTERN, ROLES
 from pados.worker.schemas import CapabilityId
-from pados.identity.errors import ACTOR_ROLE_REQUIRED, IDENTITY_DISABLED
+from pados.identity.errors import ACTOR_ROLE_REQUIRED, IDENTITY_DISABLED, IdentityError
 from pados.identity.sessions import IdentityService
 from pados.logging_config import get_logger
 
@@ -68,6 +70,21 @@ def mount_actor_routes(app: FastAPI, settings: Settings, *,
             "projects": projects, "expires_at": record.expires_at.isoformat(),
             "idle_expires_at": actor.session.idle_expires_at.isoformat(),
             "csrf_token": ActorSessions(service).csrf_for(actor.session)})
+
+    @app.post(f"{PREFIX}/actor/logout")
+    def actor_logout(request: Request) -> JSONResponse:
+        service = _service(request)
+        # Origin, the actor cookie, a live session and its CSRF value; no binding check: ending a session whose
+        # binding was removed must still work. The device session cookie, if any, is neither read nor touched.
+        actor = actor_http.resolve_actor_session(settings, request, service)
+        try:
+            ActorSessions(service).logout(actor)
+        except IdentityError as exc:
+            identity_http.refuse(exc.code)
+        get_logger("pados.identity").info("identity.actor.logout", actor_id=actor.record.actor_id)
+        response = identity_http.json_no_store({"status": "ok", "authenticated": False})
+        actor_http.clear_actor_cookie(response, settings, request)
+        return response
 
     if create_work_request is None:
         return

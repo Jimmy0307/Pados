@@ -22,7 +22,7 @@ def _code(response_json: dict[str, object]) -> str:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits only: on Windows os.chmod toggles only "
-                    "the read-only flag and the store inherits the per-user ACL of runtime/local")
+                    "the read-only flag; the store's protected DACL is tested in test_store_protection.py")
 def test_store_files_are_owner_only(harness: Harness) -> None:
     harness.paired(harness.client())
     for name in ("sessions.json", "server.key"):

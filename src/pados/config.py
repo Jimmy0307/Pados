@@ -102,6 +102,9 @@ class Settings(BaseSettings):
     approval_ttl_seconds: int = Field(default=86400, ge=300, le=604800, alias="PADOS_APPROVAL_TTL_SECONDS")
     product_workspace_root: str = Field(default="", alias="PADOS_PRODUCT_WORKSPACE_ROOT")
     product_object_root: str = Field(default="", alias="PADOS_PRODUCT_OBJECT_ROOT")
+    # Optional storage policy document (pados.lifecycle.storage_policy: budget, warning fractions, retention windows)
+    # read by the Control Center's Resources summary; unset means the documented defaults (no byte budget).
+    storage_policy_path: str = Field(default="", alias="PADOS_STORAGE_POLICY")
     # Where worker jobs write handoffs and outputs. Receipts record these paths and verification re-reads them, so
     # operator surfaces resolve it to an absolute path (never relative to whatever directory the server runs in).
     artifact_root: str = Field(default="runtime/artifacts", alias="PADOS_ARTIFACT_ROOT")

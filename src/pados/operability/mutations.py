@@ -97,6 +97,7 @@ MUTATIONS: dict[tuple[str, str], MutationKind] = {
     ("POST", "/identity/v1/pairing-codes"): _RECONCILE,
     ("POST", "/identity/v1/pair"): _RECONCILE,
     ("POST", "/identity/v1/logout"): _STATE,  # a revoked session stays revoked
+    ("POST", "/identity/v1/actor/logout"): _STATE,  # an ended actor session stays ended
     ("POST", "/identity/v1/devices/{device_id}/revoke"): _STATE,  # a revoked device stays revoked
     # Phase 2 (design §4): an actor's work request, keyed as actor:<actor_id>:<key> on the control creation path.
     ("POST", "/identity/v1/projects/{project_id}/work-requests"): _KEY,
