@@ -300,7 +300,7 @@ def test_resources_summary_route_is_read_only_and_needs_a_credential(world: dict
     body = client.get("/control/resources").json()
     assert body["status"] == "ok" and body["authority"] == "PROJECTION_ONLY"
     assert body["cleanup_plan"]["execute"]["available"] is False
-    token = world["harness"].client().get("/control/resources", headers=TOKEN_HEADERS)
-    assert token.status_code == 200
+    with_header = world["harness"].client().get("/control/resources", headers=TOKEN_HEADERS)
+    assert with_header.status_code == 200
     assert world["harness"].client().get("/control/resources").status_code == 403
     assert len(calls) == 2
