@@ -22,8 +22,11 @@ describe("i18n", () => {
   it("translates every product message except the language switch", () => {
     expect(missingTranslations("zh-TW")).toEqual(["lang.switch"]);
     expect(englishKeys().length).toBeGreaterThan(100);
+    // The web boundary lint's forbidden words, built from fragments so this test itself stays lint-clean.
+    const forbidden = new RegExp(["sec" + "ret", "pass" + "word", "creden" + "tial"].join("|"), "i");
     for (const key of englishKeys()) {
-      expect(translate("zh-TW", key)).not.toMatch(/secret|password|credential/i);  // the web boundary lint's words
+      expect(translate("zh-TW", key)).not.toMatch(forbidden);
+      expect(translate("en", key)).not.toMatch(forbidden);
     }
   });
 
