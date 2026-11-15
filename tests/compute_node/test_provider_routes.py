@@ -91,6 +91,7 @@ def test_gateway_setup_diagnostics_and_toggle(world: Any) -> None:
 
     off = client.post("/control/providers/sim-gw/disable", headers=HEADERS, json={"expected_revision": 2})
     assert off.json()["provider"]["enabled"] is False
+    assert off.json()["provider"]["reachability"]["state"] == "DISABLED"  # never the earlier REACHABLE observation
     document = (contract.parent.parent / "local" / "providers.json").read_text(encoding="utf-8")
     everything = document + created.text + view.__repr__() + down.__repr__()
     assert key not in everything  # no key value is ever stored or returned

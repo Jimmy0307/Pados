@@ -177,8 +177,10 @@ class ProviderDiagnostics:
             "provider_id": item.provider_id, "kind": item.kind, "display_name": item.display_name or item.provider_id,
             "source": source, "enabled": item.enabled, "settings": settings,
             "auth_env": item.auth_env, "auth_env_present": env_present(item.auth_env),
-            "reachability": (last or {}).get("reachability") or {
-                "state": "DISABLED" if not item.enabled else "NOT_CHECKED", "code": None, "explanation": None},
+            # a disabled provider is shown as disabled, whatever an earlier diagnostics run observed
+            "reachability": {"state": "DISABLED", "code": "PROVIDER_DISABLED",
+                             "explanation": LOCAL_EXPLANATIONS["PROVIDER_DISABLED"]} if not item.enabled
+            else (last or {}).get("reachability") or {"state": "NOT_CHECKED", "code": None, "explanation": None},
             "models": (last or {}).get("models", []), "checks": (last or {}).get("checks", []),
             "checked_at": (last or {}).get("checked_at"), "circuit": circuit_snapshot(item.provider_id),
             "recent_attempts": self._recorders[item.provider_id].recent(10) if item.provider_id in self._recorders
