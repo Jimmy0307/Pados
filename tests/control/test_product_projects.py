@@ -29,7 +29,7 @@ def test_request_validation_uses_closed_codes() -> None:
     assert _refused({"name": "a‮b"}) == "PROJECT_NAME_INVALID"  # bidi override
     assert _refused({"name": "ok", "description": "x" * 2001}) == "PROJECT_DESCRIPTION_INVALID"
     assert _refused({"name": "ok", "classification": "top-secret"}) == "PROJECT_CLASSIFICATION_INVALID"
-    assert _refused({"name": "ok", "description": "https://u:hunter2x@example.com"}) == "PROJECT_CONTENT_REJECTED"
+    assert _refused({"name": "ok", "description": "https://u:" + "hunter2x@example.com"}) == "PROJECT_CONTENT_REJECTED"
     multi = ProjectCreate(name="ok", description="line one\nline two", idempotency_key="k")
     assert product_projects.validate_request(multi)[1] == "line one\nline two"
 

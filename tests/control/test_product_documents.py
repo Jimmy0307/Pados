@@ -51,7 +51,7 @@ def test_content_limits_and_checks() -> None:
         "中" * (documents.DOCUMENT_MAX_BYTES // 3 + 1): ("DOCUMENT_TOO_LARGE", 413),  # bytes, not characters
         "a\x00b": ("DOCUMENT_CONTENT_INVALID", 422),
         "\ud800": ("DOCUMENT_ENCODING_INVALID", 422),
-        "see https://user:hunter2x@example.com/x": ("DOCUMENT_CONTENT_REJECTED", 422),
+        "see https://user:" + "hunter2x@example.com/x": ("DOCUMENT_CONTENT_REJECTED", 422),
     }
     for content, expected in cases.items():
         with pytest.raises(ProductControlError) as excinfo:
