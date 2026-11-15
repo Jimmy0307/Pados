@@ -23,6 +23,8 @@ from pados.identity.oidc.jws import RsaPublicKey, rsa_key_from_jwk
 
 Clock = Callable[[], datetime]
 DISCOVERY_TTL = timedelta(hours=1)
+# After a failed discovery, /start answers OIDC_PROVIDER_UNAVAILABLE without an outbound request for this long.
+DISCOVERY_FAILURE_COOLDOWN = timedelta(seconds=30)
 JWKS_TTL = timedelta(hours=1)
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_JWKS_KEYS = 64
@@ -109,13 +111,18 @@ class ProviderClient:
         self._lock = threading.Lock()
         self._discovery: Discovery | None = None
         self._keys: KeySet | None = None
+        self._discovery_failed_at: datetime | None = None
 
     def _get(self, url: str, reason: str) -> dict[str, Any]:
-        if not is_https_url(url):
+        try:
+            https = is_https_url(url)
+        except ValueError as exc:  # a malformed provider URL (for example an unclosed IPv6 bracket)
+            raise _unavailable(f"{reason}_url_invalid") from exc
+        if not https:
             raise _unavailable(f"{reason}_not_https")
         try:
             response = self.http.get(url, headers={"Accept": "application/json"})
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             raise _unavailable(f"{reason}_unreachable") from exc
         if response.status_code != 200:
             raise _unavailable(f"{reason}_status")
@@ -127,9 +134,23 @@ class ProviderClient:
             cached = self._discovery
         if cached is not None and now - cached.fetched_at < DISCOVERY_TTL:
             return cached
-        fresh = _validated_discovery(self.provider, self._get(self.provider.discovery_url, "discovery"), now)
+        with self._lock:
+            failed_at = self._discovery_failed_at
+        if failed_at is not None and now - failed_at < DISCOVERY_FAILURE_COOLDOWN:
+            raise _unavailable("discovery_cooldown")  # no outbound request while the provider is failing
+        try:
+            fresh = _validated_discovery(self.provider, self._get(self.provider.discovery_url, "discovery"), now)
+        except ValueError as exc:  # OidcFailure is not a ValueError; this catches malformed discovery URLs
+            with self._lock:
+                self._discovery_failed_at = now
+            raise _unavailable("discovery_invalid") from exc
+        except OidcFailure:
+            with self._lock:
+                self._discovery_failed_at = now
+            raise
         with self._lock:
             self._discovery = fresh
+            self._discovery_failed_at = None
         return fresh
 
     def _fetch_keys(self) -> KeySet:
@@ -157,7 +178,7 @@ class ProviderClient:
         endpoint = self.discovery().token_endpoint
         try:
             response = self.http.post(endpoint, data=form, headers={"Accept": "application/json"})
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             raise _unavailable("token_unreachable") from exc
         if response.status_code != 200:
             raise OidcFailure(OIDC_PROVIDER_ERROR, "token_refused")

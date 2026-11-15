@@ -175,6 +175,11 @@ fixed reason word:
   Another web app on the same host could plant a pre-auth cookie and push its own completed sign-in into your
   browser (login CSRF, which needs an identity that is bound). Use loopback HTTP only on a single-user host, and
   HTTPS otherwise.
-- **Pending sign-ins.** At most 32 are kept, and the oldest is dropped. A local process that calls `/start` in a loop
-  can therefore cancel a sign-in in progress; the user just signs in again. `/start` refuses cross-site and same-site
-  (another localhost port) browser requests.
+- **Pending sign-ins.** At most 32 are kept and none is ever evicted, so a local process calling `/start` in a loop
+  cannot cancel a sign-in in progress. New starts are limited to 10 per minute; beyond that, or with 32 pending,
+  `/start` answers `OIDC_START_RATE_LIMITED` (429). Residual: such a process can delay new sign-ins (availability
+  only). `/start` refuses cross-site and same-site (another localhost port) browser requests.
+- **Provider outages.** After a failed discovery, `/start` answers `OIDC_PROVIDER_UNAVAILABLE` for 30 s without
+  contacting the provider. Malformed provider URLs and malformed token headers fail closed with a closed code.
+- **Validation order.** The actor work-request route validates the request body before the actor session, as the
+  control route does; a caller without a session can learn only whether a body is well formed.

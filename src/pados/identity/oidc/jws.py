@@ -55,7 +55,7 @@ def b64url_encode(data: bytes) -> str:
 def _json_object(raw: bytes, reason: str) -> dict[str, Any]:
     try:
         value = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:  # deep nesting must fail closed, not 500
         raise _invalid(reason) from exc
     if not isinstance(value, dict):
         raise _invalid(reason)
