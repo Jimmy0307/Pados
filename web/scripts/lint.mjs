@@ -16,9 +16,11 @@ const forbidden = [
 // are stripped before matching so the rules above stay strict everywhere else.
 // WebAuthn standard API names and public key-handle ids are likewise not secrets: the private
 // key never leaves the authenticator and the browser only relays signed, single-use assertions.
+// The fetch cookie mode for the paired browser session (src/control-auth.ts) is a standard option, not a value.
 const allowedTokens = [
   'type="password"', 'autoComplete="current-password"',
   "navigator.credentials", "PublicKeyCredential", "allowCredentials", "pubKeyCredParams", "credential_id",
+  'credentials: "same-origin"',
 ];
 const findings = [];
 

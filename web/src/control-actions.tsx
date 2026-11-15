@@ -5,19 +5,20 @@
 // an approval that backs a ResultCandidate is refused there (RESULT_ACCEPTANCE_REQUIRES_STEP_UP) and is decided only
 // in the Remote console with a fresh WebAuthn step-up. A decision is sent only after the person confirms the exact
 // approval, project, summary and version. The token lives in this page's memory only; it is never stored.
+// When this browser is paired (docs/identity/UNIFIED_IDENTITY_SESSION_DESIGN.md §3), the same requests go without any
+// control token: the HttpOnly session cookie travels by itself and every write carries X-PADOS-CSRF (control-auth.ts).
+// A session that turns out expired, revoked or refused is reported and read again; the write is never retried.
 import { useEffect, useState, type FormEvent, type ReactElement } from "react";
 import { HttpError, describeFailure, requestJson } from "./http";
 import { inboxAction, pageHref } from "./page-links";
+import { authDescription, authorizedInit, hasControlAuth, type ControlAuth } from "./control-auth";
+import { IDENTITY_MESSAGES, identityFailure, isSessionLost } from "./identity";
+import { isLocalPage } from "./local-page";
 import type { DecisionInboxItem, Project } from "./api";
 
-export const CONTROL_TOKEN_HEADER = "X-PADOS-Control-Token";
+export { CONTROL_TOKEN_HEADER } from "./control-auth";
+export { isLocalPage } from "./local-page";
 export const LOCAL_ONLY = "CONTROL_TOKEN_LOCAL_ONLY";
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
-
-/** The control token is only ever typed into, and sent from, a page this computer serves to itself. */
-export function isLocalPage(hostname: string | undefined = globalThis.location?.hostname): boolean {
-  return LOOPBACK_HOSTS.has(String(hostname || "").toLowerCase());
-}
 export type ApprovalVerb = "approve" | "reject" | "revise";
 
 type ApprovalSubject = {
@@ -45,12 +46,19 @@ function idempotencyKey(prefix: string): string {
   return `${prefix}-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
-/** A /control request with the operator's control token; errors keep the server's pados.error.v1 code. */
-export function controlRequest<T>(path: string, controlValue: string, init: RequestInit = {}, fetcher?: typeof fetch): Promise<T> {
+/**
+ * A /control request with the operator's control token, or with this browser's paired session (no token: the cookie,
+ * plus X-PADOS-CSRF on writes). Errors keep the server's pados.error.v1 code.
+ */
+export function controlRequest<T>(path: string, auth: ControlAuth, init: RequestInit = {}, fetcher?: typeof fetch): Promise<T> {
   // A build of this page served from any other host (a static site) must never carry the token to that host.
   if (!isLocalPage()) return Promise.reject(new Error(`${LOCAL_ONLY}: open the console on this computer (127.0.0.1)`));
-  const headers = { Accept: "application/json", "Content-Type": "application/json", [CONTROL_TOKEN_HEADER]: controlValue };
-  return requestJson<T>(path, { ...init, headers: { ...headers, ...(init.headers || {}) } }, fetcher ? { fetcher } : {});
+  return requestJson<T>(path, authorizedInit(auth, init), fetcher ? { fetcher } : {});
+}
+
+/** A failed control call in plain words: identity codes and the step-up refusal get their guidance. */
+export function controlFailure(error: unknown): string {
+  return error instanceof HttpError && IDENTITY_MESSAGES[error.code] ? identityFailure(error) : describeFailure(error);
 }
 
 // The capabilities a work request may name (pados.worker.schemas.CapabilityId). Naming one makes the server record
@@ -82,26 +90,26 @@ const CAPTURE_HINTS: Record<string, string> = {
 
 export function workRequestFailure(error: unknown): string {
   const hint = error instanceof HttpError ? CAPTURE_HINTS[error.code] : undefined;
-  return hint ? `${describeFailure(error)} ${hint}` : describeFailure(error);
+  return hint ? `${describeFailure(error)} ${hint}` : controlFailure(error);
 }
 
-export function createWorkRequest(controlValue: string, projectId: string, title: string, body: string,
+export function createWorkRequest(auth: ControlAuth, projectId: string, title: string, body: string,
                                   fetcher?: typeof fetch, key: string = idempotencyKey("web-work"), capability?: string,
 ): Promise<{ work_request: { id: string; status?: string } }> {
   const payload = { project_id: projectId, title, body, idempotency_key: key, ...(capability ? { requested_capability: capability } : {}) };
-  return controlRequest("/control/work-requests", controlValue, {
+  return controlRequest("/control/work-requests", auth, {
     method: "POST",
     body: JSON.stringify(payload),
   }, fetcher);
 }
 
-export function getApproval(controlValue: string, approvalId: string, fetcher?: typeof fetch): Promise<{ approval: ControlApproval }> {
-  return controlRequest(`/control/approvals/${encodeURIComponent(approvalId)}`, controlValue, {}, fetcher);
+export function getApproval(auth: ControlAuth, approvalId: string, fetcher?: typeof fetch): Promise<{ approval: ControlApproval }> {
+  return controlRequest(`/control/approvals/${encodeURIComponent(approvalId)}`, auth, {}, fetcher);
 }
 
-export function decideApproval(controlValue: string, approval: ControlApproval, verb: ApprovalVerb, reason: string,
+export function decideApproval(auth: ControlAuth, approval: ControlApproval, verb: ApprovalVerb, reason: string,
                                fetcher?: typeof fetch): Promise<{ approval: ControlApproval }> {
-  return controlRequest(`/control/approvals/${encodeURIComponent(approval.id)}/${verb}`, controlValue, {
+  return controlRequest(`/control/approvals/${encodeURIComponent(approval.id)}/${verb}`, auth, {
     method: "POST",
     body: JSON.stringify({ version: Number(approval.version), reason, idempotency_key: idempotencyKey(`web-${verb}`) }),
   }, fetcher);
@@ -117,14 +125,14 @@ export function describeSubject(approval: ControlApproval): string[] {
 }
 
 /** The text a person confirms before a decision is sent: what exactly is being decided. */
-export function decisionPrompt(approval: ControlApproval, verb: ApprovalVerb): string {
+export function decisionPrompt(approval: ControlApproval, verb: ApprovalVerb, auth: ControlAuth = ""): string {
   return [
     `${verb.toUpperCase()} approval ${approval.id}`,
     `project ${approval.project_id} · version ${approval.version} · ${approval.subject_kind || "no subject"}`,
     ...describeSubject(approval),
     `summary: ${(approval.proposal_summary || "").slice(0, 300)}`,
     "",
-    "This records your decision with the control token. Continue?",
+    `This records your decision with ${authDescription(auth)}. Continue?`,
   ].join("\n");
 }
 
@@ -145,7 +153,14 @@ export function ControlTokenPanel({ controlValue, onChange, local = isLocalPage(
   </form>;
 }
 
-export function WorkRequestPage({ controlValue, projects }: { controlValue: string; projects: Project[] }): ReactElement {
+/** What a write page asks for when it cannot make a change yet. */
+export function missingAuthText(pairingOffered: boolean): string {
+  return pairingOffered ? "Pair this browser or enter the control token first" : "Enter the control token first";
+}
+
+type WriteProps = { auth: ControlAuth; pairingOffered?: boolean; onSessionLost?: (error: unknown) => void };
+
+export function WorkRequestPage({ auth, projects, pairingOffered = false, onSessionLost }: WriteProps & { projects: Project[] }): ReactElement {
   const [projectId, setProjectId] = useState("");
   // One key per request being written: a retry after an unknown outcome is the same request, not a second one.
   const [requestKey, setRequestKey] = useState(() => idempotencyKey("web-work"));
@@ -159,13 +174,14 @@ export function WorkRequestPage({ controlValue, projects }: { controlValue: stri
     setBusy(true);
     setNotice("");
     try {
-      const result = await createWorkRequest(controlValue, projectId, String(form.get("title") || ""), String(form.get("body") || ""),
+      const result = await createWorkRequest(auth, projectId, String(form.get("title") || ""), String(form.get("body") || ""),
         undefined, requestKey, String(form.get("capability") || ""));
       setCreated(result.work_request.id);
       setRequestKey(idempotencyKey("web-work"));
       formElement.reset();
     } catch (error) {
       setNotice(`Not created: ${workRequestFailure(error)}`);
+      if (isSessionLost(error)) onSessionLost?.(error);  // read the session again; never resend the write
     } finally {
       setBusy(false);
     }
@@ -184,14 +200,14 @@ export function WorkRequestPage({ controlValue, projects }: { controlValue: stri
         {WORK_CAPABILITIES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
       </select></label>
       <label>What should be done<textarea className="control-input" name="body" required rows={5} maxLength={WORK_TEXT_MAX_LENGTH} /></label>
-      <button className="control-button" type="submit" disabled={!controlValue || busy}>{controlValue ? "Create work request" : "Enter the control token first"}</button>
+      <button className="control-button" type="submit" disabled={!hasControlAuth(auth) || busy}>{hasControlAuth(auth) ? "Create work request" : missingAuthText(pairingOffered)}</button>
     </form>
     {created && <p role="status">Created work request {created}.</p>}
     {notice && <p className="control-error" role="alert">{notice}</p>}
   </section>;
 }
 
-export function ApprovalsPage({ controlValue, items, focus }: { controlValue: string; items: DecisionInboxItem[]; focus: string | null }): ReactElement {
+export function ApprovalsPage({ auth, items, focus, pairingOffered = false, onSessionLost }: WriteProps & { items: DecisionInboxItem[]; focus: string | null }): ReactElement {
   const approvals = items.filter((item) => item.type === "APPROVAL");
   const [selected, setSelected] = useState<string | null>(focus);
   useEffect(() => setSelected(focus), [focus]);
@@ -205,33 +221,41 @@ export function ApprovalsPage({ controlValue, items, focus }: { controlValue: st
           {action.kind === "in-console" && <button className="control-button" type="button" onClick={() => setSelected(action.approvalId)}>Review</button>}
         </td></tr>;
       })}</tbody></table></div>
-    {selected && <ApprovalReview key={selected} controlValue={controlValue} approvalId={selected} />}
+    {selected && <ApprovalReview key={selected} auth={auth} approvalId={selected} pairingOffered={pairingOffered} onSessionLost={onSessionLost} />}
   </section>;
 }
 
-function ApprovalReview({ controlValue, approvalId }: { controlValue: string; approvalId: string }): ReactElement {
+function ApprovalReview({ auth, approvalId, pairingOffered = false, onSessionLost }: WriteProps & { approvalId: string }): ReactElement {
   const [approval, setApproval] = useState<ControlApproval | null>(null);
   const [notice, setNotice] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
+  const usable = hasControlAuth(auth);
   useEffect(() => {
-    if (!controlValue) return;
-    let current = true;  // a late answer for an earlier selection or token is dropped
-    getApproval(controlValue, approvalId).then((result) => { if (current) setApproval(result.approval); })
-      .catch((error) => { if (current) setNotice(describeFailure(error)); });
+    if (!usable) return;
+    let current = true;  // a late answer for an earlier selection, token or session is dropped
+    getApproval(auth, approvalId).then((result) => { if (current) setApproval(result.approval); })
+      .catch((error) => {
+        if (!current) return;
+        setNotice(controlFailure(error));
+        if (isSessionLost(error)) onSessionLost?.(error);
+      });
     return () => { current = false; };
-  }, [controlValue, approvalId]);
-  if (!controlValue) return <p className="control-muted">Enter the control token above to review approval {approvalId}.</p>;
+  }, [auth, usable, approvalId, onSessionLost]);
+  if (!usable) {
+    return <p className="control-muted">{pairingOffered ? "Pair this browser or enter the control token" : "Enter the control token"} above to review approval {approvalId}.</p>;
+  }
   if (!approval) return <p className="control-muted" role="status">{notice || `Loading approval ${approvalId}…`}</p>;
   async function decide(verb: ApprovalVerb): Promise<void> {
-    if (!approval || !window.confirm(decisionPrompt(approval, verb))) return;
+    if (!approval || !window.confirm(decisionPrompt(approval, verb, auth))) return;
     setBusy(true);
     try {
-      const result = await decideApproval(controlValue, approval, verb, reason);
+      const result = await decideApproval(auth, approval, verb, reason);
       setApproval(result.approval);
       setNotice(`Recorded: ${result.approval.status}.`);
     } catch (error) {
-      setNotice(`Not recorded: ${describeFailure(error)}`);
+      setNotice(`Not recorded: ${controlFailure(error)}`);
+      if (isSessionLost(error)) onSessionLost?.(error);  // read the session again; never resend the decision
     } finally {
       setBusy(false);
     }
