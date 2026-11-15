@@ -28,7 +28,7 @@ No squash, rebase or force push was used. Branch protection was not changed.
   dogfood only, and recorded risk acceptance (PR #26 comment, 2026-11-14).
 - **Human code review of the cumulative 195-file diff: NOT PERFORMED.** The owner stated the authorization does not
   certify a personal review. Branch protection requires 0 approving reviews and no GitHub approval was created.
-- **Independent review:** agent reviews only (PR #26 rounds 1–3; one independent security review per follow-up PR).
+- **Independent review:** agent reviews only. PR #26 had rounds 1–3. Four independent review runs covered #27, #28–#30 (one run), #32 and #33; their dispositions are PR comments on #27, #28, #29, #30, #32 and #33. The release lead reviewed #31 (docs).
   These are inputs, not a human approval.
 
 ### Recorded decisions
@@ -56,12 +56,12 @@ the repository (machine-local evidence directory), as for earlier rounds.
 | Windows native E2E | **PASS** | private PostgreSQL 18 cluster |
 | Windows PostgreSQL integration gate | **PASS** | D1, D4, residual, proof lane, P6-11, migration |
 | Windows Pester / Playwright | **PASS** | launcher and web |
-| Windows full pytest | **FAIL (baseline-identical)** | 4924 tests, 163 failures, identical by test id to RC `202df5c` and to the `205543a` baseline; 0 new, 0 resolved (R19-3 win32 fail-closed cases). Not reported as PASS. |
+| Windows full pytest | **FAIL (baseline-identical)** | 4924 tests, 163 failures, identical by test id to RC `202df5c` (JUnit, 163 cases) and to the `205543a` baseline (log comparison of 113 distinct test names); 0 new, 0 resolved (R19-3 win32 fail-closed cases). Not reported as PASS. |
 | VMware Ubuntu 24.04: 19 gates | **PASS** 19/19 | unmodified `vm_online_chain.sh` (blob `48d7828`), offline recipe |
 | VMware Linux E2E | **PASS** | including restart persistence and governed acceptance |
 | VMware Linux full pytest | **PASS** | 0 failures |
 | Runtime lane gate, `local-supervised-dogfood` | **NOT_READY (tool verdict)** | Only failing required lane: `github-ci`, because the required `dependency review` job is pull-request-only and is skipped on a push to `main`. See OWNER-GATE-1. At the tree-identical RC `202df5c` the same gate was READY. |
-| Runtime lane gate, `production` | **NOT_READY** | model, REA, OpenMAIC and AI-Scientist-v3 lanes NOT_VALIDATED |
+| Runtime lane gate, `production` | **NOT_READY** | required lanes `github-ci` (PR-only `dependency review` skipped on push) and `windows-full-suite` (163 baseline-identical failures) fail, and the local-model governed acceptance, local-model measured execution, REA, OpenMAIC and AI-Scientist-v3 lanes are NOT_VALIDATED |
 
 ### Final validation at `main` `7043c63` (after PRs #27 to #33)
 
@@ -72,7 +72,7 @@ the repository (machine-local evidence directory), as for earlier rounds.
 | Windows full pytest | **FAIL (baseline-identical)** | 5024 tests (100 new), 163 failures, identical by test id to `1fd5608`; 0 new |
 | VMware run r1 | **18/19, E2E PASS** (kept as evidence) | `frontend` failed: the offline npm cache had no vite 7.3.7 (`ENOTCACHED`), an environment gap after PR #28 |
 | VMware run r2 | **PASS 19/19, E2E PASS** | same SHA and unmodified chain; npm cache seeded with the vite 7.3.7 and source-map-js 1.2.2 tarballs, wheelhouse with the new pypdf, certifi and Mako wheels |
-| Runtime lane gate | local-supervised-dogfood **NOT_READY (tool)**, production **NOT_READY** | same single cause as at `1fd5608`: `dependency review` skipped on push (OWNER-GATE-1); every other lane PASS/VERIFIED except the baseline-identical Windows full suite |
+| Runtime lane gate | local-supervised-dogfood **NOT_READY (tool)**, production **NOT_READY** | for local-supervised-dogfood the single failing required lane is `github-ci`, as at `1fd5608` (`dependency review` skipped on push, OWNER-GATE-1); for production, required lanes `github-ci` (PR-only `dependency review` skipped on push) and `windows-full-suite` (163 baseline-identical failures) fail, and the local-model governed acceptance, local-model measured execution, REA, OpenMAIC and AI-Scientist-v3 lanes are NOT_VALIDATED |
 
 ## 4. Local-supervised-dogfood user journey (real code, executable)
 
@@ -136,7 +136,7 @@ tinypool; dev-only) need the vitest 4 major upgrade (OWNER-DEP). CodeQL: 5 open,
 | --- | --- |
 | OWNER-REVIEW | Optional human review of the cumulative diff (recorded as not performed) |
 | OWNER-GATE-1 | Whether a pull-request-only required check (`dependency review`) may be satisfied for a push commit by the PR run on an identical tree, or the registry marks it PR-only. The gate rule was **not** changed. |
-| OWNER-WIN-JOB | Windows Job Object containment for the OCR and PDF workers and the model worker (memory/CPU kernel caps) |
+| OWNER-WIN-JOB | Windows Job Object containment for the PDF and OCR workers (memory/CPU kernel caps). The opt-in model worker already runs in a Job Object since PR #33 (commit cap, process limit, kill on close; no CPU cap) |
 | OWNER-NET | OS-level network isolation for workers (Windows Firewall/AppContainer or a Linux network namespace needs privileges) |
 | OWNER-DI | DI-1 (in-process ONNX vs subprocess worker), DI-4 (scanned OCR), default-on proposals |
 | OWNER-DEP | vitest 4 major upgrade; CodeQL dismissals; Dependabot coverage of the runtime lock |

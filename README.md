@@ -100,7 +100,7 @@ Report security issues using the process in [SECURITY.md](SECURITY.md).
 
 ## Current Status
 
-**Release baseline 2026-11-14: the PR #20 to #25 stack is on `main` (PR #26, merge commit `1fd5608`), followed by security fixes (PRs #27 to #33). Local-supervised dogfood evidence on `main` passes on Windows 11 and VMware Linux; production is NOT_READY. Human code review of the cumulative diff was not performed (owner-authorized merge). See [the baseline](docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md).**
+**Release baseline 2026-11-14: the PR #20 to #25 stack is on `main` (PR #26, merge commit `1fd5608`), followed by security fixes (PRs #27 to #33). Local-supervised dogfood lanes that execute code pass on `main` on Windows 11 and VMware Linux; the runtime lane-gate tool still reports NOT_READY (a pull-request-only check is skipped on push, OWNER-GATE-1) and the Windows full suite keeps its 163 baseline-identical failures. Production is NOT_READY. Human code review of the cumulative diff was not performed (owner-authorized merge). See [the baseline](docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md).**
 
 **P7 Authority Baseline: CLOSED at `main@e550141` (PR #16; PR #8 delivered the P7 capability discovery and learning loop). Current phase: Capability Expansion.**
 

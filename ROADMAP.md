@@ -29,7 +29,7 @@ Close cross-platform validation for task protocols, residual completion, Work Gr
 
 ## Release Baseline 2026-11-14
 
-`main` carries the PR #20 to #25 stack (PR #26) and the follow-up security fixes; local-supervised dogfood evidence passes on Windows 11 and VMware Linux and production is NOT_READY (docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md). Next, in order: owner decisions OWNER-GATE-1, OWNER-WIN-JOB, OWNER-NET and OWNER-DI; the tracked P2/P3 residuals; then any default-on proposal for the document-intelligence worker.
+`main` carries the PR #20 to #25 stack (PR #26) and the follow-up security fixes; local-supervised dogfood lanes that execute code pass on Windows 11 and VMware Linux, the lane-gate tool reports NOT_READY (OWNER-GATE-1), the Windows full suite keeps 163 baseline-identical failures, and production is NOT_READY (docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md). Next, in order: owner decisions OWNER-GATE-1, OWNER-WIN-JOB, OWNER-NET and OWNER-DI; the tracked P2/P3 residuals; then any default-on proposal for the document-intelligence worker.
 
 ## Controlled Dogfood
 

@@ -96,13 +96,13 @@ Evidence classes:
 | Governance | WORK_ROUTE approval lifecycle (TTL, revoke, single use) | R | E2E negatives pass |
 | Governance | WebAuthn step-up for result acceptance; control token cannot decide it | R + S | Real P-256 software authenticator, not a hardware key; holds in non-default schemas (#27) |
 | Core capabilities | `READ_REPOSITORY`, `SEARCH_CONTEXT`, `SUMMARIZE`, `CLASSIFY_REQUEST`, `GENERATE_DOCUMENT_DRAFT`, `MODIFY_MARKDOWN`, `MODIFY_CODE`, `RUN_STATIC_ANALYSIS`, `RUN_TESTS`, `RUN_MIGRATIONS`, `BUILD_RELEASE`, `AUDIT_RELEASE`, `CREATE_ARTIFACT` | R for the deterministic probe path (`RUN_STATIC_ANALYSIS` / `markdown_reference_check` in the E2E); others contract-tested | Model-backed variants need a configured provider (none by default) |
-| Retrieval pack | `PASSAGE_RETRIEVAL` (BM25), `PASSAGE_RETRIEVAL_EMBEDDING`, `PASSAGE_RERANK` | R | Synthetic corpus |
-| Document intelligence | `PASSAGE_RETRIEVAL_DENSE`, `PASSAGE_RANK_FUSION`, `PASSAGE_EVIDENCE_PACK` | R (synthetic corpus) | Pinned bge-small model, live on both platforms |
+| Retrieval pack | `PASSAGE_RETRIEVAL` (BM25), `PASSAGE_RETRIEVAL_EMBEDDING`, `PASSAGE_RERANK` | S | Real engines on Windows and Linux, synthetic corpus only |
+| Document intelligence | `PASSAGE_RETRIEVAL_DENSE`, `PASSAGE_RANK_FUSION`, `PASSAGE_EVIDENCE_PACK` | X | EXPERIMENTAL, opt-in (the `document-intelligence` extra). Pinned models live on both platforms on a synthetic corpus only; not exercised through PostgreSQL |
 | Document intelligence | `PASSAGE_RERANK_CROSS_ENCODER` | D (SHADOW default) | ACTIVE only through a separate operator-chosen template (DI-7) |
 | Document intelligence | DI-1 subprocess model worker with OS isolation | X | #33; never enabled by `src/` or `scripts/` |
 | OCR pack | text layer (`DOCUMENT_OCR` via pypdf), structure, layout, tables, figures | R on Linux (isolated); B on Windows (fails closed, R19-3) | — |
 | OCR pack | Raster path (pypdfium2 + Tesseract) | X | Live only in a Docker image on the VM (earlier round) |
-| Corpus / URL ingest / enterprise extraction | Untrusted PDF parsing | R | Isolated bounded worker (#32); no kernel memory cap on Windows |
+| Corpus / URL ingest / enterprise extraction | Untrusted PDF parsing | S | Isolated bounded worker (#32): real worker processes on Windows and Linux CI, synthetic hostile PDFs; no kernel memory cap on Windows |
 | Problem solving pack | `STRUCTURED_PROBLEM_SOLVING` (8D profile), `ROOT_CAUSE` | S | Deterministic drafter only; model claim provider NOT_VALIDATED |
 | Extraction pack | `EXTRACT_TABLE_DATASET`, `STRUCTURED_EXTRACTION` | S | Contract and refusal tests |
 | Algorithms pack | `INFER_CONCEPT_STATES`, `RESULT_EXPLANATION` | S | Contract-level |
@@ -110,7 +110,7 @@ Evidence classes:
 | Local inference | Ollama under a measured binding | R (measured, Stage B) | Output never reaches the CAS (R19-6) |
 | Product Loop | `/product-loop/*` | D | `PADOS_PRODUCT_LOOP_ENABLED=false` by default |
 | Optional runtimes | REA, OpenMAIC, AI-Scientist-v3 | B | Adapters tested against fakes only |
-| Remote Ops / PWA | Mobile intents to the Home Base | R on VMware (virtual authenticator, earlier round) | Hardware passkey UAT pending |
+| Remote Ops / PWA | Mobile intents to the Home Base | S (VMware, virtual authenticator, earlier round) | Hardware passkey UAT pending |
 | Operability | Health (`/health/live`, `/health/ready`), metrics, trace context, lane gate | R | Loopback only |
 
 ## 5. Local-supervised dogfood journey (validated synthetic, both platforms)
@@ -142,7 +142,7 @@ Per-step mapping: baseline §4.
 | GitHub-confirmed | pr-ci (linux, windows, macos), CodeQL ×2, secret scan and CI policy | PASS |
 | GitHub-confirmed | rc-ci: packaging linux-x64 and win32-x64, fresh-install migration gate, PostgreSQL integration, manifest | PASS |
 | Machine-local Windows 11 | 18 CI gates; E2E; PostgreSQL gate; Pester; Playwright | PASS |
-| Machine-local Windows 11 | Full pytest | **FAIL, baseline-identical:** 4924 tests, 163 failures, the same test ids as RC `202df5c` and baseline `205543a` |
+| Machine-local Windows 11 | Full pytest | **FAIL, baseline-identical:** 4924 tests, 163 failures, the same test ids as RC `202df5c` (JUnit, 163 cases) and the `205543a` baseline (log comparison, 113 distinct names) |
 | Machine-local VMware | 19 gates; E2E; Linux full pytest | PASS (19/19) |
 
 ### 6.2 At final `main` `7043c63`
@@ -177,7 +177,7 @@ had. Merges needed updates against `main` because branch protection is strict.
 | local-supervised-dogfood | READY | NOT_READY | NOT_READY |
 | production | NOT_READY | NOT_READY | NOT_READY |
 
-At both `main` commits the only failing required lane is `github-ci`. The required `dependency review` job runs only
+For local-supervised-dogfood, at both `main` commits the only failing required lane is `github-ci`. For production, `windows-full-suite` also fails and five lanes are NOT_VALIDATED. The required `dependency review` job runs only
 on pull requests and is skipped on a push to `main`. All other required checks succeeded. The gate rule was not
 changed. The decision is OWNER-GATE-1.
 
@@ -190,7 +190,7 @@ changed. The decision is OWNER-GATE-1.
 | certifi emSign (critical), Mako | #30 | Fixed |
 | vite and source-map-js advisories (dev) | #28 | Fixed |
 | `.env` and control-token write-through (CodeQL #8, adjacent) | #29 | Fixed |
-| Model worker: only a polled memory cap; network denial in-process only | #33 | Kernel caps when opted in. Windows network isolation is open (owner decision) |
+| Model worker: only a polled memory cap; network denial in-process only | #33 | Kernel caps when opted in (Windows Job Object without a CPU cap; Linux RLIMIT_AS and seccomp). Windows network isolation is open (owner decision) |
 | tinypool, vitest, @vitest/mocker (dev only) | — | Accepted residual until the vitest 4 major upgrade (owner decision) |
 | CodeQL #1, #2, #3, #4, #7 | Triaged false positives (security register) | Owner dismisses in GitHub |
 | P2-01, P2-03, P2-05, N-2 | — | Accepted for local use (baseline §6) |
@@ -210,6 +210,7 @@ Alert counts:
   - The Windows full suite is baseline-identical FAIL (R19-3), which this target does not require.
   - The lane-gate tool reports NOT_READY only because of OWNER-GATE-1. **Status: PASS_WITH_EXPLICIT_RESIDUALS.**
 - **Production: NOT_READY.**
+  - Failing required lanes: `github-ci` (OWNER-GATE-1) and `windows-full-suite` (163 baseline-identical failures, R19-3).
   - These lanes are NOT_VALIDATED: local-model governed acceptance (R19-6), measured LLM execution at this commit,
     REA, OpenMAIC and AI-Scientist-v3.
   - These items are open: Windows kernel containment for the workers, Windows worker network isolation,

@@ -112,7 +112,7 @@ An optional provider being unavailable does not block the platform. REA (capabil
 
 ## Implementation State
 
-Release baseline 2026-11-14: see `docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md` for what is implemented, validated synthetic, validated with a real runtime, experimental, disabled and blocked, with the diagrams in `docs/architecture/public/release-baseline-2026-11-14.mmd` and `capability-status-2026-11-14.mmd`. No authority path changed in that round.
+Release baseline 2026-11-14: see `docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md` for what is implemented, validated synthetic, validated with a real runtime, experimental, disabled and blocked, with the diagrams in `docs/architecture/public/release-baseline-2026-11-14.mmd` and `capability-status-2026-11-14.mmd`. No new authority path was added. The existing result-acceptance guard was tightened (the control token can no longer decide a ResultCandidate approval, and since PR #27 the guard does not depend on the PostgreSQL schema), and one owner-accepted Core change bounded artifact reads (DI-9).
 
 The P7 Authority Baseline is closed. The canonical baseline is `main@e550141` (PR #16, post-merge authorization and runtime hardening; PR #8 delivered the P7 capability discovery and learning loop). The authority layer is frozen: `TaskEnvelope`, the scheduler, `CapabilityRegistry`, `CapabilityExecutor`, the router, policy, authorization and approval, execution receipts, verification, `ResultCandidate`, CAS semantic acceptance, audit, state and memory, and the P7 session-binding authority. Core is not expanded further.
 

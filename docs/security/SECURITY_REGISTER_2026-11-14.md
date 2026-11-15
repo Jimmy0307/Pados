@@ -46,7 +46,7 @@ item), and N-1 (`src/pados/control/service.py`, `src/pados/operations/service.py
 
 ## Status after merges (2026-11-14, later)
 
-- Merged: #27 (N-1), #28 (vite, source-map-js), #29 (`.env` and control token), #30 (certifi, Mako), #32 (pypdf 6.21.4 and the isolated PDF worker, closing the 14 pypdf alerts and P2-11).
+- Merged: #27 (N-1), #28 (vite, source-map-js), #29 (`.env` and control token), #30 (certifi, Mako), #32 (pypdf 6.21.4 and the isolated PDF worker, closing P2-11). The 14 pypdf alerts are fixed on `main` (the manifest pins 6.21.4) but stay open until Dependabot's next dependency-graph scan of `scripts/stage_b`.
 - Still open by decision: DB-2/3/4/5/12 (vitest 4 major), CodeQL dismissals, GAP-1.
 
 ## Owner decisions needed
