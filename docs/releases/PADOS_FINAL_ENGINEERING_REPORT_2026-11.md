@@ -287,8 +287,8 @@ Measured denominators only:
     vector database, a new scheduler, router or CAS.
 - **Review yield:**
   - At least 6 independent agent review runs on the follow-up PRs: 4 PR-level runs recorded as PR comments (#27;
-    #28, #29 and #30 together; #32; #33), plus one earlier run each by the implementing agents of #32 and #33
-    (described in those PR bodies). Codex automated reviews also ran on #26–#33. #31 (docs) has only the Codex
+    #28, #29 and #30 together; #32; #33), plus one earlier independent review each, described in the #32 and
+    #33 PR bodies. Codex automated reviews also ran on #26–#33. #31 (docs) has only the Codex
     review on record.
   - 4 P2 findings addressed before merge (#29 token, #32 P2-A and P2-B, #33 P2-1). P2-A is only partly fixed
     (CORPUS-RETRY, found after merge). Each fix has a test that fails on the

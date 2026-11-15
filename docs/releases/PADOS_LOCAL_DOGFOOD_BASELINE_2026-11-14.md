@@ -28,7 +28,7 @@ No squash, rebase or force push was used. Branch protection was not changed.
   dogfood only, and recorded risk acceptance (PR #26 comment, 2026-11-14).
 - **Human code review of the cumulative 195-file diff: NOT PERFORMED.** The owner stated the authorization does not
   certify a personal review. Branch protection requires 0 approving reviews and no GitHub approval was created.
-- **Independent review:** agent reviews only. PR #26 had rounds 1–3. Four PR-level independent review runs covered #27, #28–#30 (one run), #32 and #33; their dispositions are PR comments on #27, #28, #29, #30, #32 and #33 (those on #27, #28 and #30 were posted after merge). The implementing agents of #32 and #33 each ran one earlier review (PR bodies). Codex automated reviews also ran on #26–#33; #31 (docs) has only the Codex review on record.
+- **Independent review:** agent reviews only. PR #26 had rounds 1–3. Four PR-level independent review runs covered #27, #28–#30 (one run), #32 and #33; their dispositions are PR comments on #27, #28, #29, #30, #32 and #33 (those on #27, #28 and #30 were posted after merge). One earlier independent review each is described in the #32 and #33 PR bodies. Codex automated reviews also ran on #26–#33; #31 (docs) has only the Codex review on record.
   These are inputs, not a human approval.
 
 ### Recorded decisions
