@@ -8,6 +8,8 @@ import { expect, test, devices } from "@playwright/test";
  * PADOS_LIVE_REMOTE_STEP_UP points at the seed's browser.json (0600, outside the repository).
  */
 const seedFile = process.env.PADOS_LIVE_REMOTE_STEP_UP || "";
+// PADOS_WEB_PORT is the variable playwright.config.ts and vite.config.ts read; unset, 5173.
+const localOrigin = `http://localhost:${Number(process.env.PADOS_WEB_PORT || 5173)}`;
 test.use({ ...devices["Pixel 7"] });
 
 test("live: mobile PWA approves a verified result with fresh step-up through the real Home Base", async ({ page }) => {
@@ -25,7 +27,7 @@ test("live: mobile PWA approves a verified result with fresh step-up through the
   const decisions: string[] = [];
   page.on("request", (request) => { if (request.method() === "POST") decisions.push(new URL(request.url()).pathname); });
 
-  await page.goto("http://localhost:5173/");
+  await page.goto(`${localOrigin}/`);
   await page.getByLabel("Actor").fill(seed.actor);
   await page.getByLabel("Access proof").fill(seed.access);
   await page.getByLabel("Confirm Home Base origin").check();

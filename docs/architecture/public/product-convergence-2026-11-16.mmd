@@ -1,0 +1,46 @@
+%% PADOS product convergence, 2026-11-16 (draft PRs #35 to #38 integrated at 1af18ba, plus the docs PR). Not merged.
+%% Solid = implemented with LIVE evidence; dashed = SYNTHETIC, NOT_LIVE_VALIDATED, NOT_IMPLEMENTED or an owner decision.
+%% Render with any Mermaid renderer. Status words follow docs/product/PRODUCT_ACCEPTANCE_REPORT_2026-11-16.md.
+flowchart TB
+  subgraph Host["One Windows or Linux host, loopback only"]
+    Launcher["scripts/windows/Start-PADOS.ps1<br/>checks, start, -Status, -Stop, -DryRun<br/>never runs pados init, never edits .env"]
+    subgraph Browser["Browser: operator.html, Control Center (zh-TW first)"]
+      Pair["This browser & devices<br/>Pair this browser, Log out, Revoke"]
+      Projects["專案 Projects<br/>create with a name, Markdown documents"]
+      Work["工作需求 → 執行<br/>plan, approve, TaskLoop, Evidence, candidate"]
+      Map["工作心智圖 Work Map<br/>read-only projection"]
+      Res["資源與儲存 Resources<br/>MEASURED or UNKNOWN, cleanup preview only"]
+      Prov["AI 模型與連線 Providers<br/>reachable is not governed use"]
+    end
+    Vite["Vite dev server 127.0.0.1:5173<br/>same-origin proxy"]
+    subgraph API["pados serve 127.0.0.1:8088"]
+      Auth["control_auth<br/>control token, full authority<br/>paired session: allowlist, CSRF, Origin"]
+      Routes["/control routes<br/>projects, documents, work, work-map, resources, providers"]
+      Core["Existing authority, unchanged<br/>approvals, TaskLoop, receipts, ResultCandidate"]
+    end
+    Store["Identity store runtime/local/identity<br/>hashes only, owner-only ACL"]
+    PG[("PostgreSQL<br/>operational, proof, corpus")]
+    Ollama["Local Ollama<br/>measured profile + explicit registration"]
+  end
+  Remote["Remote console<br/>fresh WebAuthn step-up"]
+  CAS["Single CAS<br/>ScopeVersion advance"]
+  GW["Enterprise AI gateway over VPN"]:::notlive
+  IdP["Entra ID / Google OIDC"]:::notlive
+  Hello["Windows Hello / SID channel"]:::notimpl
+
+  Launcher --> API
+  Launcher --> Vite
+  Browser --> Vite --> Auth
+  Auth --> Routes --> Core --> PG
+  Auth --> Store
+  Prov --> Routes
+  Routes --> Ollama
+  Core -->|ResultCandidate waits, PENDING| Remote
+  Remote --> CAS --> PG
+  Routes -.->|ADAPTER_READY, SIMULATED_E2E_PASS| GW
+  Pair -.->|SSO section, SYNTHETIC only| IdP
+  Store -.-> Hello
+  Auth -.-x|session can never accept a result| CAS
+
+  classDef notlive stroke-dasharray: 5 5,stroke:#a60,stroke-width:2px
+  classDef notimpl stroke-dasharray: 2 4,stroke:#888

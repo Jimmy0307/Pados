@@ -100,6 +100,15 @@ Report security issues using the process in [SECURITY.md](SECURITY.md).
 
 ## Current Status
 
+**Product convergence 2026-11-16: draft PRs #35 (identity sessions), #36 (product work loop UI), #37 (Work Map and
+Resources) and #38 (provider setup and enterprise gateway adapter) are stacked and integrated at `1af18ba`. Not
+merged; owner review pending. Each part passed its live end-to-end run on its branch head, and the integrated head
+passes its unit, integration and web suites. Final Windows and Linux validation at the integrated head is still open.
+Microsoft Entra ID and Google sign-in, and the enterprise gateway, are NOT_LIVE_VALIDATED. Windows Hello and Windows SID
+binding are NOT_IMPLEMENTED. Production is NOT_READY. See the
+[Product Acceptance Report](docs/product/PRODUCT_ACCEPTANCE_REPORT_2026-11-16.md) and the
+[zh-TW operating guide](docs/product/OPERATING_GUIDE_zh-TW.md).**
+
 **Release baseline 2026-11-14: the PR #20 to #25 stack is on `main` (PR #26, merge commit `1fd5608`), followed by security fixes (PRs #27 to #33). Local-supervised dogfood lanes that execute code pass on `main` on Windows 11 and VMware Linux; the runtime lane-gate tool still reports NOT_READY (a pull-request-only check is skipped on push, OWNER-GATE-1) and the Windows full suite keeps its 163 baseline-identical failures. Production is NOT_READY. Human code review of the cumulative diff was not performed (owner-authorized merge). See [the baseline](docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md).**
 
 **P7 Authority Baseline: CLOSED at `main@e550141` (PR #16; PR #8 delivered the P7 capability discovery and learning loop). Current phase: Capability Expansion.**
@@ -129,6 +138,11 @@ The authority layer is frozen: `TaskEnvelope`, the scheduler, `CapabilityRegistr
 | Product Loop and installer (RC2 ARCH-1/SEC-1, SEC-2, EXEC-1, INST-1) | Product Loop dispatch and commit need a human approval of the exact operation, re-checked before the CAS and single-use. Cloud dispatch is gated on project classification (default ceiling PUBLIC). A route whose worker has no executor is refused (`ROUTE_HAS_NO_EXECUTOR`). Re-running `pados init` never activates another runtime (`UPDATE_REQUIRED`) and migrates existing data only with `--migrate`. The Product Loop stays disabled by default. |
 | Untrusted PDF parsing (P2-11) | pypdf 6.21.4; corpus upload, URL ingest and enterprise extraction parse PDFs in a bounded `python -I` worker, not in the API process (PR #32). Windows has no kernel memory cap for it yet (owner decision) |
 | Model worker OS isolation (DI-1, opt-in) | Opt-in only. When enabled, kernel-enforced memory and process limits (Windows Job Object; Linux RLIMIT_AS and a seccomp filter that denies sockets), failing closed (PR #33). Windows network isolation and the embedder pin RAM limit are owner decisions; default-on is not proposed |
+| Browser pairing and sessions (draft PR #35, flag off by default) | `pados device pair` once, then an HttpOnly server-side session replaces pasting the control token. The session is least-privilege (an allowlist) and can never accept a result. LIVE: Windows 11 identity E2E 26 PASS, VMware Linux 23 PASS (branch heads). SYNTHETIC: the allowlist and the SSO UI. Entra ID and Google: NOT_LIVE_VALIDATED. Windows Hello and SID binding: NOT_IMPLEMENTED |
+| Product work loop in the Control Center (draft PR #36) | zh-TW first. Create a project with a name only, add Markdown, request → deterministic plan → approval → TaskLoop → Evidence → ResultCandidate waiting for the WebAuthn step-up. LIVE: product flow E2E 15/15 with live Playwright (branch head) |
+| Work Map and Resources (draft PR #37) | Read-only projections: the 工作心智圖 mind map or list; and 資源與儲存, where every metric is MEASURED or UNKNOWN with a reason, with a cleanup preview only. LIVE: E2E 18/18 (branch head) |
+| AI providers and enterprise gateway (draft PR #38) | AI 模型與連線 page: reachability and governed use shown separately. Gateway adapter: ADAPTER_READY and SIMULATED_E2E_PASS (15/15); ENTERPRISE_LIVE_NOT_VALIDATED. Real local model: a governed `qwen3:8b` run on Ollama 0.40.16 passed (LIVE, one Windows host) |
+| Windows launcher (docs PR) | `scripts/windows/Start-PADOS.ps1`: checks, start, `-Status`, `-Stop`, `-DryRun`; never runs `pados init` or edits `.env`. It waits until each port is held by its own child and `/health/ready` returns a PADOS readiness report, and any failure or Ctrl+C during the start stops what it started. Pester 34/34 under PowerShell 5.1, including a start path with fake children from a checkout path with spaces and non-ASCII characters; a live run at `1af18ba` on its own ports |
 | Static Pages build | Prepared in the prior product phase; not deployed |
 | Live OCR backend | Text-layer PDFs: live on VMware Linux through the isolated OCR pack. Scanned PDFs: NOT_VALIDATED (no rasterizer or engine installed; Windows isolation fails closed) |
 | Document intelligence (on `main`, EXPERIMENTAL, opt-in) | Governed dense retrieval, RRF fusion, cross-encoder rerank (SHADOW by default) and evidence-pack hand-off into the Structured Problem Solving pack and the existing ResultCandidate path. Pinned local models are live-validated on Windows and VMware Linux on a synthetic corpus only (`docs/packs/document_intelligence/`) |
@@ -153,6 +167,11 @@ cd web
 npm ci
 npm run dev
 ```
+
+On Windows, once `pados init`, PostgreSQL and the migrations are in place, `.\scripts\windows\Start-PADOS.ps1` checks the
+prerequisites, starts `pados serve` and the web console, and opens `http://127.0.0.1:5173/operator.html` (`-DryRun`,
+`-Status` and `-Stop` are also available). Step by step, in Traditional Chinese:
+[docs/product/OPERATING_GUIDE_zh-TW.md](docs/product/OPERATING_GUIDE_zh-TW.md).
 
 For a static production build, run `npm run build` from `web/`. The Pages build uses `/Pados/` by default; set `PADOS_PAGES_BASE=/` for a custom-domain root build.
 

@@ -21,7 +21,7 @@ hash (`pados.release.deploy_verify`).
 | Frontend | `npm ci --ignore-scripts && npm run typecheck && npm test && npm run lint && npm run build` | ci | ✅ | — | — |
 | Playwright (mocked) | `npx playwright test e2e/operator.spec.ts e2e/enterprise-mission-control.spec.ts e2e/compute-nodes-mission-control.spec.ts` | local | ✅ | — | — |
 | CodeQL | `github/codeql-action` for `python` and `javascript-typescript` | security | ✅ | — | — |
-| Dependency review | `actions/dependency-review-action` (`fail-on-severity: high`) on PRs | security | ✅ | — | — |
+| Dependency review | `actions/dependency-review-action` (`fail-on-severity: high`) on PRs (PR base..head), pushes to `main` (`before`..commit) and the weekly schedule (first parent..commit) | security | ✅ | — | — |
 | Secret / credential scan | `python scripts/release/secret_scan.py OUT.json`; release scanner (`tests/unit/test_release_package.py`); GitHub secret scanning + push protection (repository settings) | ci, security, release-candidate | ✅ | ✅ | — |
 | Public export hygiene | `python scripts/release/public_export_check.py` (private markers only where the untracked marker file exists) | ci | ✅ | ✅ | — |
 | Public export build | `python scripts/release/build_public_export.py COMMIT OUT` (refuses without the marker file; re-scans the tree); `prepare_public_branch.py` (local branch only, never pushes) | local | ✅ | ✅ | — |

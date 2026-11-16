@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+### Windows launcher, zh-TW operating guide and product acceptance report (docs PR on the #35–#38 stack)
+
+- `scripts/windows/Start-PADOS.ps1` (and `Start-PADOS.cmd`), Windows PowerShell 5.1:
+  - finds the checkout and checks the venv, npm, `web\node_modules`, `.env`, PostgreSQL reachability and free ports,
+    printing the exact one-line fix for each problem;
+  - starts `pados serve` and the Vite dev server, with logs in `runtime\logs\` and PIDs in
+    `runtime\local\pados-launcher.json`, waits for `/health/ready`, opens `/operator.html` and prints the pairing
+    command;
+  - `-Status`, `-Stop` (stops only processes it started, checking PID and start time) and `-DryRun`;
+  - never runs `pados init` and never edits `.env` or a database;
+  - ready means each port is held by the launcher's own child (or a descendant) and `/health/ready` returns a
+    PADOS readiness report (`pados.health.v1`); any failure or Ctrl+C during the start stops what was started;
+    only closed codes from logs and health answers are printed;
+  - Pester tests in `tests/launcher/Start-PADOS.Windows.Tests.ps1`: 34 passed (review fixes included).
+- `docs/product/OPERATING_GUIDE_zh-TW.md`: from first start to rollback, with real UI labels, a plain-language entry for
+  every common error code, and SYNTHETIC / LIVE / NOT_LIVE_VALIDATED marked per feature.
+- `docs/product/PRODUCT_ACCEPTANCE_REPORT_2026-11-16.md`: acceptance items A1–A4, B1–B4, C1–C5, D, E and F1–F5 with
+  status and evidence; the final validation section is still open.
+- Architecture diagram `docs/architecture/public/product-convergence-2026-11-16.mmd`. Security register additions for
+  identity, providers, the gateway and the launcher.
+
+### AI providers and enterprise gateway adapter (draft PR #38)
+
+- AI 模型與連線 (Providers) page and `/control/providers`: reachability and governed use (measured and authorized) are
+  shown separately. The owner setup file holds env-var names only and can only narrow. Sessions may read, diagnose,
+  enable and disable; `PUT` is token-only.
+- `enterprise_gateway` compute-node backend, with these statuses:
+  - ADAPTER_READY;
+  - SIMULATED_E2E_PASS (15/15);
+  - **ENTERPRISE_LIVE_NOT_VALIDATED**.
+- A real governed local model run passed: `qwen3:8b` on Ollama 0.40.16, re-measured, with a temporary explicit
+  authorization.
+
+### Product work loop in the Control Center (draft PR #36)
+
+- In zh-TW: create a project with a name only; Markdown documents; request → deterministic plan → approval → TaskLoop →
+  Evidence → ResultCandidate waiting for the WebAuthn step-up.
+- New routes: `POST /control/projects`, the project documents routes, `GET /control/projects/{id}/work` and the bounded
+  evidence content. No migration.
+
 ### Work Map and Resources (Control Center, read-only)
 
 - 工作心智圖 (Work Map): Project → Goal → Task → Subtask → Execution → Evidence → Decision as a mind map or list, from
@@ -16,8 +56,10 @@
 ### Unified Identity & Session v1 (feature flag, off by default)
 
 - One-time device pairing (`pados device pair`) and server-side HttpOnly sessions for the Local Control Center, so a
-  paired browser no longer needs the control token on reload. The session has exactly the control-token authority and
-  never decides result acceptance (WebAuthn step-up unchanged).
+  paired browser no longer needs the control token on reload. Since the security closure (A2) the session has less than
+  the control-token authority: an allowlist of Control Center routes, with everything else `SESSION_SCOPE_DENIED`. It
+  never decides result acceptance (WebAuthn step-up unchanged). The store is owner-only from creation (A3), and there is
+  an SSO section in the UI (A4, validated synthetic only).
 - OIDC sign-in adapter (Microsoft Entra ID, Google, generic; Authorization Code + PKCE, state, nonce, RS256) with
   PADOS actor and project-role bindings. **NOT_LIVE_VALIDATED** against real tenants.
 - Flags, rollback, threat model and tests: `docs/identity/` (`RELEASE_NOTES_IDENTITY_V1.md`, `THREAT_MODEL.md`,

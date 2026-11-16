@@ -116,6 +116,9 @@ PR CI success is not an input. No step publishes to npm.
   `DEPENDENCY_REVIEW=ENVIRONMENT_BLOCKER` as a warning annotation and in the job summary. It is never reported
   as PASS.
 - Any other dependency-review failure fails the job.
+- The job runs on pull requests, on pushes to `main` and on the weekly schedule. Outside a pull request it reviews
+  the push's `before` commit (or the commit's first parent) against the commit, so a merge commit on `main` gets its
+  own review instead of a SKIPPED required check. This applies from the first push after the change is on `main`.
 - The owner clears the blocker by enabling Dependency graph.
 
 `main` branch protection: see `MAIN_BRANCH_PROTECTION.md`.

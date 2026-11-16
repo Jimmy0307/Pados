@@ -1,5 +1,7 @@
 """CI authority boundary: the repository workflows pass, and every violation is caught."""
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -443,6 +445,87 @@ def test_security_workflow_required_controls() -> None:
     assert {f.location for f in check_workflow("security.yml", no_js)} >= {"codeql:javascript-typescript"}
     no_scan = security.replace("python scripts/release/secret_scan.py secret-scan.json", "true")
     assert "secret-scan" in {f.location for f in check_workflow("security.yml", no_scan)}
+
+
+def test_dependency_review_runs_on_every_event_with_explicit_non_pr_refs() -> None:
+    # OWNER-GATE-1: `dependency review` is required on main; a pull-request-only job leaves a SKIPPED check run on
+    # every push commit, and SKIPPED is never PASS. The job must run on every trigger and give the action base/head
+    # refs for non-PR events, with the event payload passed through env (never interpolated into run).
+    security = (ROOT / ".github/workflows/security.yml").read_text(encoding="utf-8")
+    assert codes(security, "security.yml") == set()
+    header = "    name: dependency review\n"
+    assert header in security
+
+    def missing(text: str) -> set[str]:
+        return {f.location for f in check_workflow("security.yml", text)
+                if f.code == PolicyCode.REQUIRED_CONTROL_MISSING}
+
+    pr_only = security.replace(header, header + "    if: github.event_name == 'pull_request'\n")
+    assert missing(pr_only) == {"dependency-review:every-event"}
+    step_if = security.replace("        continue-on-error: true\n        uses: actions/dependency-review-action",
+                               "        continue-on-error: true\n        if: github.event_name != 'push'\n"
+                               "        uses: actions/dependency-review-action")
+    assert step_if != security and missing(step_if) == {"dependency-review:every-event"}
+    no_refs = security.replace("          base-ref: ${{ steps.refs.outputs.base }}\n", "")
+    assert no_refs != security and missing(no_refs) == {"dependency-review:non-pr-refs"}
+    no_threshold = security.replace("          fail-on-severity: high\n", "")
+    assert no_threshold != security and "dependency-review" in missing(no_threshold)
+    inline = security.replace('BEFORE: ${{ github.event.before }}', 'BEFORE: unused').replace(
+        'base="$BEFORE"', 'base="${{ github.event.before }}"')
+    assert inline != security and PolicyCode.UNTRUSTED_EXPRESSION_IN_RUN in codes(inline, "security.yml")
+
+
+def _posix_bash(git: str | None) -> str | None:
+    """bash for the workflow step; on Windows only Git for Windows' bash, never System32/WindowsApps (WSL)."""
+    if sys.platform != "win32":
+        return shutil.which("bash")
+    if git is None:
+        return None
+    candidate = Path(git).resolve().parents[1] / "usr" / "bin" / "bash.exe"  # <Git>\cmd|mingw64\bin\git.exe
+    if not candidate.is_file():
+        candidate = Path(git).resolve().parents[2] / "usr" / "bin" / "bash.exe"
+    return str(candidate) if candidate.is_file() else None
+
+
+def test_dependency_review_ref_resolution_script(tmp_path: Path) -> None:
+    """The workflow's ref step, run with bash: push `before`, all-zeros fallback to HEAD^1, PR passthrough."""
+    git = shutil.which("git")
+    bash = _posix_bash(git)
+    if bash is None or git is None:
+        pytest.skip("a POSIX bash (never the WSL launcher) and git are needed to run the workflow step")
+    document = load((ROOT / ".github/workflows/security.yml").read_text(encoding="utf-8"))
+    step = next(s for s in document["jobs"]["dependency-review"]["steps"] if s.get("id") == "refs")
+    script = tmp_path / "refs.sh"
+    script.write_text(step["run"], encoding="utf-8", newline="\n")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git_run(*args: str) -> str:
+        return subprocess.run([git, "-C", str(repo), *args], capture_output=True, text=True,
+                              check=True).stdout.strip()
+
+    git_run("init", "-q")
+    for message in ("one", "two"):
+        git_run("-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                "commit", "-q", "--allow-empty", "-m", message)
+    head, parent = git_run("rev-parse", "HEAD"), git_run("rev-parse", "HEAD^1")
+
+    def run(event: str, before: str, head_sha: str = head) -> tuple[int, dict[str, str]]:
+        out, summary = tmp_path / "out.txt", tmp_path / "summary.txt"
+        out.write_text("", encoding="utf-8")
+        env = {**os.environ, "EVENT_NAME": event, "BEFORE": before, "HEAD_SHA": head_sha,
+               "GITHUB_OUTPUT": out.as_posix(), "GITHUB_STEP_SUMMARY": summary.as_posix()}
+        done = subprocess.run([bash, script.as_posix()], cwd=repo, env=env, capture_output=True, text=True,
+                              check=False)
+        pairs = [line.split("=", 1) for line in out.read_text(encoding="utf-8").splitlines() if "=" in line]
+        return done.returncode, {key: value for key, value in pairs}
+
+    before = "a" * 40
+    assert run("push", before) == (0, {"base": before, "head": head})
+    assert run("push", "0" * 40) == (0, {"base": parent, "head": head})
+    assert run("schedule", "") == (0, {"base": parent, "head": head})
+    assert run("pull_request", "") == (0, {})
+    assert run("push", before, head_sha="not-a-sha")[0] == 1
 
 
 def test_dependabot_covers_pip_npm_and_actions() -> None:

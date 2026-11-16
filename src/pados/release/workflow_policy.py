@@ -514,6 +514,25 @@ def _check_release(label: str, document: Mapping[str, Any], ctx: _Context) -> No
         ctx.add(label, PolicyCode.RELEASE_JOB_MISSING_ATTESTATION, RELEASE_ATTEST_JOB)
 
 
+def _dependency_review_controls(jobs: Mapping[str, dict[str, Any]]) -> dict[str, bool]:
+    """``dependency review`` is a required check on ``main``, so it must produce a real result on every commit.
+
+    A job-level or step-level ``if`` leaves a SKIPPED check run on the commits it excludes (a push to ``main``, the
+    schedule), and a SKIPPED required check is never PASS. Outside a pull request the pinned action needs explicit
+    ``base-ref``/``head-ref``; without them it cannot run there.
+    """
+    job = jobs.get("dependency-review", {})
+    actions = [step for step in _steps(job)
+               if str(step.get("uses", "")).split("@")[0] == "actions/dependency-review-action"]
+    action = actions[0] if len(actions) == 1 else {}
+    with_block = _dict(action.get("with"))
+    return {
+        "dependency-review": bool(action) and bool(with_block.get("fail-on-severity")),
+        "dependency-review:every-event": bool(action) and "if" not in job and "if" not in action,
+        "dependency-review:non-pr-refs": bool(with_block.get("base-ref")) and bool(with_block.get("head-ref")),
+    }
+
+
 def _check_security_controls(label: str, document: Mapping[str, Any], ctx: _Context) -> None:
     jobs = _jobs(document)
     codeql = jobs.get("codeql", {})
@@ -527,8 +546,7 @@ def _check_security_controls(label: str, document: Mapping[str, Any], ctx: _Cont
         "codeql:javascript-typescript": "javascript-typescript" in languages,
         "codeql:init": "github/codeql-action/init" in uses,
         "codeql:analyze": "github/codeql-action/analyze" in uses,
-        "dependency-review": "actions/dependency-review-action" in uses
-        and "pull_request" in str(jobs.get("dependency-review", {}).get("if", "")),
+        **_dependency_review_controls(jobs),
         "secret-scan": "scripts/release/secret_scan.py" in runs,
         "ci-policy": "scripts/release/ci_policy_check.py" in runs,
     }

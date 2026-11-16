@@ -297,6 +297,37 @@ def test_a_required_step_that_did_not_succeed_is_not_validated(tmp_path: Path, c
     assert _gate(tmp_path, "github-ci", path, "github") == (LaneStatus.NOT_VALIDATED, "SOURCE_CHECK_NOT_EXECUTED")
 
 
+def test_a_skipped_dependency_review_on_a_push_commit_is_never_a_pass(tmp_path: Path) -> None:
+    # OWNER-GATE-1: while the job was pull-request-only, a push to main left a check run that completed with
+    # conclusion "skipped" and no executed steps. That is a FAIL, never PASS.
+    bundle = GithubBundle(GH, SHA)  # type: ignore[arg-type]
+    for run in bundle.named("dependency review"):
+        run["conclusion"] = "skipped"
+        job = bundle.jobs[str(run["id"])]
+        job["conclusion"] = "skipped"
+        job["steps"] = []
+        bundle.workflow_runs[str(job["run_id"])]["event"] = "push"
+    path = _write(tmp_path / "gh.json", bundle.record())
+    assert _gate(tmp_path, "github-ci", path, "github") == (LaneStatus.FAIL, "SOURCE_RECORD_NOT_PASS")
+
+
+def test_a_push_run_that_executed_the_dependency_review_passes(tmp_path: Path) -> None:
+    # With security.yml running the review on push (base-ref/head-ref), the push run's own steps are the evidence.
+    bundle = GithubBundle(GH, SHA)  # type: ignore[arg-type]
+    for workflow_run in bundle.workflow_runs.values():
+        workflow_run["event"] = "push"
+    path = _write(tmp_path / "gh.json", bundle.record())
+    assert _gate(tmp_path, "github-ci", path, "github") == (LaneStatus.PASS, "VERIFIED")
+
+
+def test_a_skipped_run_beside_a_passing_run_is_still_a_failure(tmp_path: Path) -> None:
+    # Every run of a required check on the commit counts; a passing run does not cover a skipped one.
+    bundle = GithubBundle(GH, SHA)  # type: ignore[arg-type]
+    bundle.add("dependency review", conclusion="skipped")
+    path = _write(tmp_path / "gh.json", bundle.record())
+    assert _gate(tmp_path, "github-ci", path, "github") == (LaneStatus.FAIL, "SOURCE_RECORD_NOT_PASS")
+
+
 def test_a_failed_check_is_a_failure_even_beside_a_blocker(tmp_path: Path) -> None:
     bundle = GithubBundle(GH, SHA)  # type: ignore[arg-type]
     bundle.add("windows (native suites)", conclusion="failure")

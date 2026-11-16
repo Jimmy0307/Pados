@@ -31,6 +31,29 @@ Close cross-platform validation for task protocols, residual completion, Work Gr
 
 `main` carries the PR #20 to #25 stack (PR #26) and the follow-up security fixes; local-supervised dogfood lanes that execute code pass on Windows 11 and VMware Linux, the lane-gate tool reports NOT_READY (OWNER-GATE-1), the Windows full suite keeps 163 baseline-identical failures, and production is NOT_READY (docs/releases/PADOS_LOCAL_DOGFOOD_BASELINE_2026-11-14.md). Next, in order: owner decisions OWNER-GATE-1, OWNER-WIN-JOB, OWNER-NET and OWNER-DI; the tracked P2/P3 residuals; then any default-on proposal for the document-intelligence worker.
 
+## Product Convergence 2026-11-16 (draft, not merged)
+
+The draft stack PR #35 → #36 → #37 → #38, integrated at `1af18ba`, plus the documentation and launcher PR. It makes the
+Local Control Center usable without PowerShell, SQL or JSON after installation and pairing:
+
+- browser pairing and least-privilege sessions (#35);
+- the zh-TW product work loop, from project to the WebAuthn decision (#36);
+- the Work Map and Resources projections (#37);
+- the AI 模型與連線 provider page, the enterprise gateway adapter, and a governed real local model run (#38);
+- a Windows launcher and an operating guide.
+
+Status and evidence: `docs/product/PRODUCT_ACCEPTANCE_REPORT_2026-11-16.md`. Next, in order:
+
+1. Final Windows and Linux validation at the integrated head (the report's FINAL VALIDATION section).
+2. Owner review of #35 to #38 and of the documentation PR.
+3. Owner decisions: the session default, the session allowlist, HTTPS beyond single-user hosts, and the candidate demo
+   order.
+4. Live enterprise gateway acceptance once VPN access exists (`docs/local-compute/ENTERPRISE_GATEWAY_LIVE_ACCEPTANCE.md`).
+5. Real Entra ID and Google validation.
+6. Phase 3: the Windows SID channel and Windows Hello (NOT_IMPLEMENTED).
+
+Production stays NOT_READY.
+
 ## Controlled Dogfood
 
 Begin only after critical and high findings are closed, the task-to-acceptance path is validated on Windows and VMware Linux, mobile remote intent behavior is verified, and repository/publication boundaries are reviewed.

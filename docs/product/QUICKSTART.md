@@ -41,6 +41,26 @@ so no database lock is held while the model thinks.
 On Windows (PowerShell), set variables with `$env:` and run the tools from `.venv\Scripts`; the step-by-step
 version, including what has no command yet, is [`LOCAL_USAGE_GUIDE.md`](LOCAL_USAGE_GUIDE.md).
 
+**Windows: start everything with the launcher.** After the one-time setup above (`pados init`, PostgreSQL, migrations,
+`npm ci`), use the launcher instead of starting `pados serve` and `npm run dev` by hand:
+
+```powershell
+.\scripts\windows\Start-PADOS.ps1 -DryRun   # checks and the plan only; starts nothing
+.\scripts\windows\Start-PADOS.ps1           # pados serve on 8088, the web console on 5173, opens /operator.html
+.\scripts\windows\Start-PADOS.ps1 -Status   # what runs, and /health/ready
+.\scripts\windows\Start-PADOS.ps1 -Stop     # stops only what the launcher started
+```
+
+The launcher prints the exact one-line fix for anything missing (venv, `web\node_modules`, `.env`, PostgreSQL, a busy
+port). Logs go to `runtime\logs\`. It never runs `pados init` and never edits `.env` or a database. `-ApiPort` and
+`-WebPort` choose other ports; `Start-PADOS.cmd` does the same from cmd.exe.
+
+**Pair the browser once (no more token copying).** With `PADOS_IDENTITY_SESSIONS_ENABLED=true` in `.env` (default
+`false`), run `.\.venv\Scripts\pados.exe device pair --base-url http://127.0.0.1:8088`. Then, in the Control Center,
+open **This browser & devices** → **Pair this browser** and type the code. Reloads keep the session, and changes need no
+control token. Accepting a result still needs the Remote WebAuthn step-up. The guided tour, in Traditional Chinese, is
+[`OPERATING_GUIDE_zh-TW.md`](OPERATING_GUIDE_zh-TW.md).
+
 **Verify the whole local path end to end (synthetic data, loopback, no provider credentials).**
 
 ```bash
