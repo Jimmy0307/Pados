@@ -49,8 +49,8 @@ both of these before opening a page or driving one from a test:
 - the API answers `GET /health/ready` with 200.
 
 `scripts/dogfood/web_readiness.py` (`wait_ready`, mode `full`) implements this condition for the E2E drivers;
-Playwright's `webServer.url` points at `/__pados/dev-ready`; a launcher (`Start-PADOS-Web.ps1`, or
-`scripts/windows/Start-PADOS.ps1` on later branches) should poll the same two URLs before it opens the browser.
+Playwright's `webServer.url` points at `/__pados/dev-ready`; a launcher (`Start-PADOS-Web.ps1`, or the Windows
+launcher added in a later change) should poll the same two URLs before it opens the browser.
 `scripts/dogfood/vite_cold_start_e2e.py --pg-bin <PostgreSQL bin>` removes `web/node_modules/.vite` and pairs a browser
 on the first page load of a fresh dev server, ten times by default, asserting no reload happened while pairing.
 
