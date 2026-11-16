@@ -39,7 +39,8 @@ MUTATIONS: dict[tuple[str, str], MutationKind] = {
     ("POST", "/control/projects/{project_id}/messages"): _KEY,
     # Replay by key from the PROJECT_CREATED sync event (same request: same project, proof scope re-initialized).
     ("POST", "/control/projects"): _KEY,
-    # Replay by key from the PROJECT_DOCUMENT_WRITTEN sync event; a replace also needs the current SHA-256.
+    # Replay by key from the PROJECT_DOCUMENT_WRITTEN sync event; a replace also needs the current SHA-256. The file is
+    # replaced only after that event commits; a journal intent is reconciled (rolled back/forward) before any retry.
     ("POST", "/control/projects/{project_id}/documents"): _KEY,
     ("POST", "/control/work-requests"): _KEY,
     # A different route under a reused key is refused by the approval-binding check (audited), never replayed.

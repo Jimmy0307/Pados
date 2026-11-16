@@ -14,6 +14,9 @@ const id = (value: string) => encodeURIComponent(value);
 
 export type ProductProject = { id: string; name: string; status?: string; root_path?: string; updated_at?: string; folder?: string; description?: string };
 export type DocumentEntry = { path: string; size: number; sha256: string | null; modified_at?: string };
+export type DocumentProblem = { path: string; code: string };
+/** The server's read-only write-recovery status: open intents, last writes that failed, edits made outside PADOS. */
+export type DocumentReconciliation = { state: "CLEAN" | "PENDING" | "ATTENTION"; pending: number; failed: DocumentProblem[]; unaudited: DocumentProblem[] };
 export type DocumentReceipt = { path: string; size: number; sha256: string; replaced: boolean; previous_sha256: string | null; replayed: boolean };
 export type WorkRequest = { id: string; title: string; body: string; status?: string };
 export type Approval = { id: string; status: string; version: number | string; subject_kind?: string | null; proposal_summary?: string | null; expires_at?: string | null };
@@ -53,7 +56,7 @@ export const projectMessages = (auth: ControlAuth, projectId: string, f?: Fetche
   controlRequest<{ messages: unknown[] }>(`/control/projects/${id(projectId)}/messages`, auth, {}, f);
 
 export const listDocuments = (auth: ControlAuth, projectId: string, f?: Fetcher) =>
-  controlRequest<{ documents: DocumentEntry[]; writable: boolean; truncated: boolean }>(`/control/projects/${id(projectId)}/documents`, auth, {}, f);
+  controlRequest<{ documents: DocumentEntry[]; writable: boolean; truncated: boolean; reconciliation?: DocumentReconciliation }>(`/control/projects/${id(projectId)}/documents`, auth, {}, f);
 
 export const readDocument = (auth: ControlAuth, projectId: string, path: string, f?: Fetcher) =>
   controlRequest<{ document: { path: string; sha256: string; content: string } }>(

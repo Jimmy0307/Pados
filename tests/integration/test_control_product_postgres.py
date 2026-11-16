@@ -7,6 +7,8 @@ to the operational head); every test runs in one transaction that is rolled back
 """
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,6 +26,15 @@ from tests.integration.test_rc2_approval_binding_postgres import session  # noqa
 
 def _settings(workspace: Path) -> Any:
     return SimpleNamespace(product_workspace_root=str(workspace), remote_config="")
+
+
+def _scope(session: Session) -> Callable[[Any], contextlib.AbstractContextManager[Session]]:
+    """The fixture's one rolled-back transaction as the route's session factory (no commit in between)."""
+    @contextlib.contextmanager
+    def scope(_settings: Any = None) -> Iterator[Session]:
+        yield session
+
+    return scope
 
 
 def _events(session: Session, project_id: str, kind: str) -> list[dict[str, Any]]:
@@ -78,15 +89,15 @@ def test_documents_are_written_audited_replayed_and_projected(session: Session, 
     project_id = created["project_id"]
     body = product_routes.DocumentWrite(path="guide.md", content="[ok](README.md) [broken](missing.md)\n",
                                         idempotency_key="doc-1")
-    first = product_routes.write_document_entry(session, settings, project_id, body)
+    first = product_routes.write_document_entry(_scope(session), settings, project_id, body)
     assert first["replayed"] is False and first["replaced"] is False
-    replay = product_routes.write_document_entry(session, settings, project_id, body)
+    replay = product_routes.write_document_entry(_scope(session), settings, project_id, body)
     assert replay["replayed"] is True and replay["sha256"] == first["sha256"]
     with pytest.raises(ProductControlError) as conflict:
-        product_routes.write_document_entry(session, settings, project_id,
+        product_routes.write_document_entry(_scope(session), settings, project_id,
                                             body.model_copy(update={"content": "changed\n"}))
     assert conflict.value.code == "DOCUMENT_IDEMPOTENCY_CONTENT_CONFLICT"
-    fixed = product_routes.write_document_entry(session, settings, project_id, product_routes.DocumentWrite(
+    fixed = product_routes.write_document_entry(_scope(session), settings, project_id, product_routes.DocumentWrite(
         path="guide.md", content="[ok](README.md)\n", replace=True, expected_sha256=first["sha256"],
         idempotency_key="doc-2"))
     assert fixed["previous_sha256"] == first["sha256"]
@@ -108,7 +119,7 @@ def test_documents_of_a_cli_project_outside_the_workspace_are_read_only(session:
     outside.mkdir()
     project_id = bootstrap_project(session, name=f"cli-{uuid4()}", root_path=outside)
     with pytest.raises(ProductControlError) as excinfo:
-        product_routes.write_document_entry(session, _settings(tmp_path / "workspace"), project_id,
+        product_routes.write_document_entry(_scope(session), _settings(tmp_path / "workspace"), project_id,
                                             product_routes.DocumentWrite(path="x.md", content="x",
                                                                          idempotency_key="d"))
     assert excinfo.value.code == "PROJECT_ROOT_OUTSIDE_WORKSPACE"

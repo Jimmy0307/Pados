@@ -82,6 +82,17 @@ export function identityFailure(error: unknown): string {
   return `${message}${unknown} (${error.code}${reference})`;
 }
 
+/** Shown when a pairing answer never reached the page (connection dropped, dev server restarted, page interrupted). */
+export const PAIR_ANSWER_LOST = `The pairing answer did not reach this page, so the code may already have been used (each code works once). If this browser is not shown as paired below, run \`${PAIR_COMMAND}\` for a new code and pair again.`;
+
+/** identityFailure for POST /pair: a lost answer means "get a new code", since a single-use code cannot be replayed. */
+export function pairFailure(error: unknown): string {
+  if (error instanceof HttpError && error.outcome === "WRITE_OUTCOME_UNKNOWN") {
+    return `${PAIR_ANSWER_LOST}${error.requestId ? ` (request ${error.requestId})` : ""}`;
+  }
+  return identityFailure(error);
+}
+
 // ---- input normalisation -------------------------------------------------------------------------------------
 
 /** Upper-case, drop spaces and any other separator, keep 10 characters, and group them as XXXXX-XXXXX. */
