@@ -6,12 +6,13 @@ health, discovery and model identity through the existing paths; writes change o
 (non-secret settings and the enabled flag), which can only narrow. None of these routes authorizes a model, routes
 work or accepts a result, and no response ever carries a key value (only the NAME of its environment variable).
 
-SESSION SCOPES (proposal for ``src/pados/identity/scopes.py`` when the branches are integrated; least privilege):
-  GET  /control/providers, GET /control/providers/{provider_id}      -> allowed for sessions (read only)
-  POST /control/providers/{provider_id}/diagnostics                  -> allowed for sessions (observes; writes only
-                                                                         content-free attempt receipts)
-  PUT  /control/providers/{provider_id}, POST .../enable, .../disable -> token OR session (owner configuration that can
-                                                                         only narrow; never authorizes a model)
+SESSION SCOPES (as enforced by ``src/pados/identity/scopes.py``; least privilege):
+  GET  /control/providers, GET /control/providers/{provider_id}  -> allowed for sessions (read only)
+  POST /control/providers/{provider_id}/diagnostics              -> allowed for sessions (observes; writes only
+                                                                     content-free attempt receipts)
+  POST /control/providers/{provider_id}/disable                  -> allowed for sessions (only narrows)
+  PUT  /control/providers/{provider_id}, POST .../enable         -> control token only (an endpoint or contract edit,
+                                                                     or lifting a restriction the operator set)
 """
 # No ``from __future__ import annotations``: FastAPI must see the route annotations built from the local
 # ``control_auth`` dependency at definition time.

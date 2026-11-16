@@ -239,7 +239,7 @@ Route classification (kept in step with `scopes.py`; 57 `control_auth` routes af
 | GET | `/control/providers` | allowed | allowed | Providers read: reachable vs authorized-and-measured states; never a key value |
 | GET | `/control/providers/{provider_id}` | allowed | allowed | Providers read |
 | POST | `/control/providers/{provider_id}/diagnostics` | allowed | allowed | Observes health, discovery and identity; writes only content-free attempt receipts |
-| POST | `/control/providers/{provider_id}/enable` | allowed | allowed | Only within the operator's configured setup; authorizes no model |
+| POST | `/control/providers/{provider_id}/enable` | allowed | **denied** | Lifts a restriction the operator set; control token (CLI) only. Disable stays available to sessions |
 | POST | `/control/providers/{provider_id}/disable` | allowed | allowed | Narrows |
 | PUT | `/control/providers/{provider_id}` | allowed | **denied** | Operator configuration that can repoint a runtime endpoint or a gateway contract; control token (CLI) only |
 | GET | `/control/jobs/{job_id}/artifacts/{artifact_type}/content` | allowed | allowed | Evidence read: bounded text, only while its SHA-256 matches the receipt |

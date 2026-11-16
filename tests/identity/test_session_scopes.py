@@ -75,7 +75,8 @@ def test_the_deliberate_denials() -> None:
     assert set(SESSION_DENIED) == {("POST", "/context/assemble"), ("POST", "/memory/facts"),
                                    ("POST", "/memory/facts/{memory_id}/promote"),
                                    ("POST", "/control/projections/render"),
-                                   ("PUT", "/control/providers/{provider_id}")}
+                                   ("PUT", "/control/providers/{provider_id}"),
+                                   ("POST", "/control/providers/{provider_id}/enable")}
     assert all(reason.strip() for reason in SESSION_DENIED.values())
 
 
@@ -93,11 +94,13 @@ def test_the_allowlist_is_only_get_and_post_of_the_control_center_contract() -> 
                 ("GET", "/control/projects/{project_id}/work-map"), ("GET", "/control/resources"),
                 ("GET", "/control/providers"), ("GET", "/control/providers/{provider_id}"),
                 ("POST", "/control/providers/{provider_id}/diagnostics"),
-                ("POST", "/control/providers/{provider_id}/enable"), ("POST", "/control/providers/{provider_id}/disable")]:
+                ("POST", "/control/providers/{provider_id}/disable")]:
         assert key in SESSION_ALLOWED, key
     # Editing a provider can repoint an endpoint or a gateway contract: control token (CLI) only.
     assert ("PUT", "/control/providers/{provider_id}") not in SESSION_ALLOWED
     assert ("PUT", "/control/providers/{provider_id}") in SESSION_DENIED
+    # Re-enabling lifts an operator restriction: control token only (final review MEDIUM-1).
+    assert ("POST", "/control/providers/{provider_id}/enable") in SESSION_DENIED
 
 
 @pytest.mark.parametrize(("method", "template", "allowed"), [
