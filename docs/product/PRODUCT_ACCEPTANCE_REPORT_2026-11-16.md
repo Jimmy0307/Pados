@@ -145,7 +145,7 @@ Kept local, for the reason given:
 3. HTTPS beyond single-user hosts.
 4. The live enterprise gateway acceptance, once VPN access exists (C3).
 5. Whether the demo order for candidates (fix, recheck, submit) stays as it is.
-6. Merge order and review of #35 to #38 and of this PR. **Do not merge without owner review.**
+6. Merge order and review of #35 to #38 and of this PR. **Do not merge without owner review.** Proposed order: #35 → #36 → #37 → #38 → #39, merge commits only; after each merge retarget the next PR to `main` and recheck its diff and checks.
 
 ## FINAL VALIDATION
 
@@ -206,3 +206,37 @@ Three follow-ups on this documentation PR. None of them changes a status row abo
 | OWNER-GATE-1: `dependency review` skipped on push commits | `security.yml` runs the required `dependency review` job on every trigger. Outside a pull request it passes `base-ref` (the push's `before` commit, or the first parent when there is none) and `head-ref` (the commit) to the same pinned action v5.0.0 (`a1d282b`), whose `action.yml` documents both inputs for non-PR events. `fail-on-severity: high` and the job name are unchanged. The lane reader is unchanged: SKIPPED is still FAIL and only the commit's own run counts. The CI policy now requires the job to run on every event and to pass both refs. | `tests/release_supply_chain`: 408 collected, all pass except environment skips (POSIX-only and symlink privilege), including new policy, ref-script and lane-reader tests; `ci_policy_check.py` CI_POLICY_OK | **Effective only for pushes made after it is on `main`.** `9b975a9` and earlier keep their skipped check run and their NOT_READY verdict. The first merge after this change is the first commit that can show a real push-run review. See the baseline §7 OWNER-GATE-1 row. |
 | `remote-console-mobile` hard-coded `localhost:5173` | The spec's origin comes from `PADOS_WEB_PORT`, which `playwright.config.ts` and `vite.config.ts` already read (unset: 5173). | Run at Windows 11 on port 5199 with the Vite proxy pointed at a dead port (the spec mocks every `/remote/v1` request): **4 passed**, then **12 passed** with `--repeat-each=3` (SYNTHETIC, mocked Playwright) | The F5 note "one 5173-only spec not run" is resolved for future runs; F5 itself is not re-graded here. |
 | Cutover runbook and AI requirements | [LOCAL_CUTOVER_RUNBOOK_zh-TW.md](LOCAL_CUTOVER_RUNBOOK_zh-TW.md) (stop, clean check, backup with `pg_dump`, checkout, dependencies, no migration, preserved `.env`/token/databases, restart, rollback, the Dogfood project's document route) and [DOGFOOD_AI_ENABLEMENT_zh-TW.md](DOGFOOD_AI_ENABLEMENT_zh-TW.md) (catalog, M2 → M3 measurement, registration, explicit authorization, chat provider, scope and classification, Providers states, verification, ResultCandidate/WebAuthn) | Docs only. Facts about the owner's environment were checked read-only (key names, git state, listening processes); nothing was executed against it. `git diff 9b975a9..4671127` shows no change under `migrations` or `alembic*` and none to `requirements.lock`, `pyproject.toml` or `web/package*.json`. | Owner decides: when to cut over; whether to re-measure `qwen3:8b` or import the TEST profile; whether and how to authorize it; which path makes the first real model call. |
+
+## FINAL VALIDATION (merge preparation, `8bcb797`)
+
+Validated head **`8bcb79700cb0db096ba25d6442837657685d96ad`** (`merge: #36-#38 fixes into docs/launcher`, on this PR's
+branch; it contains the document journal, the Vite cold-start fix, the dependency-review change and the cutover docs).
+Run on 2026-11-16 from a clean validation worktree, every run on its own ports (never 5173, 8088, 5432 or 11434).
+Machine-local evidence is under `<evidence>/pados-final-8bcb797/`.
+
+| Run | Platform | Result | Evidence |
+| --- | --- | --- | --- |
+| `windows_validate.py --profile full` | Windows 11 | 33 steps; **32 exit 0**. CI policy, ruff, mypy (+ win32), compileall, migration gate, D1/D2/D4, Windows native suites, public export, secret scan, operability gate, doc lint, npm CLI, wheel build, web `npm ci`/typecheck/Vitest (**244 passed**, 19 files)/lint/build, PostgreSQL provision and migrations, PostgreSQL gate (**6 gates PASS**), local dogfood E2E **PASS**, Pester **56 passed, 0 failed**. The one non-zero step is `full_pytest` (next row). | `windows-full-8bcb797/gate-summary.json` |
+| Full pytest | Windows 11 | **FAIL, baseline-identical**: 5526 tests, 163 failures, **0 new**, 0 fixed, compared by test id with `7043c63` | `windows-full-8bcb797/full_pytest_baseline_compare.json` |
+| Mocked Playwright suite (the `full` profile's last step) | Windows 11 | **BLOCKED, not rerun**: the host's low-memory guard stopped it after it started 37 tests on 16 workers; it produced no result, and it was not restarted. CI does not run Playwright (it runs Vitest, typecheck, lint and build). The last complete mocked run is at `1af18ba` (26 passed, 9 live-only skipped); `remote-console-mobile` passed 12/12 on its own port after `ea20247`. The live Playwright steps inside the identity, product-flow, Work Map, gateway and cold-start E2Es below did run at `8bcb797`. **Open: one complete mocked Playwright run at the final heads.** | `windows-full-8bcb797/playwright.log` |
+| Identity E2E | Windows 11 | **PASS**: 26 PASS, 0 FAIL, 1 NOT_LIVE_VALIDATED (live OIDC) | `identity-e2e-8bcb797-r1/` |
+| Product flow E2E | Windows 11 | **PASS**: 15/15, with no pairing retry in the spec | `product-flow-e2e-8bcb797-r1/` |
+| Work Map and Resources E2E | Windows 11 | **PASS**: 18/18 | `work-map-resources-e2e-8bcb797-r1/` |
+| Simulated gateway E2E | Windows 11 | **SIMULATED_E2E_PASS** (15 steps); enterprise gateway ENTERPRISE_LIVE_NOT_VALIDATED | `gateway-simulated-e2e-8bcb797-r1/` |
+| Vite cold start (`vite_cold_start_e2e.py`, `.vite` cache removed each time) | Windows 11 | **PASS**: 10/10 first-load pairings, no reload while pairing | `vite-cold-start-8bcb797-r1/` |
+| Document journal fault injection | Windows 11 | **PASS**: PostgreSQL integration 15/15, control tests 9/9 | `journal-8bcb797-r1/` |
+| Defaults | Windows 11 | **PASS**: `PADOS_IDENTITY_SESSIONS_ENABLED` false in `Settings` and in what `pados init` writes; OIDC, actors, remote, compute nodes and enterprise configs empty; product loop off | `defaults-8bcb797/defaults.json` |
+| VMware chain (`vm_online_chain.sh`, unmodified) | Ubuntu 24.04 | **18 of 19 gates exit 0**; in-chain dogfood E2E exit 0; full pytest exit 0 (no failures). The `frontend` gate **FAILED** (exit 2): `vite-dev-readiness.ts(60,21): error TS2339: Property 'method' does not exist on type 'IncomingMessage'`. It is the same error CI reported on #36, fixed after `8bcb797` by `8c5797c` (below). Windows passed this step only because a stray `@types/node` outside the checkout masked it. | `vmware-8bcb797-r1/online-8bcb797-final-8bcb797-r1-out/` |
+| VMware `frontend` gate rerun at the final #39 head `a5fd66d` (same command, fresh clone) | Ubuntu 24.04 | **PASS**: `npm ci`, typecheck, Vitest **244 passed** (19 files), lint, build; tree clean before and after | `vmware-frontend-a5fd66d-r1/` |
+| VMware identity, product flow and simulated gateway E2Es (no browser) | Ubuntu 24.04 | **PASS**: identity 23 PASS, 0 FAIL, 2 SKIPPED (PowerShell 5.1 and Playwright are not run on Linux), 1 NOT_LIVE_VALIDATED. Product flow 14 PASS, 1 SKIPPED (Playwright). Gateway 14 steps, SIMULATED_E2E_PASS. | `vmware-8bcb797-r1/online-8bcb797-final-8bcb797-r1-product-e2es-r1/` |
+
+**Changes after `8bcb797`** (each pushed and CI-checked on its PR; none is covered by the runs above):
+
+| Commit | PR | Change |
+| --- | --- | --- |
+| `ff27d76` | #36 | `PADOS_WEB_RUNBOOK.md`: wording only (doc-lint dangling reference) |
+| `8c5797c` | #36 | `web/vite-dev-readiness.ts`: read the request method structurally (CI typecheck has no `@types/node`); behaviour unchanged |
+| `3906e76` | #38 | `POST /control/providers/{id}/enable` is control-token only (`SESSION_DENIED` for sessions), with the scope test and design table updated |
+| `a5fd66d` | #39 | `remote-live-step-up.spec.ts`: origin from `PADOS_WEB_PORT` (opt-in live spec, skipped by default) |
+
+These are small; each passed the 11 CI checks on its PR, and `8c5797c` was also rerun on Linux (the row above). The F-row grades above are unchanged.
