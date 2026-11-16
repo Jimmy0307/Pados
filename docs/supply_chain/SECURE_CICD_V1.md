@@ -77,8 +77,10 @@ Rules enforced by the policy (finding codes in parentheses):
   no `pados` CLI invocation other than `--help` (`PADOS_AUTHORITY_COMMAND_PROHIBITED`); database hosts only
   `127.0.0.1`/`localhost`/`postgres` and only with a job service container (`NON_DISPOSABLE_DATABASE`,
   `DATABASE_WITHOUT_DISPOSABLE_SERVICE`); every job has `timeout-minutes` (`JOB_TIMEOUT_MISSING`).
-- `security.yml` must contain CodeQL for both languages, dependency review on PRs, the secret scan and the CI policy
-  (`REQUIRED_CONTROL_MISSING`); `.github/dependabot.yml` must cover pip `/`, npm `/web`, github-actions `/`
+- `security.yml` must contain CodeQL for both languages, dependency review, the secret scan and the CI policy
+  (`REQUIRED_CONTROL_MISSING`). Dependency review is a required check on `main`, so its job must run on every trigger
+  (no job- or step-level `if`; a SKIPPED required check is never PASS) and pass `base-ref`/`head-ref` to the action
+  for non-PR events (`dependency-review:every-event`, `dependency-review:non-pr-refs`); `.github/dependabot.yml` must cover pip `/`, npm `/web`, github-actions `/`
   (`DEPENDABOT_ECOSYSTEM_MISSING`).
 
 ### Static UI deployment (GitHub Pages): inactive template
