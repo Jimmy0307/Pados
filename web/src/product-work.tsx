@@ -15,7 +15,7 @@ import {
   startApprovedPlan, stepLoop, submitCandidate, type Approval, type Candidate, type Evidence, type Loop, type WorkRequest,
 } from "./product-api";
 import {
-  CAPABILITY_OPTIONS, CHECK_CAPABILITY, CHECK_COMMAND, buildPlanTemplate, candidateState, isStopped, loopPhase, newKey,
+  CAPABILITY_OPTIONS, CHECK_CAPABILITY, CHECK_COMMAND, buildPlanTemplate, canMakePlan, candidateState, isStopped, loopPhase, newKey,
   parseProbeReport, rootGoalId, stepUpState, type PlanTemplate,
 } from "./product-flow";
 import { useLoad } from "./product-load";
@@ -103,7 +103,7 @@ function Compose({ auth, onSessionLost, draft, onDraft, notice, onPlanned }: Acc
         <small className="control-muted">{t("work.cap.check.help")}</small></fieldset>
       <label>{t("work.requestTitle")}<input className="control-input" name="title" required maxLength={300} value={draft.title} onChange={(e) => onDraft({ ...draft, title: e.target.value })} /></label>
       <label>{t("work.requestText")}<textarea className="control-input" name="text" required rows={4} maxLength={1600} value={draft.text} onChange={(e) => onDraft({ ...draft, text: e.target.value })} /></label>
-      <button className="control-button product-primary" type="submit" disabled={busy || !draft.projectId || !option.available}>{busy ? t("state.loading") : t("work.makePlan")}</button>
+      <button className="control-button product-primary" type="submit" disabled={!canMakePlan({ projects: projects.data?.projects, projectId: draft.projectId, available: option.available, busy })}>{busy ? t("state.loading") : t("work.makePlan")}</button>
     </form>
     {Boolean(error) && <Failed error={error} />}
   </Section>;

@@ -1,17 +1,27 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
+import { ENTRY_MODULES, HTML_ENTRIES, PREBUNDLED_DEPS, devReadinessPlugin } from "./vite-dev-readiness";
 
 export default defineConfig(({ mode, command }) => {
   const env = loadEnv(mode, ".", "PADOS_");
   return {
     base: command === "build" ? env.PADOS_PAGES_BASE || "/Pados/" : "/",
-    plugins: [react()],
+    plugins: [react(), devReadinessPlugin()],
     build: {
       rollupOptions: {
-        input: { main: "index.html", remote: "remote.html", operator: "operator.html" },
+        input: HTML_ENTRIES,
       },
     },
+    // A deterministic start: crawl all three pages and pre-bundle every dependency before the first page load, so a
+    // dependency found late can never trigger a "new dependencies optimized ... reloading" full reload while a
+    // request (a single-use pairing code) is in flight. src/dev-server-config.test.ts keeps these lists complete.
+    optimizeDeps: {
+      entries: Object.values(HTML_ENTRIES),
+      include: [...PREBUNDLED_DEPS],
+    },
     server: {
+      // Transform the entry modules at startup; GET /__pados/dev-ready (vite-dev-readiness.ts) waits for this work.
+      warmup: { clientFiles: ENTRY_MODULES.map((path) => `.${path}`) },
       host: "127.0.0.1",
       port: Number(env.PADOS_WEB_PORT || 5173),
       proxy: {
