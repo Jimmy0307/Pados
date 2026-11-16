@@ -83,7 +83,13 @@ def test_the_allowlist_is_only_get_and_post_of_the_control_center_contract() -> 
     assert all(path.startswith(("/control/", "/memory/search")) for _, path in SESSION_ALLOWED)
     assert ("GET", "/memory/search") in SESSION_ALLOWED
     assert not any(path.startswith("/memory/facts") for _, path in SESSION_ALLOWED)
-    assert ("POST", "/control/projects") not in SESSION_ALLOWED  # planned elsewhere; not a route of this branch
+    # The product work loop (integrated from feat/product-work-loop-ui-20261116) is part of the session contract.
+    for key in [("POST", "/control/projects"), ("POST", "/control/projects/{project_id}/documents"),
+                ("GET", "/control/projects/{project_id}/documents"),
+                ("GET", "/control/projects/{project_id}/documents/content"),
+                ("GET", "/control/projects/{project_id}/work"),
+                ("GET", "/control/jobs/{job_id}/artifacts/{artifact_type}/content")]:
+        assert key in SESSION_ALLOWED, key
 
 
 @pytest.mark.parametrize(("method", "template", "allowed"), [
@@ -91,7 +97,8 @@ def test_the_allowlist_is_only_get_and_post_of_the_control_center_contract() -> 
     ("get", "/control/projects", True),
     ("HEAD", "/control/projects", True),
     ("DELETE", "/control/projects", False),
-    ("POST", "/control/projects", False),
+    ("POST", "/control/projects", True),
+    ("PUT", "/control/projects", False),
     ("GET", "/control/projects/", False),
     ("GET", "/control/projects/p-1", False),  # a raw path is never a template
     ("POST", "/context/assemble", False),

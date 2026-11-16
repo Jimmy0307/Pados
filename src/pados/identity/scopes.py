@@ -36,6 +36,7 @@ _SESSION_READS: Final[tuple[str, ...]] = (
     "/control/jobs",
     "/control/jobs/{job_id}",
     "/control/jobs/{job_id}/artifacts",
+    "/control/jobs/{job_id}/artifacts/{artifact_type}/content",  # digest-verified evidence text, read only
     "/control/loops",
     "/control/loops/{loop_id}",
     "/control/loops/{loop_id}/events",
@@ -44,7 +45,10 @@ _SESSION_READS: Final[tuple[str, ...]] = (
     "/control/projects/{project_id}",
     "/control/projects/{project_id}/activity",
     "/control/projects/{project_id}/context-summary",
+    "/control/projects/{project_id}/documents",
+    "/control/projects/{project_id}/documents/content",
     "/control/projects/{project_id}/messages",
+    "/control/projects/{project_id}/work",  # projection only
     "/control/sync/events",
     "/control/task-goals/{goal_id}",
     "/control/task-plans/{plan_id}",
@@ -67,15 +71,13 @@ _SESSION_WRITES: Final[tuple[str, ...]] = (
     "/control/loops/{loop_id}/resume",
     "/control/loops/{loop_id}/start",
     "/control/loops/{loop_id}/step",
+    "/control/projects",  # bounded: a folder under the approved workspace root, no path or id typed
+    "/control/projects/{project_id}/documents",  # .md only, inside the project root, no silent overwrite
     "/control/projects/{project_id}/messages",
     "/control/task-goals",
     "/control/task-plans",
     "/control/work-requests",
     "/control/work-requests/{request_id}/route",
-    # EXTENSION POINT (planned on another branch, NOT routes of this branch): when `POST /control/projects` and the
-    # project-document route land, add them here in the same change, with a row in the design doc's §3.8 table and
-    # a test case in tests/identity/test_session_scopes.py. Do not add them before the routes exist: the
-    # classification test refuses allowlist entries for routes that are not mounted.
 )
 
 SESSION_ALLOWED: Final[frozenset[RouteKey]] = frozenset(

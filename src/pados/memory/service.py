@@ -98,8 +98,13 @@ def bootstrap_project(
     root_path: Path,
     classification: str = "internal",
     default_branch: str = "main",
+    actor: str = "pados-cli",
 ) -> str:
-    """Create a project and its context registry in one transaction."""
+    """Create a project and its context registry in one transaction.
+
+    ``actor`` names the creating surface in the audit row (``pados-cli`` by default; ``POST /control/projects``
+    records its own); the validation and the rows written are the same for every caller.
+    """
 
     if not name.strip():
         raise ValueError("project name must not be empty")
@@ -126,7 +131,7 @@ def bootstrap_project(
         root_path=str(resolved),
         default_branch=default_branch,
         classification=classification,
-        actor="pados-cli",
+        actor=actor,
     )
     register_project(
         session,

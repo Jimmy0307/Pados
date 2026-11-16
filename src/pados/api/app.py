@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from pados import __version__
 from pados.config import artifact_root, get_settings
 from pados.control import projections
+from pados.control.product_routes import register_product_control_routes
 from pados.control import security as control_security
 from pados.control import service as control_service
 from pados.control import work_request_capture
@@ -670,6 +671,11 @@ def create_app() -> FastAPI:
                 return loop_service.loop_events(session, loop_id)
 
         return guarded(lambda: {"status": "ok", "events": _events()})
+
+    # The Control Center's product work loop: project creation, Markdown documents and read-only projections, behind
+    # the same control_auth (pados.control.product_routes). Session factory resolved per call (tests replace it).
+    register_product_control_routes(app, settings, control_auth=Depends(control_auth),
+                                    session_scope=lambda chosen: session_scope(chosen))
 
     def integrated_local_guard(request: Request) -> None:
         client_host = request.client.host if request.client else ""

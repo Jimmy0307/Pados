@@ -199,7 +199,7 @@ with `SESSION_SCOPE_DENIED` (403), so the rule fails closed.
   pairing codes. The actor surface (§4.2), `/remote/v1`, the product-loop and graph-run gates read only their own
   headers or cookies.
 
-Route classification (generated from `scopes.py`; 43 `control_auth` routes, plus the public `/control/health`):
+Route classification (kept in step with `scopes.py`; 49 `control_auth` routes after the product work loop was integrated, plus the public `/control/health`):
 
 | Method | Route template | Control token | Device session | Rationale |
 | --- | --- | --- | --- | --- |
@@ -229,6 +229,12 @@ Route classification (generated from `scopes.py`; 43 `control_auth` routes, plus
 | POST | `/control/loops/{loop_id}/step` | allowed | allowed | Control Center action (CSRF + Origin) |
 | POST | `/control/projections/render` | allowed | **denied** | Writes projection files into the vault on disk |
 | GET | `/control/projects` | allowed | allowed | Control Center read |
+| POST | `/control/projects` | allowed | allowed | Product work loop: creates a project folder under the approved workspace root (no path or id typed); CSRF + Origin |
+| GET | `/control/projects/{project_id}/documents` | allowed | allowed | Product work loop read (Markdown list with size and SHA-256) |
+| POST | `/control/projects/{project_id}/documents` | allowed | allowed | Product work loop: `.md` only, ≤ 256 KiB, inside the project root, no silent overwrite, audited; CSRF + Origin |
+| GET | `/control/projects/{project_id}/documents/content` | allowed | allowed | Product work loop read (one Markdown document) |
+| GET | `/control/projects/{project_id}/work` | allowed | allowed | Product work loop read (projection only) |
+| GET | `/control/jobs/{job_id}/artifacts/{artifact_type}/content` | allowed | allowed | Evidence read: bounded text, only while its SHA-256 matches the receipt |
 | GET | `/control/projects/{project_id}` | allowed | allowed | Control Center read |
 | GET | `/control/projects/{project_id}/activity` | allowed | allowed | Control Center read |
 | GET | `/control/projects/{project_id}/context-summary` | allowed | allowed | Control Center read |

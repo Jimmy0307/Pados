@@ -23,7 +23,6 @@ from pados.config import (
     artifact_root,
     get_settings,
     lane_revisions_accepted,
-    lane_settings,
 )
 from pados.db import check_database, get_engine, session_scope
 from pados.db.relations import relation_visible
@@ -452,30 +451,12 @@ def _ensure_local_proof_scope(project_id: str) -> int | None:
     """Create the initial ScopeVersion through StateProof for a local dogfood project.
 
     This is idempotent project setup, not semantic acceptance. The ResultCandidate path only reads this head;
-    approval and CAS remain in their existing governed interfaces.
+    approval and CAS remain in their existing governed interfaces. The same function backs ``POST /control/projects``
+    (pados.control.project_setup), so the CLI and the Control Center share one setup path.
     """
-    settings = get_settings()
-    proof_database = settings.product_database_name
-    if not proof_database:
-        return None
-    if settings.db_host not in {"127.0.0.1", "localhost"}:
-        raise PermissionError("PROJECT_PROOF_DATABASE_MUST_BE_LOCAL")
-    if proof_database == settings.operational_database_name:
-        raise PermissionError("PROJECT_PROOF_DATABASE_MUST_BE_SEPARATE")
-    object_root = Path(settings.product_object_root).expanduser()
-    if not object_root.is_absolute():
-        raise PermissionError("PRODUCT_OBJECT_ROOT_MUST_BE_ABSOLUTE")
+    from pados.control.project_setup import ensure_local_proof_scope
 
-    from pados.state_proof.object_store import ObjectStore
-    from pados.state_proof.service import StateProofService, build_proof_engine
-
-    engine = build_proof_engine(lane_settings(settings, proof_database).database_url)
-    try:
-        proof = StateProofService(engine, ObjectStore(object_root.resolve()))
-        head = proof.ensure_scope(project_id)
-        return int(head["current_version"])
-    finally:
-        engine.dispose()
+    return ensure_local_proof_scope(get_settings(), project_id)
 
 
 @project_app.command("initialize-proof-scope")

@@ -18,7 +18,8 @@ export default defineConfig({
   },
   webServer: {
     command: "npm run dev -- --host 127.0.0.1",
-    url: webUrl,
+    // The startup readiness condition (vite-dev-readiness.ts): entries transformed, dependency optimizer finished.
+    url: `${webUrl}/__pados/dev-ready`,
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,
   },
