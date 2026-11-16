@@ -3,6 +3,11 @@ import { expect, test, devices, type Page } from "@playwright/test";
 
 test.use({ ...devices["Pixel 7"] });
 
+// WebAuthn needs a domain origin (not a bare IP), so the sign-in test opens localhost on the Vite dev server's port.
+// PADOS_WEB_PORT is the variable playwright.config.ts and vite.config.ts read; unset, 5173.
+const webPort = Number(process.env.PADOS_WEB_PORT || 5173);
+const localOrigin = `http://localhost:${webPort}`;
+
 const attention = {
   needs_attention: [{ run_id: "run-w", project_id: "proj-a", goal: "Tighten README", bucket: "WAITING_APPROVAL",
     progress_status: "VERIFIED", semantic_commit_status: "NOT_COMMITTED", approval_ref: "appr-1" }],
@@ -69,7 +74,7 @@ test("mobile remote console: sign in, attention, approve, send intent", async ({
         const parsed = JSON.parse(clientData.toString("utf8")) as Record<string, string>;
         const signed = Buffer.concat([authData, createHash("sha256").update(clientData).digest()]);
         presenceVerified = parsed.type === "webauthn.get" && parsed.challenge === b64url(nonce)
-          && parsed.origin === "http://localhost:5173" && (authData[32] & 0x05) === 0x05
+          && parsed.origin === localOrigin && (authData[32] & 0x05) === 0x05
           && verifySignature("sha256", signed, authenticator.publicKey, Buffer.from(assertion.signature, "base64url"));
         return presenceVerified ? route.fulfill({ json: { proof_ref: "step-up-proof:1", single_use: true } })
           : route.fulfill({ status: 403, json: { detail: "APPROVAL_PRESENCE_SIGNATURE_INVALID" } });
@@ -99,8 +104,7 @@ test("mobile remote console: sign in, attention, approve, send intent", async ({
     return route.fulfill({ status: 404, json: { detail: "not mocked" } });
   });
 
-  // WebAuthn needs a domain origin (not a bare IP), so this test uses localhost.
-  await page.goto("http://localhost:5173/");
+  await page.goto(`${localOrigin}/`);
   await page.getByLabel("Actor").fill("owner");
   await page.getByLabel("Access proof").fill("synthetic-proof");
   await page.getByLabel("Confirm Home Base origin").check();
