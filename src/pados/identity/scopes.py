@@ -80,7 +80,6 @@ _SESSION_WRITES: Final[tuple[str, ...]] = (
     "/control/projects/{project_id}/messages",
     "/control/providers/{provider_id}/diagnostics",  # observes; writes only content-free attempt receipts
     "/control/providers/{provider_id}/disable",  # narrows within the configured setup
-    "/control/providers/{provider_id}/enable",  # only within what the operator configured; authorizes no model
     "/control/task-goals",
     "/control/task-plans",
     "/control/work-requests",
@@ -96,6 +95,8 @@ SESSION_DENIED: Final[Mapping[RouteKey, str]] = MappingProxyType({
                                    "(control token) action, not a browser one",
     ("POST", "/memory/facts"): "memory write: adds a fact to long-term memory",
     ("POST", "/memory/facts/{memory_id}/promote"): "memory write: promotes a fact's trust level",
+    ("POST", "/control/providers/{provider_id}/enable"): "lifts a restriction the operator set (a disabled "
+        "provider); kept to the control token (CLI). A session may still disable, which only narrows",
     ("PUT", "/control/providers/{provider_id}"): "operator configuration: can repoint a runtime endpoint or a gateway "
         "contract; kept to the control token (CLI)",
     ("POST", "/control/projections/render"): "writes projection files into the vault on disk",
