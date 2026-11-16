@@ -13,6 +13,7 @@ import re
 from collections.abc import Iterator, Mapping
 from collections.abc import Set as AbstractSet
 from contextlib import contextmanager
+from functools import cache
 from typing import Protocol
 
 from pados.execution.authorization import _valid_secret_ref
@@ -27,6 +28,29 @@ _SECRET_LIKE = re.compile(
 
 def is_secret_ref(value: object) -> bool:
     return isinstance(value, str) and _valid_secret_ref(value)
+
+
+# PADOS's own configuration is never a credential to hand to a provider: an env reference naming one of PADOS's settings
+# (the database password, the control token hash, ...) or the reserved prefixes would send it to the provider's host.
+_RESERVED_ENV_PREFIXES = ("PADOS_DB_", "PADOS_CONTROL_", "PADOS_IDENTITY_")
+
+
+@cache
+def _pados_setting_names() -> frozenset[str]:
+    from pados.config import Settings  # local import: pados.config must stay importable without this module
+
+    return frozenset((field.alias or name).upper() for name, field in Settings.model_fields.items())
+
+
+def reserved_env_name(name: str) -> bool:
+    upper = name.upper()
+    return upper in _pados_setting_names() or upper.startswith(_RESERVED_ENV_PREFIXES)
+
+
+def reserved_env_ref(ref: str) -> bool:
+    """True for ``secretref://env/<NAME>`` where NAME is reserved for PADOS's own configuration."""
+    prefix = "secretref://env/"
+    return ref.startswith(prefix) and reserved_env_name(ref[len(prefix):])
 
 
 def looks_like_secret(value: str) -> bool:

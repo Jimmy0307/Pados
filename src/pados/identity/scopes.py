@@ -50,6 +50,8 @@ _SESSION_READS: Final[tuple[str, ...]] = (
     "/control/projects/{project_id}/messages",
     "/control/projects/{project_id}/work",  # projection only
     "/control/projects/{project_id}/work-map",  # projection only (Work Map)
+    "/control/providers",
+    "/control/providers/{provider_id}",
     "/control/resources",  # read-only measured/UNKNOWN metrics and a cleanup preview (no deletion)
     "/control/sync/events",
     "/control/task-goals/{goal_id}",
@@ -68,14 +70,14 @@ _SESSION_WRITES: Final[tuple[str, ...]] = (
     "/control/jobs/{job_id}/cancel",
     "/control/loops",
     "/control/loops/{loop_id}/cancel",
-    "/control/loops/{loop_id}/pause",
     "/control/loops/{loop_id}/result-candidate",  # submission only; acceptance stays with step-up
-    "/control/loops/{loop_id}/resume",
     "/control/loops/{loop_id}/start",
     "/control/loops/{loop_id}/step",
     "/control/projects",  # bounded: a folder under the approved workspace root, no path or id typed
     "/control/projects/{project_id}/documents",  # .md only, inside the project root, no silent overwrite
     "/control/projects/{project_id}/messages",
+    "/control/providers/{provider_id}/diagnostics",  # observes; writes only content-free attempt receipts
+    "/control/providers/{provider_id}/disable",  # narrows within the configured setup
     "/control/task-goals",
     "/control/task-plans",
     "/control/work-requests",
@@ -91,7 +93,15 @@ SESSION_DENIED: Final[Mapping[RouteKey, str]] = MappingProxyType({
                                    "(control token) action, not a browser one",
     ("POST", "/memory/facts"): "memory write: adds a fact to long-term memory",
     ("POST", "/memory/facts/{memory_id}/promote"): "memory write: promotes a fact's trust level",
+    ("POST", "/control/providers/{provider_id}/enable"): "lifts a restriction the operator set (a disabled "
+        "provider); kept to the control token (CLI). A session may still disable, which only narrows",
+    ("PUT", "/control/providers/{provider_id}"): "operator configuration: can repoint a runtime endpoint or a gateway "
+        "contract; kept to the control token (CLI)",
     ("POST", "/control/projections/render"): "writes projection files into the vault on disk",
+    ("POST", "/control/loops/{loop_id}/pause"): "with resume, a pause from a budget or human-wait stop returns the "
+        "loop to RUNNING past its iteration budget (security review 2026-11-16); the Control Center does not pause, "
+        "and the control token (CLI) still may",
+    ("POST", "/control/loops/{loop_id}/resume"): "see pause: kept to the control token (CLI)",
 })
 
 _HEAD_AS: Final = "GET"

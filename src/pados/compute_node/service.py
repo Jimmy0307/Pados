@@ -64,6 +64,11 @@ class NodeRuntime:
         missing = {m.backend_id for m in config.models} - set(self.backends)
         if missing:
             raise ValueError("MODEL_BACKEND_UNKNOWN")
+        for model in config.models:
+            policy = getattr(getattr(self.backends[model.backend_id], "contract", None), "policy", None)
+            if policy is not None and not policy.max_classification.permits(model.privacy_class):
+                # a gateway model may never be declared for data its contract does not allow (fail at start)
+                raise ValueError("GATEWAY_MODEL_CLASSIFICATION_ABOVE_CONTRACT")
         self._declared = [ModelManifest(
             model_id=ModelManifest.canonical(m.backend_id, m.backend_model, m.digest or m.version),
             backend=m.backend_id, backend_model=m.backend_model, family=m.family, version=m.version,
@@ -83,6 +88,10 @@ class NodeRuntime:
     @staticmethod
     def _backend(config: Any, resolver: SecretResolver, node: NodeConfig) -> InferenceBackend:
         kwargs: dict[str, Any] = {}
+        if config.contract_path:
+            # the gateway reads its private contract and resolves the contract's own auth reference per call
+            return BACKEND_KINDS[config.kind](config.backend_id, contract_path=config.contract_path, resolver=resolver,
+                                              receipts_dir=node.state_dir / "gateway-attempts")
         if config.endpoint:
             kwargs["endpoint"] = config.endpoint
         if config.artifact_root:

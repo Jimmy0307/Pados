@@ -199,7 +199,7 @@ with `SESSION_SCOPE_DENIED` (403), so the rule fails closed.
   pairing codes. The actor surface (§4.2), `/remote/v1`, the product-loop and graph-run gates read only their own
   headers or cookies.
 
-Route classification (kept in step with `scopes.py`; 51 `control_auth` routes after the product work loop and Work Map were integrated, plus the public `/control/health`):
+Route classification (kept in step with `scopes.py`; 57 `control_auth` routes after the product work loop, Work Map and providers were integrated, plus the public `/control/health`):
 
 | Method | Route template | Control token | Device session | Rationale |
 | --- | --- | --- | --- | --- |
@@ -222,9 +222,9 @@ Route classification (kept in step with `scopes.py`; 51 `control_auth` routes af
 | POST | `/control/loops/{loop_id}/cancel` | allowed | allowed | Control Center action (CSRF + Origin) |
 | GET | `/control/loops/{loop_id}/events` | allowed | allowed | Control Center read |
 | GET | `/control/loops/{loop_id}/iterations` | allowed | allowed | Control Center read |
-| POST | `/control/loops/{loop_id}/pause` | allowed | allowed | Control Center action (CSRF + Origin) |
+| POST | `/control/loops/{loop_id}/pause` | allowed | **denied** | With resume, a pause from a budget or human-wait stop would return the loop to RUNNING past its budget; the Control Center does not pause (security review 2026-11-16) |
 | POST | `/control/loops/{loop_id}/result-candidate` | allowed | allowed | Submits a candidate for review; acceptance stays with step-up |
-| POST | `/control/loops/{loop_id}/resume` | allowed | allowed | Control Center action (CSRF + Origin) |
+| POST | `/control/loops/{loop_id}/resume` | allowed | **denied** | See pause |
 | POST | `/control/loops/{loop_id}/start` | allowed | allowed | Control Center action (CSRF + Origin) |
 | POST | `/control/loops/{loop_id}/step` | allowed | allowed | Control Center action (CSRF + Origin) |
 | POST | `/control/projections/render` | allowed | **denied** | Writes projection files into the vault on disk |
@@ -236,6 +236,12 @@ Route classification (kept in step with `scopes.py`; 51 `control_auth` routes af
 | GET | `/control/projects/{project_id}/work` | allowed | allowed | Product work loop read (projection only) |
 | GET | `/control/projects/{project_id}/work-map` | allowed | allowed | Work Map read (projection only) |
 | GET | `/control/resources` | allowed | allowed | Resources read: measured or UNKNOWN metrics and a cleanup preview; it deletes nothing |
+| GET | `/control/providers` | allowed | allowed | Providers read: reachable vs authorized-and-measured states; never a key value |
+| GET | `/control/providers/{provider_id}` | allowed | allowed | Providers read |
+| POST | `/control/providers/{provider_id}/diagnostics` | allowed | allowed | Observes health, discovery and identity; writes only content-free attempt receipts |
+| POST | `/control/providers/{provider_id}/enable` | allowed | **denied** | Lifts a restriction the operator set; control token (CLI) only. Disable stays available to sessions |
+| POST | `/control/providers/{provider_id}/disable` | allowed | allowed | Narrows |
+| PUT | `/control/providers/{provider_id}` | allowed | **denied** | Operator configuration that can repoint a runtime endpoint or a gateway contract; control token (CLI) only |
 | GET | `/control/jobs/{job_id}/artifacts/{artifact_type}/content` | allowed | allowed | Evidence read: bounded text, only while its SHA-256 matches the receipt |
 | GET | `/control/projects/{project_id}` | allowed | allowed | Control Center read |
 | GET | `/control/projects/{project_id}/activity` | allowed | allowed | Control Center read |

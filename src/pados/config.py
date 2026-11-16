@@ -122,6 +122,9 @@ class Settings(BaseSettings):
     enterprise_config: str = Field(default="", alias="PADOS_ENTERPRISE_CONFIG")
     # Optional Local Compute Node registry; unset never affects Core readiness.
     compute_nodes_config: str = Field(default="", alias="PADOS_COMPUTE_NODES_CONFIG")
+    # Owner-only provider setup (pados.providers.setup): connection settings and narrowing policy per AI provider. Never
+    # holds a key value; a missing file means no narrowing. Not a catalog and not an authority.
+    providers_setup_path: str = Field(default="runtime/local/providers.json", alias="PADOS_PROVIDERS_SETUP")
     # Optional Remote Operations config; unset means remote mode is off.
     remote_config: str = Field(default="", alias="PADOS_REMOTE_CONFIG")
     # Optional connectivity probes/projection; unset never affects Core readiness.

@@ -21,12 +21,15 @@ class BackendConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     backend_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_.-]{0,39}$")
-    kind: str = Field(pattern=r"^(deterministic|openai_compatible|llama_cpp|llama_cpp_native|mlx_openai_compatible|ollama)$")
+    kind: str = Field(pattern=r"^(deterministic|openai_compatible|llama_cpp|llama_cpp_native|mlx_openai_compatible|ollama|enterprise_gateway)$")
     endpoint: str | None = None
     credential_ref: str | None = None
     # Operator-configured directory of model files whose digest PADOS derives from the bytes (only for runtimes that
     # report a model path but no digest, i.e. ``llama_cpp_native``). Read-only; absolute.
     artifact_root: str | None = Field(default=None, max_length=400)
+    # ``enterprise_gateway`` only: the PRIVATE gateway contract file (absolute; pados.compute_node.gateway_contract).
+    # The gateway's base URL and auth reference live there, never here; ``endpoint`` stays unset for this kind.
+    contract_path: str | None = Field(default=None, max_length=400)
 
     @field_validator("endpoint")
     @classmethod
@@ -52,6 +55,13 @@ class BackendConfig(BaseModel):
                 raise ValueError("ARTIFACT_ROOT_UNSUPPORTED_FOR_BACKEND_KIND")
             if "\x00" in self.artifact_root or not Path(self.artifact_root).is_absolute():
                 raise ValueError("ARTIFACT_ROOT_MUST_BE_ABSOLUTE")
+        if self.kind == "enterprise_gateway":
+            if self.contract_path is None or "\x00" in self.contract_path or not Path(self.contract_path).is_absolute():
+                raise ValueError("GATEWAY_CONTRACT_PATH_MUST_BE_ABSOLUTE")
+            if self.endpoint is not None or self.credential_ref is not None:
+                raise ValueError("GATEWAY_ENDPOINT_AND_AUTH_BELONG_TO_THE_CONTRACT")
+        elif self.contract_path is not None:
+            raise ValueError("CONTRACT_PATH_ONLY_FOR_ENTERPRISE_GATEWAY")
         return self
 
 

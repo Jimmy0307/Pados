@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from pados.control.approval_subject import WorkRouteSubject
 from pados.worker.schemas import CapabilityId, RouteRequest
@@ -26,6 +26,9 @@ class WorkRequestCreate(BaseModel):
     requested_capability: CapabilityId | None = None
 
 
+RESERVED_APPROVAL_KEY_PREFIX = "result-candidate:"
+
+
 class ApprovalCreate(BaseModel):
     project_id: str
     proposal_summary: str = Field(min_length=1, max_length=4000)
@@ -34,6 +37,15 @@ class ApprovalCreate(BaseModel):
     # A WORK_ROUTE subject binds the approval to what it authorizes; the server derives
     # proposal_hash from it. Approvals without a subject can never route work.
     subject: WorkRouteSubject | None = None
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def _key_not_reserved(cls, value: str) -> str:
+        # ``result-candidate:<digest>`` keys belong to the ResultCandidate submission path (security review MEDIUM-3):
+        # a generic approval under such a key would be reused, already decided, by a later candidate and strand it.
+        if value.strip().casefold().startswith(RESERVED_APPROVAL_KEY_PREFIX):
+            raise ValueError("APPROVAL_IDEMPOTENCY_KEY_RESERVED")
+        return value
 
     @model_validator(mode="after")
     def _hash_or_subject(self) -> ApprovalCreate:

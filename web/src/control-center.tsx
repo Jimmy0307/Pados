@@ -11,6 +11,7 @@ import { inboxAction } from "./page-links";
 import { DEFAULT_LOCALE, LocaleContext, translate, type Locale, type MessageKey } from "./i18n";
 import { ProjectsPage as ProductProjectsPage } from "./product-projects";
 import { WorkPage } from "./product-work";
+import { ProvidersPage } from "./providers-page";
 import { ResourcesPage } from "./resources-page";
 import { EMPTY_MEMORY, type MapMemory } from "./work-map";
 import { WorkMapPage } from "./work-map-page";
@@ -30,7 +31,7 @@ import {
   type Project,
 } from "./api";
 
-type Page = "product" | "workloop" | "workmap" | "resources" | "mission" | "inbox" | "approvals" | "work" | "identity" | "dashboard" | "projects" | "memory" | "database" | "runs" | "system";
+type Page = "product" | "workloop" | "workmap" | "resources" | "providers" | "mission" | "inbox" | "approvals" | "work" | "identity" | "dashboard" | "projects" | "memory" | "database" | "runs" | "system";
 
 // The product work loop (專案 Projects, 工作需求 → 執行) comes first; its labels follow the page's locale.
 const pages: Array<{ id: Page; label: string }> = [
@@ -38,6 +39,7 @@ const pages: Array<{ id: Page; label: string }> = [
   { id: "workloop", label: "nav.work" },
   { id: "workmap", label: "nav.workmap" },
   { id: "resources", label: "nav.resources" },
+  { id: "providers", label: "nav.providers" },
   { id: "mission", label: "Mission Control" },
   { id: "inbox", label: "Decision / Action Inbox" },
   { id: "approvals", label: "Approvals" },
@@ -212,7 +214,7 @@ export function ControlCenter({ onBack }: { onBack: () => void }): ReactElement 
   const [focus, setFocus] = useState<string | null>(null);
   const review = (approvalId: string) => { setFocus(approvalId); setPage("approvals"); };
   // Pages whose calls need this browser's session or the control token (writes, and the /control read projections).
-  const writes = page === "approvals" || page === "work" || page === "product" || page === "workloop" || page === "workmap" || page === "resources";
+  const writes = page === "approvals" || page === "work" || page === "product" || page === "workloop" || page === "workmap" || page === "resources" || page === "providers";
   // Locale lives in page memory only (zh-TW by default); no browser storage.
   const [locale, setLocale] = useState<Locale>(DEFAULT_LOCALE);
   const [productProject, setProductProject] = useState<string | null>(null);
@@ -227,6 +229,7 @@ export function ControlCenter({ onBack }: { onBack: () => void }): ReactElement 
     : page === "workloop" ? <WorkPage key={workTarget.nonce} auth={auth} onSessionLost={identity.sessionLost} initialProjectId={workTarget.projectId} resumeLoopId={workTarget.loopId} initialDraft={workTarget.draft} onOpenProject={openProject} />
     : page === "workmap" ? <WorkMapPage auth={auth} onSessionLost={identity.sessionLost} memory={mapMemory} onMemory={setMapMemory} onOpenWork={openWork} />
     : page === "resources" ? <ResourcesPage auth={auth} onSessionLost={identity.sessionLost} />
+    : page === "providers" ? <ProvidersPage auth={auth} onSessionLost={identity.sessionLost} />
     : page === "mission" ? <MissionControlPage /> : page === "inbox" ? <DecisionInboxPage onReview={review} /> : page === "approvals" ? <ApprovalsSurface access={access} focus={focus} /> : page === "work" ? <WorkRequestSurface access={access} /> : page === "identity" ? <><Header title="This browser & devices" detail="Pair this browser once instead of entering the control token on every load." /><IdentityPage identity={identity} auth={auth} controlValue={controlValue} onControlValue={setControlValue} /></> : page === "dashboard" ? <DashboardPage /> : page === "projects" ? <ProjectsPage /> : page === "memory" ? <MemoryPage /> : page === "database" ? <DatabasePage /> : page === "runs" ? <ActivityPage /> : <SystemPage />;
   return <div className="control-shell"><aside className="control-sidebar"><div className="control-brand"><strong>PADOS</strong><span>Local Control Center</span></div><nav aria-label="Control center navigation">{pages.map((item) => <button className={page === item.id ? "active" : ""} key={item.id} onClick={() => setPage(item.id)}>{label(item)}</button>)}</nav><button className="control-back control-locale" type="button" onClick={() => setLocale(locale === "zh-TW" ? "en" : "zh-TW")}>{locale === "zh-TW" ? "English" : "中文"}</button><div className="control-identity-side"><IdentityStatus view={identity.view} /></div><button className="control-back" onClick={onBack}>← Corpus Operator</button><p className="control-muted">Reads are local-only. A change needs this browser's paired session or the control token, and your confirmation.</p></aside><main className="control-main" lang={locale}><LocaleContext.Provider value={locale}>{writes && <ControlAccessPanel identity={identity} controlValue={controlValue} onControlValue={setControlValue} />}{content}</LocaleContext.Provider></main></div>;
 }

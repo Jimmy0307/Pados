@@ -28,6 +28,7 @@ class MutationKind(StrEnum):
 _KEY = MutationKind.IDEMPOTENCY_KEY
 _STATE = MutationKind.STATE_GUARDED
 _RECONCILE = MutationKind.RECONCILE_BEFORE_RETRY
+_NO_WRITE = MutationKind.NO_DURABLE_WRITE
 
 # The idempotency key is a required field of a plain JSON payload, not of a body model.
 PAYLOAD_KEY_ROUTES = frozenset({("POST", "/control/loops/{loop_id}/step")})
@@ -101,4 +102,12 @@ MUTATIONS: dict[tuple[str, str], MutationKind] = {
     ("POST", "/identity/v1/devices/{device_id}/revoke"): _STATE,  # a revoked device stays revoked
     # Phase 2 (design §4): an actor's work request, keyed as actor:<actor_id>:<key> on the control creation path.
     ("POST", "/identity/v1/projects/{project_id}/work-requests"): _KEY,
+    # AI providers (pados.providers.routes). Setup writes carry the setup revision: a stale revision is a conflict and a
+    # repeat of the same change finds the newer revision, so nothing is applied twice.
+    ("PUT", "/control/providers/{provider_id}"): _STATE,
+    ("POST", "/control/providers/{provider_id}/enable"): _STATE,
+    ("POST", "/control/providers/{provider_id}/disable"): _STATE,
+    # Probes only (health, discovery, an optional fixed PUBLIC probe prompt); it changes no state and appends only
+    # content-free attempt receipts, so a repeat is safe.
+    ("POST", "/control/providers/{provider_id}/diagnostics"): _NO_WRITE,
 }

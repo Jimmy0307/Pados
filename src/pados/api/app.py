@@ -46,6 +46,7 @@ from pados.operability import health as health_contract
 from pados.operability.metrics import METRICS
 from pados.operability.http import install_operability
 from pados.providers.factory import chat_provider_mode
+from pados.providers.routes import register_provider_routes
 from pados.remote.app import mount_remote
 from pados.web import service as web_service
 from pados.web.routes import register_web_routes
@@ -676,6 +677,8 @@ def create_app() -> FastAPI:
     # the same control_auth (pados.control.product_routes). Session factory resolved per call (tests replace it).
     register_product_control_routes(app, settings, control_auth=Depends(control_auth),
                                     session_scope=lambda chosen: session_scope(chosen))
+    # AI providers (pados.providers.routes): list, owner setup (can only narrow) and diagnostics, same control_auth.
+    register_provider_routes(app, settings, control_auth=Depends(control_auth))
 
     def integrated_local_guard(request: Request) -> None:
         client_host = request.client.host if request.client else ""

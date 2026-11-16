@@ -220,7 +220,8 @@ class JobManager:
             bound: dict[str, Any] = {} if job.request.execution is None else {"execution": job.request.execution}
             outputs = [backend.run(job.request.capability, job.model.backend_model, item,
                                    max_output_tokens=job.request.output_budget or self.limits.max_output_tokens,
-                                   timeout_seconds=timeout, **bound) for item in job.request.inputs]
+                                   timeout_seconds=timeout, **bound, **_gateway_call(backend, job.request, index))
+                       for index, item in enumerate(job.request.inputs)]
         except BackendError as exc:
             self._finish(job_id, JobState.FAILED, error=exc.code, detail=exc.detail)
             return
@@ -314,3 +315,11 @@ class JobManager:
 
     def shutdown(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _gateway_call(backend: Any, request: ExecuteRequest, index: int) -> dict[str, Any]:
+    """A backend that enforces data classification itself (the enterprise gateway) gets the job's classification and
+    a stable per-item idempotency key; every other backend keeps its call shape."""
+    if not getattr(backend, "enforces_classification", False):
+        return {}
+    return {"classification": request.classification, "idempotency_key": f"{request.request_id}:{index}"}
