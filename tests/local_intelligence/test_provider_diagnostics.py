@@ -90,7 +90,8 @@ def _check(view: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def test_detected_provider_reachable_measured_and_authorized(env: Env) -> None:
-    env.setup(enabled=True, project_ids=[PROJECT], capability_requirement="STRUCTURED_OUTPUT")
+    env.setup(enabled=True, project_ids=[PROJECT], capability_requirement="STRUCTURED_OUTPUT",
+              max_classification="INTERNAL")
     view = env.diagnostics().diagnose("ollama-local")
     assert view["reachability"]["state"] == "REACHABLE" and view["reachability"]["runtime_version"] == "0.34.3"
     model = _model(view)
@@ -152,8 +153,13 @@ def test_owner_setup_can_only_narrow_the_consumer_binding(env: Env) -> None:
     env.setup(enabled=True, project_ids=["22222222-2222-4222-8222-222222222222"])
     with pytest.raises(ExecutionBindingRefused, match="PROVIDER_PROJECT_NOT_IN_SCOPE"):
         _resolve(env)
-    env.setup(enabled=True, project_ids=[PROJECT])
+    env.setup(enabled=True, project_ids=[PROJECT])  # the setup default ceiling is PUBLIC: below the INTERNAL request
+    with pytest.raises(ExecutionBindingRefused, match="PROVIDER_CLASSIFICATION_NOT_ADMITTED"):
+        _resolve(env)
+    env.setup(enabled=True, project_ids=[PROJECT], max_classification="INTERNAL")
     assert _resolve(env).profile_id == env.profile.profile_id
+    env.setup(enabled=True, project_ids=[PROJECT], max_classification="CONFIDENTIAL")
+    assert _resolve(env).profile_id == env.profile.profile_id  # a higher ceiling never widens the registration
     (env.tmp / "local" / "providers.json").write_text("{broken", encoding="utf-8")
     with pytest.raises(ExecutionBindingRefused, match="PROVIDERS_SETUP_INVALID"):
         _resolve(env)

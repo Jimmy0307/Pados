@@ -222,9 +222,9 @@ Route classification (kept in step with `scopes.py`; 57 `control_auth` routes af
 | POST | `/control/loops/{loop_id}/cancel` | allowed | allowed | Control Center action (CSRF + Origin) |
 | GET | `/control/loops/{loop_id}/events` | allowed | allowed | Control Center read |
 | GET | `/control/loops/{loop_id}/iterations` | allowed | allowed | Control Center read |
-| POST | `/control/loops/{loop_id}/pause` | allowed | allowed | Control Center action (CSRF + Origin) |
+| POST | `/control/loops/{loop_id}/pause` | allowed | **denied** | With resume, a pause from a budget or human-wait stop would return the loop to RUNNING past its budget; the Control Center does not pause (security review 2026-11-16) |
 | POST | `/control/loops/{loop_id}/result-candidate` | allowed | allowed | Submits a candidate for review; acceptance stays with step-up |
-| POST | `/control/loops/{loop_id}/resume` | allowed | allowed | Control Center action (CSRF + Origin) |
+| POST | `/control/loops/{loop_id}/resume` | allowed | **denied** | See pause |
 | POST | `/control/loops/{loop_id}/start` | allowed | allowed | Control Center action (CSRF + Origin) |
 | POST | `/control/loops/{loop_id}/step` | allowed | allowed | Control Center action (CSRF + Origin) |
 | POST | `/control/projections/render` | allowed | **denied** | Writes projection files into the vault on disk |

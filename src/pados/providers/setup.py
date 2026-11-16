@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from pados.compute_node.config import private_http_url
 from pados.connectivity.storage import atomic_write_json, store_lock
 from pados.enterprise.classification import DataClassification
-from pados.enterprise.secrets import looks_like_secret
+from pados.enterprise.secrets import looks_like_secret, reserved_env_name
 
 SETUP_SCHEMA = "pados.providers.setup.v1"
 MAX_SETUP_BYTES = 256 * 1024
@@ -78,6 +78,8 @@ class ProviderSettings(BaseModel):
     def env_name(cls, value: str | None) -> str | None:
         if value is not None and not ENV_NAME.fullmatch(value):
             raise ValueError("PROVIDER_AUTH_ENV_NAME_INVALID")
+        if value is not None and reserved_env_name(value):
+            raise ValueError("PROVIDER_AUTH_ENV_RESERVED")
         return value
 
     @field_validator("project_ids")
