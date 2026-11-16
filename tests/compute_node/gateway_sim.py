@@ -203,6 +203,7 @@ def serve(port: int, key: str | None, cert: str | None = None, key_file: str | N
     server.daemon_threads = True
     if cert and key_file:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2  # never offer TLS 1.0/1.1, even in the test simulator
         context.load_cert_chain(cert, key_file)
         server.socket = context.wrap_socket(server.socket, server_side=True)
     return server
