@@ -10,7 +10,11 @@ decisions, sync events, job artifacts), shaped so one page can show a project's 
 - ``step_up_readiness``: whether the Remote console is configured and whether any approver of this project has a
   WebAuthn presence device enrolled (counts only: no actor ids, no key material);
 - ``artifact_content``: the text of one recorded job artifact (stdout, stderr or the result manifest), bounded, only
-  from inside the artifact root, and only when its SHA-256 still equals the recorded digest.
+  from inside the artifact root, and only when its SHA-256 still equals the recorded digest;
+- ``project_execution``: the TaskLoop iterations of the project with the step each one executed, their worker jobs
+  (status, timings, exit and validation codes) and the recorded job artifacts (type, SHA-256, time; never a path),
+  at most ``EXECUTION_LIMIT`` iterations and jobs and ``ARTIFACT_LIMIT`` artifacts. The Work Map (工作心智圖) joins it
+  with ``project_work`` in the browser; it is a rebuildable view of those rows and never a second store.
 """
 from __future__ import annotations
 
@@ -27,6 +31,8 @@ from pados.db.relations import relation_visible
 from pados.memory.security import contains_secret
 
 LIMIT = 50
+EXECUTION_LIMIT = 200
+ARTIFACT_LIMIT = 400
 ARTIFACT_TEXT_TYPES = ("stdout", "stderr", "result_manifest")
 ARTIFACT_MAX_BYTES = 256 * 1024
 
@@ -68,7 +74,7 @@ def project_work(session: Session, project_id: str) -> dict[str, Any]:
         JOIN task_goals g ON g.id = p.task_goal_id
         WHERE g.project_id = CAST(:project_id AS uuid) ORDER BY p.created_at DESC LIMIT :limit""", params)
     steps = _rows(session, """
-        SELECT s.task_plan_id, s.sequence, s.title, s.step_type, s.required_capability, s.command_id, s.risk_level,
+        SELECT s.id, s.task_plan_id, s.sequence, s.title, s.step_type, s.required_capability, s.command_id, s.risk_level,
                s.status, s.allowed_actions, s.prohibited_actions
         FROM task_plan_steps s JOIN task_plans p ON p.id = s.task_plan_id JOIN task_goals g ON g.id = p.task_goal_id
         WHERE g.project_id = CAST(:project_id AS uuid) ORDER BY s.task_plan_id, s.sequence""", params)
@@ -103,6 +109,35 @@ def project_work(session: Session, project_id: str) -> dict[str, Any]:
         "candidates": candidates,
         "events": [{**event, "payload_json": _audit_payload(event.get("payload_json"))} for event in events],
     }
+
+
+_PROJECT_JOBS = """
+    SELECT i.job_id FROM task_loop_iterations i JOIN task_loops l ON l.id = i.loop_id
+    WHERE l.project_id = CAST(:project_id AS uuid) AND i.job_id IS NOT NULL"""
+
+
+def project_execution(session: Session, project_id: str) -> dict[str, Any]:
+    """Iterations, their jobs and the jobs' artifact receipts for one project (PROJECTION ONLY, bounded)."""
+    params = {"project_id": project_id, "limit": EXECUTION_LIMIT, "artifact_limit": ARTIFACT_LIMIT}
+    iterations = _rows(session, """
+        SELECT i.id, i.loop_id, i.iteration_number, i.plan_id, i.step_id, s.sequence AS step_sequence, i.job_id,
+               i.status, i.decision, i.decision_reason, i.started_at, i.completed_at
+        FROM task_loop_iterations i JOIN task_loops l ON l.id = i.loop_id
+        LEFT JOIN task_plan_steps s ON s.id = i.step_id
+        WHERE l.project_id = CAST(:project_id AS uuid)
+        ORDER BY i.started_at DESC, i.iteration_number DESC LIMIT :limit""", params)
+    jobs = _rows(session, f"""
+        SELECT j.id, j.request_id, j.status, j.capability_id, j.worker_type, j.exit_code, j.validation_status,
+               j.error_code, j.queued_at, j.started_at, j.completed_at
+        FROM worker_jobs j WHERE j.project_id = CAST(:project_id AS uuid) AND j.id IN ({_PROJECT_JOBS})
+        ORDER BY j.queued_at DESC LIMIT :limit""", params)
+    artifacts = _rows(session, f"""
+        SELECT a.job_id, a.artifact_type, lower(a.sha256) AS sha256, a.created_at
+        FROM worker_job_artifacts a WHERE a.project_id = CAST(:project_id AS uuid) AND a.job_id IN ({_PROJECT_JOBS})
+        ORDER BY a.created_at DESC, a.id DESC LIMIT :artifact_limit""", params)
+    return {"iterations": iterations, "jobs": jobs, "artifacts": artifacts,
+            "truncated": len(iterations) >= EXECUTION_LIMIT or len(jobs) >= EXECUTION_LIMIT
+            or len(artifacts) >= ARTIFACT_LIMIT}
 
 
 def _audit_payload(payload: Any) -> Any:

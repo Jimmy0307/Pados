@@ -5,6 +5,8 @@
 import { controlRequest } from "./control-actions";
 import type { ControlAuth } from "./control-auth";
 import { MAX_ITERATIONS, newKey, type CandidateRow, type PlanTemplate, type StepUp } from "./product-flow";
+import type { ResourcesSummary } from "./resources";
+import type { WorkMapData } from "./work-map";
 
 type Fetcher = typeof fetch | undefined;
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) });
@@ -140,3 +142,11 @@ export async function loadEvidence(auth: ControlAuth, loopId: string, f?: Fetche
   ]);
   return { jobId, artifacts, stdout, stderr, iterations };
 }
+
+/** 工作心智圖: the read-only Work Map projection (the project's work plus its iterations, jobs and artifact receipts). */
+export const workMap = (auth: ControlAuth, projectId: string, f?: Fetcher) =>
+  controlRequest<WorkMapData & { projection: string; authority: string }>(`/control/projects/${id(projectId)}/work-map`, auth, {}, f);
+
+/** 資源與儲存: measured resources, the storage budget and a cleanup plan preview (read-only). */
+export const resourcesSummary = (auth: ControlAuth, f?: Fetcher) =>
+  controlRequest<ResourcesSummary>("/control/resources", auth, {}, f);

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Work Map and Resources (Control Center, read-only)
+
+- 工作心智圖 (Work Map): Project → Goal → Task → Subtask → Execution → Evidence → Decision as a mind map or list, from
+  `GET /control/projects/{id}/work-map` (PROJECTION ONLY). New work still goes through the work-request and approval
+  routes.
+- 資源與儲存 (Resources): `GET /control/resources` measures RAM, model memory (configured loopback runtime only),
+  PostgreSQL, documents, cache, evidence, execution growth, tokens and execution time, each with source, unit, time and
+  MEASURED/UNKNOWN; storage budget (optional `PADOS_STORAGE_POLICY`) and a cleanup plan preview that never selects
+  evidence, decisions, audit records or unique copies and never executes. See
+  `docs/architecture/WORK_MAP_AND_RESOURCES_V1.md`.
+
 ### Unified Identity & Session v1 (feature flag, off by default)
 
 - One-time device pairing (`pados device pair`) and server-side HttpOnly sessions for the Local Control Center, so a

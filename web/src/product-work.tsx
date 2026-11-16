@@ -32,13 +32,15 @@ type Stage =
 const STEP_DELAY_MS = 400;
 const MAX_STEPS_PER_VIEW = 12;
 
-export function WorkPage({ auth, onSessionLost, initialProjectId, resumeLoopId, onOpenProject }: Access & {
+export function WorkPage({ auth, onSessionLost, initialProjectId, resumeLoopId, initialDraft, onOpenProject }: Access & {
   initialProjectId: string | null; resumeLoopId: string | null; onOpenProject: (projectId: string) => void;
+  /** A title and text to start from (the Work Map's "new work request from here"); still a normal, governed request. */
+  initialDraft?: { title: string; text: string } | null;
 }): ReactElement {
   const t = useT();
   const [stage, setStage] = useState<Stage>(resumeLoopId ? { kind: "run", loopId: resumeLoopId } : { kind: "compose" });
   const [draft, setDraft] = useState<Draft>({ projectId: initialProjectId || "", capability: CHECK_CAPABILITY,
-    title: t("work.defaultTitle"), text: t("work.defaultText") });
+    title: (initialDraft?.title || t("work.defaultTitle")).slice(0, 300), text: (initialDraft?.text || t("work.defaultText")).slice(0, 1600) });
   useEffect(() => { if (resumeLoopId) setStage({ kind: "run", loopId: resumeLoopId }); }, [resumeLoopId]);
   useEffect(() => { if (initialProjectId) setDraft((d) => ({ ...d, projectId: initialProjectId })); }, [initialProjectId]);
   if (!hasControlAuth(auth)) return <Disabled reason={t("auth.required")} />;
