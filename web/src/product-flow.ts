@@ -203,3 +203,14 @@ export function newKey(prefix: string): string {
   globalThis.crypto.getRandomValues(bytes);
   return `${prefix}-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
+
+/**
+ * Whether 產生計畫 can submit. The project <select> is `required` and controlled: until the project list has loaded,
+ * it has no <option> for the chosen project, so its value is "" and the browser's form validation silently refuses
+ * the submit. The button stays disabled until the chosen project is one of the loaded options.
+ */
+export function canMakePlan(input: { projects: readonly { id: string }[] | null | undefined; projectId: string;
+  available: boolean; busy: boolean }): boolean {
+  return !input.busy && input.available && Boolean(input.projectId)
+    && (input.projects || []).some((project) => project.id === input.projectId);
+}

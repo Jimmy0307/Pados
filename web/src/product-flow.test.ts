@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { HttpError } from "./http";
 import { DEFAULT_LOCALE, englishKeys, missingTranslations, translate } from "./i18n";
 import {
-  CAPABILITY_OPTIONS, OPERATIONS, buildPlanTemplate, candidateState, failureView, isStopped, loopPhase, markdownBlocks,
+  CAPABILITY_OPTIONS, OPERATIONS, buildPlanTemplate, canMakePlan, candidateState, failureView, isStopped, loopPhase, markdownBlocks,
   parseProbeReport, rootGoalId, stepUpState,
 } from "./product-flow";
 
@@ -122,5 +122,21 @@ describe("markdown preview", () => {
     expect(blocks[2]).toEqual({ kind: "item", parts: [{ kind: "link", text: "壞", target: "missing.md", relative: true }] });
     expect(blocks[3]).toEqual({ kind: "code", text: "[not](a link)" });
     expect(blocks[4]).toEqual({ kind: "paragraph", parts: [{ kind: "text", text: "<script>x</script>" }] });
+  });
+});
+
+describe("making a plan", () => {
+  const loaded = [{ id: "p-1" }, { id: "p-2" }];
+  it("waits for the project list: a chosen project with no loaded option would make the required select empty", () => {
+    expect(canMakePlan({ projects: undefined, projectId: "p-1", available: true, busy: false })).toBe(false);
+    expect(canMakePlan({ projects: [], projectId: "p-1", available: true, busy: false })).toBe(false);
+    expect(canMakePlan({ projects: [{ id: "p-2" }], projectId: "p-1", available: true, busy: false })).toBe(false);
+    expect(canMakePlan({ projects: loaded, projectId: "p-1", available: true, busy: false })).toBe(true);
+  });
+
+  it("needs a project, an available capability and no request in flight", () => {
+    expect(canMakePlan({ projects: loaded, projectId: "", available: true, busy: false })).toBe(false);
+    expect(canMakePlan({ projects: loaded, projectId: "p-1", available: false, busy: false })).toBe(false);
+    expect(canMakePlan({ projects: loaded, projectId: "p-1", available: true, busy: true })).toBe(false);
   });
 });
