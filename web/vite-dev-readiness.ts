@@ -57,7 +57,9 @@ export function devReadinessPlugin(entryModules: readonly string[] = ENTRY_MODUL
     apply: "serve",
     configureServer(server) {
       server.middlewares.use(DEV_READY_PATH, (request, response) => {
-        if (request.method !== "GET" && request.method !== "HEAD") {
+        // Read structurally: web/ has no @types/node, so Connect's request type may not declare `method` in CI.
+        const method = (request as { method?: string }).method;
+        if (method !== "GET" && method !== "HEAD") {
           response.statusCode = 405;
           response.end();
           return;
