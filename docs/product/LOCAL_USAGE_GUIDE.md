@@ -36,6 +36,25 @@ Never run `alembic upgrade heads` on the proof database.
 
 ## 2. Start the service, check health, open the web console
 
+**Windows, recommended: the launcher.** From the checkout:
+
+```powershell
+.\scripts\windows\Start-PADOS.ps1 -DryRun   # checks and plan only
+.\scripts\windows\Start-PADOS.ps1           # start; -Status and -Stop later
+```
+
+`scripts/windows/Start-PADOS.ps1` finds the checkout. It checks `.venv`, `npm.cmd`, `web\node_modules` and `.env`,
+printing the exact one-line fix for each one missing. It reads only non-secret settings from `.env`, checks that
+PostgreSQL accepts connections and that ports 8088 and 5173 are free (`-ApiPort` and `-WebPort` change them). It then
+starts `pados serve` and the web console as child processes, with logs in `runtime\logs\` and PIDs in
+`runtime\local\pados-launcher.json`. It waits for `/health/ready`, opens `/operator.html`, and prints the pairing
+command when browser pairing is on. It never runs `pados init` and never edits `.env` or a database. `-Stop` stops only
+what it started; a PID that now belongs to another program is reported as `PID_REUSED` and left alone. The launcher
+belongs to the draft documentation PR on top of the PR #35 to #38 stack. It was validated with Pester under PowerShell
+5.1 and with a live run on the integrated stack.
+
+The manual way still works:
+
 ```powershell
 .\.venv\Scripts\pados serve         # API on http://127.0.0.1:8088 ; Ctrl+C stops it
 ```
@@ -48,7 +67,8 @@ Never run `alembic upgrade heads` on the proof database.
   and New work request). The root page `http://127.0.0.1:5173/` is the **Remote console sign-in**, which needs Remote
   Operations configured; it links to the local console. In a build served under a sub-path (for example `/Pados/`),
   every page link stays under that sub-path.
-- Or start both with one command on Windows: `.\Start-PADOS-Web.ps1`. It runs `pados doctor`, then `pados serve`
+- The older one-command start, `.\Start-PADOS-Web.ps1`, also still works. It picks the next free port silently and
+  stays in the foreground. It runs `pados doctor`, then `pados serve`
   (with the same refusals: a non-loopback host or the shipped default token stops it, and the launcher prints
   `BACKEND_START_REFUSED` with the reason), waits for `/health/live`, starts the web console and opens
   `/operator.html`.
@@ -59,13 +79,20 @@ Never run `alembic upgrade heads` on the proof database.
 .\.venv\Scripts\pados project create --name demo --root-path .\runtime\local\workspace --json
 ```
 
-There is no web or API route that creates a project; until one exists, the console's project list tells you to use
+With the product work loop (draft PR #36, not merged), the Control Center also creates projects: **專案 Projects** →
+**新專案** → **建立專案**. You type a name only, and the folder is placed under `PADOS_PRODUCT_WORKSPACE_ROOT`
+(`POST /control/projects`). Without that PR there is no web or API route that creates a project, and the console's
+project list tells you to use
 this command.
 
 ## 4. Run a real job (the deterministic Markdown reference check)
 
 The control API takes a work request, an approval with a WORK_ROUTE subject, a goal, a plan and a TaskLoop. All of
 them need the control token (`runtime\local\control.token`). In order:
+
+With the draft PR #35 to #36 stack, the **工作需求 → 執行** page runs this whole sequence in the browser: request, plan,
+approve, run, Evidence and candidate. A paired browser needs no control token for it; see
+[`OPERATING_GUIDE_zh-TW.md`](OPERATING_GUIDE_zh-TW.md) §2 to §8. The steps below are the path without that stack.
 
 1. **Work request (web):** Control Center → **New work request**. Paste the control token into the masked field
    (it stays in that page's memory only; reloading forgets it), choose the project, give a title, the capability the
@@ -135,8 +162,10 @@ Model output (local Ollama) is execution evidence at most; it is never accepted 
 | `WORKTREE_IMPORT_PATH_MISMATCH` from `pados doctor` | Run from another directory than the checkout the CLI is installed from | `cd` to the checkout the message names |
 | Control Center: `Not recorded: ... version` or `approval is not pending` | Someone decided or changed the approval since you opened it | Reopen it from Approvals; it shows the current version and status |
 | Browser shows a sign-in asking for an actor and access proof | That is the Remote console | Open `/operator.html` instead |
-| Project list empty | No project exists yet | `pados project create --name <name> --root-path <folder>` |
-| `403` on `/control/...` | Missing or wrong `X-PADOS-Control-Token` | Send the token from `runtime\local\control.token` |
+| Project list empty | No project exists yet | **專案 Projects** → **建立專案** (draft PR #36), or `pados project create --name <name> --root-path <folder>` |
+| `403` on `/control/...` | Missing or wrong `X-PADOS-Control-Token`, or the browser is not paired | Pair the browser once (`pados device pair`, then **Pair this browser**), or send the token from `runtime\local\control.token` |
+| `SESSION_SCOPE_DENIED` | A paired browser asked for an operator-level change (for example editing an AI provider's endpoint) | Use the control token from a terminal on this computer |
+| Launcher: `PORT_IN_USE`, `ALREADY_RUNNING`, `BACKEND_START_REFUSED`, `HEALTH_NOT_READY` | A port is busy; PADOS already runs; `pados serve` refused (the reason follows); not ready in time | See [`OPERATING_GUIDE_zh-TW.md`](OPERATING_GUIDE_zh-TW.md) §13 (one row per code) |
 | `409 LOOP_NOT_RUNNING` | The loop is paused, finished or cancelled | Resume a paused loop; create a new loop otherwise |
 | `403 RESULT_ACCEPTANCE_REQUIRES_STEP_UP` | A result acceptance was decided through the control API | Decide it in the Remote console with a WebAuthn step-up |
 | Remote step-up decision fails after your device verified it; the same proof is then `APPROVAL_PROOF_REPLAYED` | The proof is consumed in its own transaction before the decision is recorded; a failure in between spends it and decides nothing | Run a new step-up (approve or reject again); nothing was accepted |
