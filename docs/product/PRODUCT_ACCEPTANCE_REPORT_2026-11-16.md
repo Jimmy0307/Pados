@@ -23,7 +23,7 @@ plus this documentation PR (zh-TW operating guide, Windows launcher, this report
 **Where the live runs were made.** The live end-to-end runs were made on each PR's branch head *before* the integration
 merges (commits are named per row). The integrated head `1af18ba` is covered by the unit, integration and web suites
 listed under F1 and F2, and by the launcher run in this PR. The full Windows and Linux numbers at the integrated head
-are recorded in [FINAL VALIDATION](#final-validation-to-be-filled), which is still open.
+are recorded in [FINAL VALIDATION](#final-validation).
 
 **Evidence locations.** Committed evidence is in the PR bodies, the docs named below and `docs/product/screenshots/`.
 Machine-local evidence is under the validation worktree's `runtime/artifacts/reports/` folder, written below as
@@ -41,7 +41,7 @@ Operator guide (zh-TW): [OPERATING_GUIDE_zh-TW.md](OPERATING_GUIDE_zh-TW.md).
 | Item | Status | Evidence class |
 | --- | --- | --- |
 | A1 Device pairing and server-side sessions | PASS | LIVE (Windows 11, VMware Linux) |
-| A2 Least privilege for device sessions | PARTIAL | SYNTHETIC; live re-run owed |
+| A2 Least privilege for device sessions | PASS | LIVE at `1af18ba` (identity E2E, walkthrough) |
 | A3 Owner-only identity store (Windows DACL) | PASS | Windows 11 real ACLs in integration tests |
 | A4 Single sign-on in the Control Center | NOT_LIVE_VALIDATED | SYNTHETIC |
 | B1 Create a project from the browser | PASS | LIVE |
@@ -57,16 +57,16 @@ Operator guide (zh-TW): [OPERATING_GUIDE_zh-TW.md](OPERATING_GUIDE_zh-TW.md).
 | E Resources and storage | PASS | LIVE |
 | F1 Python unit and integration suites | PASS | SYNTHETIC (3 known baseline failures in `tests/security`) |
 | F2 Web suites | PASS | SYNTHETIC |
-| F3 Live E2E at the integrated head | PARTIAL | branch heads LIVE; integrated head owed |
-| F4 Linux (VMware) validation | PARTIAL | identity chain only |
-| F5 Windows full validation and launcher | PARTIAL | launcher PASS; full validation at the integrated head owed |
+| F3 Live E2E at the integrated head | PASS | LIVE at `1af18ba` (Windows and Linux) |
+| F4 Linux (VMware) validation | PASS | 19/19 chain plus 3 E2Es at `1af18ba` |
+| F5 Windows full validation and launcher | PASS, with notes | gates and E2Es PASS; full pytest baseline-identical FAIL (163, 0 new); one 5173-only spec not run |
 
 ## A. Identity and sessions (PR #35)
 
 | Item | Status | Evidence |
 | --- | --- | --- |
 | **A1** One-time device pairing (`pados device pair`, **Pair this browser**); HttpOnly server-side session; reload restores it; Work Requests and the task loop through the session only; the raw control token never reaches the browser; logout, revoke, idle expiry, token rotation | **PASS** (LIVE) | Windows 11 identity E2E at `eaeb9f4`: **26 PASS, 0 FAIL**, 1 NOT_LIVE_VALIDATED (`oidc_live_sign_in`), including `pairing_code_powershell51`, `work_request_via_session_only`, `step_up_cannot_be_bypassed_by_session`, `idle_expiry` (real 130 s), `control_token_rotation_ends_sessions` and `no_control_token_or_session_secret_leak` (`<evidence>/pados-identity-20261116/windows-identity-e2e-eaeb9f4/IDENTITY_E2E_RESULT.json`). VMware Ubuntu 24.04 at `298d32f`: **23 PASS**, 2 SKIPPED (PowerShell 5.1 is Windows only; the VM's browser build is older than the lock), 1 NOT_LIVE_VALIDATED. Live Playwright: 1 passed. Launcher run at `1af18ba` (this PR): code minted with the printed command, paired through the web origin, `GET /identity/v1/session` authenticated. |
-| **A2** A session may call only the allowlisted `(method, route template)` pairs; everything else is `SESSION_SCOPE_DENIED`; the token keeps full authority; result acceptance stays refused | **PARTIAL** | SYNTHETIC: `test_session_scopes.py` (61 cases; every `control_auth` route classified). At `1af18ba` the scope, OP-004, gateway and provider tests pass (130). The provider `PUT` is token-only. Missing: no live E2E has run with the allowlist in place, because every live run above predates `b5aa3e3`. Owed in FINAL VALIDATION. |
+| **A2** A session may call only the allowlisted `(method, route template)` pairs; everything else is `SESSION_SCOPE_DENIED`; the token keeps full authority; result acceptance stays refused | **PASS** | SYNTHETIC: `test_session_scopes.py` (61 cases; every `control_auth` route classified). At `1af18ba` the scope, OP-004, gateway and provider tests pass (130). The provider `PUT` is token-only. Missing: no live E2E has run with the allowlist in place, because every live run above predates `b5aa3e3`. Owed in FINAL VALIDATION. **Final validation:** LIVE at `1af18ba` (identity E2E 26/0 and the user acceptance walkthrough, with the allowlist in force). |
 | **A3** The identity store is owner-only from creation (Windows: protected DACL from the process token SID; POSIX 0700/0600); every load fails closed with `IDENTITY_STORE_INSECURE`; sessions off loopback need the `__Host-` Secure cookie | **PASS** (Windows 11) | `test_store_protection.py` and `test_transport_and_cross_port.py` with real ACLs (`icacls`, SIDs) on Windows 11: `tests/identity` **316 passed**, 7 skipped (POSIX-only and symlink privilege). Linux: the POSIX branches are covered by tests that skip on win32 and by `mypy --platform linux`; not re-run on the VM. This is not a Windows user authentication. |
 | **A4** 單一登入 (SSO) section: provider links, zh-TW return messages, actor view, actor-only logout | **NOT_LIVE_VALIDATED** | SYNTHETIC: `tests/identity/oidc` **155 passed**; Vitest `sso.test.ts` 27; mocked Playwright `control-center-identity.spec.ts`. **Microsoft Entra ID and Google with real tenants: NOT_LIVE_VALIDATED.** `approver` grants nothing yet. |
 
@@ -118,9 +118,9 @@ Known limits (PR #38): no streaming; system proxy settings are ignored; a gatewa
 | --- | --- | --- |
 | **F1** Python unit and integration suites | **PASS** (SYNTHETIC) | At `1af18ba`: scope, OP-004, gateway and provider tests **130 passed**; ruff clean; mypy 468 files clean. Earlier on the stack: `tests/identity` 316 passed / 7 skipped; `tests/identity/oidc` 155 passed; `tests/identity` + `tests/control` 395 passed / 7 skipped (at `3fcbe21`); `tests/security` + OP-004 **447 passed**, 13 skipped, **3 failed** (the known `test_p6_6_adversarial.py` cases that need a password-protected PostgreSQL on 5432; identical on `main`). |
 | **F2** Web suites | **PASS** (SYNTHETIC) | At `1af18ba`: Vitest **233 passed**; typecheck, lint and build pass. Mocked Playwright identity spec: 6/6 after `--repeat-each=3` (one `page.goto` timeout under host memory pressure on the full run). |
-| **F3** Live E2E at the integrated head | **PARTIAL** | LIVE on the branch heads: identity (A1), product flow (B), Work Map and Resources (D, E), simulated gateway (C2), governed local model (C5). At `1af18ba` only the launcher run below has been made. The identity, product, Work Map and gateway E2Es at the integrated head are owed in FINAL VALIDATION. Known flake (PR #36): on a cold start the Vite proxy dropped the `/pair` reply in 2 of 5 runs; the live spec re-pairs up to 3 times; root cause unknown. |
-| **F4** Linux (VMware Ubuntu 24.04, offline) | **PARTIAL** | At `298d32f` (identity only): `vm_online_chain.sh` **19/19 gates**, local dogfood E2E PASS, full pytest 0 failures, identity E2E 23 PASS. PRs #36 to #38 have not run on Linux. |
-| **F5** Windows full validation (`scripts/validation/windows_validate.py --profile full`, Pester and Playwright included), and the launcher | **PARTIAL** | Launcher (this PR, after an independent review that approved with 5 MEDIUM findings, all fixed): Pester `tests/launcher/Start-PADOS.Windows.Tests.ps1` **34 passed, 0 failed** under Windows PowerShell 5.1. It covers: dry-run planning; the missing venv, node_modules and `.env` messages; an unreachable PostgreSQL and a non-numeric port; port-in-use detection; `-Stop` and `-Status` with fake and malformed PID files (a reused PID is never stopped); start times as strings or `DateTime`; closed-code-only log and health output; and the start path with fake children from a checkout path with spaces and non-ASCII characters. The start-path cases check the PID file, the logs, readiness through port ownership plus a PADOS health report, `-Stop` tree-kill, and cleanup after a refused backend, a non-PADOS HTTP 200, a foreign web listener, a web child that exits, and an exception mid-start. Live launcher run at `1af18ba` from a checkout path containing a space, on its own ports (API 18621, web 18622, PostgreSQL 18620), with a temporary runtime and a private cluster: start in 8 s with both ports owned by the launcher's children, `/health/ready` OK, `operator.html` 200, pairing code and web-origin pairing, second start refused (`ALREADY_RUNNING`), `-Stop` with both ports released and no leftover process, and `DEFAULT_CONTROL_TOKEN_REFUSED` reported (code only) as `BACKEND_START_REFUSED` with cleanup. Full validation was last run at `eaeb9f4` (identity head): every step through Pester passed except `full_pytest` (163 baseline failures, plus 4 environment-only document-intelligence cases, plus the OP-004 gap fixed in `298d32f`); it was stopped for low host memory before its Playwright steps, which then passed separately. **A complete run at the integrated head is owed.** |
+| **F3** Live E2E at the integrated head | **PASS** | LIVE on the branch heads: identity (A1), product flow (B), Work Map and Resources (D, E), simulated gateway (C2), governed local model (C5). At `1af18ba` only the launcher run below has been made. The identity, product, Work Map and gateway E2Es at the integrated head are owed in FINAL VALIDATION. Known flake (PR #36): on a cold start the Vite proxy dropped the `/pair` reply in 2 of 5 runs; the live spec re-pairs up to 3 times; root cause unknown. **Final validation:** every live E2E passed at `1af18ba` on Windows 11 and Linux (see FINAL VALIDATION). |
+| **F4** Linux (VMware Ubuntu 24.04, offline) | **PASS** | At `298d32f` (identity only): `vm_online_chain.sh` **19/19 gates**, local dogfood E2E PASS, full pytest 0 failures, identity E2E 23 PASS. PRs #36 to #38 have not run on Linux. **Final validation:** at `1af18ba`, chain 19/19 with E2E and 0 pytest failures, and the identity, product-flow and gateway E2Es all PASS. |
+| **F5** Windows full validation (`scripts/validation/windows_validate.py --profile full`, Pester and Playwright included), and the launcher | **PASS, with notes** | Launcher (this PR, after an independent review that approved with 5 MEDIUM findings, all fixed): Pester `tests/launcher/Start-PADOS.Windows.Tests.ps1` **34 passed, 0 failed** under Windows PowerShell 5.1. It covers: dry-run planning; the missing venv, node_modules and `.env` messages; an unreachable PostgreSQL and a non-numeric port; port-in-use detection; `-Stop` and `-Status` with fake and malformed PID files (a reused PID is never stopped); start times as strings or `DateTime`; closed-code-only log and health output; and the start path with fake children from a checkout path with spaces and non-ASCII characters. The start-path cases check the PID file, the logs, readiness through port ownership plus a PADOS health report, `-Stop` tree-kill, and cleanup after a refused backend, a non-PADOS HTTP 200, a foreign web listener, a web child that exits, and an exception mid-start. Live launcher run at `1af18ba` from a checkout path containing a space, on its own ports (API 18621, web 18622, PostgreSQL 18620), with a temporary runtime and a private cluster: start in 8 s with both ports owned by the launcher's children, `/health/ready` OK, `operator.html` 200, pairing code and web-origin pairing, second start refused (`ALREADY_RUNNING`), `-Stop` with both ports released and no leftover process, and `DEFAULT_CONTROL_TOKEN_REFUSED` reported (code only) as `BACKEND_START_REFUSED` with cleanup. Full validation was last run at `eaeb9f4` (identity head): every step through Pester passed except `full_pytest` (163 baseline failures, plus 4 environment-only document-intelligence cases, plus the OP-004 gap fixed in `298d32f`); it was stopped for low host memory before its Playwright steps, which then passed separately. **A complete run at the integrated head is owed.** **Final validation:** at `1af18ba`, gates 23/23, Pester, Playwright and E2Es PASS; full pytest baseline-identical (163, 0 new); `remote-console-mobile` not run (hard-coded 5173). |
 
 Release checks on this documentation PR (public export check, secret scan, doc lint): see the PR body.
 
@@ -145,17 +145,52 @@ Kept local, for the reason given:
 5. Whether the demo order for candidates (fix, recheck, submit) stays as it is.
 6. Merge order and review of #35 to #38 and of this PR. **Do not merge without owner review.**
 
-## FINAL VALIDATION (to be filled)
+## FINAL VALIDATION
 
-<!-- Filled from the final validation run at the integrated head. Do not edit the rows above to match; add results here. -->
+Integrated head **`1af18ba4a214c2d6f2d9fddb0e8296a8c5b072bd`** (top of #35 → #36 → #37 → #38). Run on 2026-11-16. The
+validation worktree was clean before and after, and no product defect was found. Every run used its own ports, never
+the operator's live 5173/8088. Machine-local evidence is under `<evidence>/pados-final-1af18ba/`.
 
 | Run | Head | Platform | Result | Evidence |
 | --- | --- | --- | --- | --- |
-| `windows_validate.py --profile full` (incl. Pester `tests/launcher`, Playwright) | _to be filled_ | Windows 11 | _to be filled_ | _to be filled_ |
-| Identity E2E (`scripts/dogfood/identity_e2e.py`) | _to be filled_ | Windows 11 | _to be filled_ | _to be filled_ |
-| Product flow E2E (`scripts/dogfood/product_flow_e2e.py --playwright`) | _to be filled_ | Windows 11 | _to be filled_ | _to be filled_ |
-| Work Map and Resources E2E (`scripts/dogfood/work_map_resources_e2e.py --playwright`) | _to be filled_ | Windows 11 | _to be filled_ | _to be filled_ |
-| Simulated gateway E2E (`scripts/dogfood/gateway_simulated_e2e.py --playwright`) | _to be filled_ | Windows 11 | _to be filled_ | _to be filled_ |
-| VMware Linux chain and E2Es | _to be filled_ | Ubuntu 24.04 | _to be filled_ | _to be filled_ |
+| `windows_validate.py --profile core`, plus the `full`-only steps run by hand with the same commands | `1af18ba` | Windows 11 | CI gates **PASS** (23 of 23 exit 0). PostgreSQL integration gate **PASS**. Local dogfood E2E **PASS** (25/25). Pester **PASS** (22/22). Playwright **PASS** (26 passed, 9 skipped live-only specs covered by the E2Es below). One spec, `remote-console-mobile`, was **not run**: it hard-codes `localhost:5173`, the operator's live port. | `windows-full-1af18ba/`, `windows-full-1af18ba-web/` |
+| Full pytest (inside the run above) | `1af18ba` | Windows 11 | **FAIL, baseline-identical**: 5510 tests, 163 failures, **0 new** and 0 fixed compared by test id with `7043c63`. The 4 document-intelligence live tests pass with the extra installed. 7 new skips, all environmental (POSIX-only and symlink privilege). | `full-pytest-compare-vs-7043c63.json` |
+| Identity E2E (`identity_e2e.py --playwright`) | `1af18ba` | Windows 11 | **PASS**: 26 PASS, 0 FAIL, 1 NOT_LIVE_VALIDATED (live OIDC). The session allowlist (A2) is in force. | `identity-e2e-r1/` |
+| Product flow E2E (`product_flow_e2e.py --playwright`) | `1af18ba` | Windows 11 | **PASS**: 15/15 | `product-flow-e2e-r1/` |
+| Work Map and Resources E2E (`work_map_resources_e2e.py --playwright`) | `1af18ba` | Windows 11 | **PASS**: 18/18 | `work-map-resources-e2e-r1/` |
+| Simulated gateway E2E (`gateway_simulated_e2e.py --playwright`) | `1af18ba` | Windows 11 | **SIMULATED_E2E_PASS** (enterprise gateway ENTERPRISE_LIVE_NOT_VALIDATED) | `gateway-simulated-e2e-r1/` |
+| User acceptance walkthrough (one real runtime, real browser) | `1af18ba` | Windows 11 | **PASS**: 23/23 in r2. r1 failed on two harness mistakes, not product defects, and is kept. | `user-acceptance/` (17 screenshots), `user-acceptance-r1/`, `user-acceptance-r2/` |
+| VMware chain (`vm_online_chain.sh`, unmodified, offline) | `1af18ba` | Ubuntu 24.04 | **PASS**: 19/19 gates, E2E exit 0, full pytest 0 failures | `vmware-chain-1af18ba-r1/` |
+| VMware identity, product flow and simulated gateway E2Es (no browser) | `1af18ba` | Ubuntu 24.04 | **PASS**: identity 23 PASS, 2 SKIPPED (PowerShell 5.1 and Playwright are not run on Linux), 1 NOT_LIVE_VALIDATED. Product flow 14 PASS, 1 SKIPPED (Playwright). Gateway 14/14 steps, SIMULATED_E2E_PASS. | `vmware-e2es-1af18ba-r1/` |
 
-Rows A2, B4, F3, F4 and F5 change status only from what is recorded in this table.
+The user acceptance walkthrough covered, in order:
+
+1. Open `operator.html`.
+2. First pairing.
+3. Reload without the token (browser storage empty).
+4. Create a project and a Markdown document from the UI.
+5. Goal and work request.
+6. Readable plan with the approval PENDING.
+7. Approve; the TaskLoop reaches COMPLETED.
+8. Real result, evidence and receipts with SHA-256.
+9. Candidate shown as waiting for the WebAuthn step-up, never as accepted.
+10. Task found in the Work Map.
+11. No AI configured; the non-AI flow works.
+12. `pados serve` restarted; the session, project and task persist.
+13. Providers page shows the local model's source and measurement (qwen3:8b 已授權並測量; other installed models 未授權).
+14. Simulated gateway stopped; it shows 無法連線 and the circuit breaker opens, with no success reported.
+15. Nothing corrupted: the setup hash and the project, loop, candidate and approval are unchanged.
+
+No request carried the control-token header, and the token appears in no response or evidence file.
+
+**Status changes from this table:**
+
+| Item | Was | Now | Why |
+| --- | --- | --- | --- |
+| A2 | PARTIAL | **PASS** | The allowlist was live-validated at the integrated head (identity E2E and walkthrough). |
+| F3 | PARTIAL | **PASS** | Every live E2E ran at `1af18ba`. |
+| F4 | PARTIAL | **PASS** | VMware chain and three E2Es passed at `1af18ba`. |
+| F5 | PARTIAL | **PASS, with notes** | Full pytest stays a baseline-identical FAIL (163, 0 new). `remote-console-mobile` was not run because it hard-codes port 5173 (follow-up: build its origin from `PADOS_WEB_PORT`). |
+| B4 | PARTIAL | PARTIAL | A real WebAuthn decision needs an enrolled presence device; waiting and no-bypass are LIVE. |
+
+The status changes above are the only edits made to rows A2, B4, F3, F4 and F5.
