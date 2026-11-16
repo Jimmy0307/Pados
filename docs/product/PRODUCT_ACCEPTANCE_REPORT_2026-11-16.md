@@ -240,3 +240,35 @@ Machine-local evidence is under `<evidence>/pados-final-8bcb797/`.
 | `a5fd66d` | #39 | `remote-live-step-up.spec.ts`: origin from `PADOS_WEB_PORT` (opt-in live spec, skipped by default) |
 
 These are small; each passed the 11 CI checks on its PR, and `8c5797c` was also rerun on Linux (the row above). The F-row grades above are unchanged.
+
+## Final release review (2026-11-16, before merge)
+
+Two independent **AI-assisted** security reviews (not human reviews) of the integrated #35 → #39 changes, against the
+owner's release scope `LOCAL_SINGLE_USER + LOOPBACK + NON_SENSITIVE_DATA + SUPERVISED_DOGFOOD`. Verdict of both:
+MERGE_OK. No CRITICAL finding. One finding was graded HIGH outside the scope (MEDIUM inside it); its part introduced by
+this stack is fixed and the rest is a recorded residual. Fixes: `208f903` on #38.
+
+| Finding | Severity | Resolution |
+| --- | --- | --- |
+| MEDIUM-2: provider diagnostics and chat probes had no rate limit; sessions may call them | MEDIUM | **Fixed.** Token buckets per provider (burst 10, 1 per 6 s), for chat probes (burst 3, 1 per 20 s) and process-wide (burst 30, 1 per 2 s); 429 `PROVIDER_DIAGNOSTICS_RATE_LIMITED` before any outbound request. Tests: `test_provider_diagnostics_rate_limit.py`, `test_provider_routes.py`. |
+| Provider setup `max_classification` shown in the UI but not applied on the model path | HIGH outside scope (MEDIUM in scope) | **Fixed for the setup ceiling:** below the INTERNAL request it refuses with `PROVIDER_CLASSIFICATION_NOT_ADMITTED`. **Residual R1** below for the project's own classification. |
+| A provider key reference could name PADOS's own settings (e.g. the database password), which would be sent to the provider host | LOW | **Fixed:** `PROVIDER_AUTH_ENV_RESERVED`, `GATEWAY_AUTH_REFERENCE_RESERVED`. |
+| A generic approval under the reserved `result-candidate:` key could pre-empt and strand a later ResultCandidate (never accept it) | MEDIUM | **Fixed:** `APPROVAL_IDEMPOTENCY_KEY_RESERVED` on `POST /control/approvals`. |
+| A pause then resume returned a loop stopped on its budget or a human wait to RUNNING; sessions could call both | MEDIUM | **Fixed for sessions:** pause and resume are `SESSION_DENIED` (the Control Center does not use them). **Residual R2** for the token holder. |
+| Launcher reads a child's `StartTime` right after start | LOW | Accepted: children run under `cmd.exe /c`, so an exited cmd means its child exited; an exception still reports `START_INTERRUPTED` and the `finally` block stops what was recorded. |
+| Unauthenticated pairing from any local process with an allowed `Origin` | LOW | Accepted: about 150 guesses against 2^50 codes per code lifetime; documented in `pairing.py`. |
+| Sessions are device-wide: a paired browser reads and writes every project | LOW | Accepted for a single-user host: per-project session isolation is not a feature of this release. |
+| Earlier LOW items (journal replay needs a local writer, link TOCTOU, reconcile side effect on GET, hashing cost after ~10k writes, owner data in responses, documents as a prompt-injection surface) | LOW | Accepted, unchanged. The journal entry cap (64 open intents) and a digest/replace window were also noted as LOW. |
+| Replaying a decided step key on a later-cancelled loop returns the old status; a `/step` body without `idempotency_key` returns 500 instead of 422 | LOW | Accepted: nothing runs; follow-up. |
+
+**Residuals (not fixed in this release; impact, limit and tracking condition):**
+
+- **R1. Local model calls are authorized at `INTERNAL` and `LOCAL_ONLY`; the project's own classification is not read on
+  this path** (pre-existing on `main`, documented in [DOGFOOD_AI_ENABLEMENT_zh-TW.md](DOGFOOD_AI_ENABLEMENT_zh-TW.md) §6).
+  Impact: a project recorded above INTERNAL could use a local model registered only up to INTERNAL. The data stays on
+  this computer (loopback). Limit: Dogfood uses non-sensitive data only. Tracking: must be fixed before any project
+  above INTERNAL uses a model, or before a non-loopback provider runs project work.
+- **R2. A control-token holder can still pause and resume a loop past its budget** (pre-existing loop semantics). Each
+  iteration still re-checks the approval, its expiry and the scope version. Tracking: change the loop state machine
+  (resume only from a pause entered from RUNNING) in a separate, reviewed core change.
+- **R3. Device-wide sessions** (see above). Tracking: before more than one person uses one host.
