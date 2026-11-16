@@ -10,9 +10,11 @@ on:
   schedule:
     - cron: "17 3 * * 1"
 permissions: {}
+# A pull request cancels its own superseded runs. A push (a merge commit on main) never cancels or is
+# cancelled: each commit keeps the evidence of its own required checks (a cancelled check reads as FAIL).
 concurrency:
-  group: security-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: security-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   codeql:
     name: codeql (${{ matrix.language }})
