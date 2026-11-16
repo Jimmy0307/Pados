@@ -24,6 +24,7 @@ import {
   logout as logoutRequest,
   normalizePairingCode,
   pair as pairRequest,
+  pairFailure,
   sessionEndedNotice,
   DEVICE_LABEL_MAX_LENGTH,
   type Device,
@@ -81,7 +82,7 @@ export function useIdentity(): Identity {
       void refresh("");  // the server's own view (idle expiry) replaces the pairing answer
       return null;
     } catch (error) {
-      const message = identityFailure(error);
+      const message = pairFailure(error);
       // An unknown outcome may have paired this browser; a disabled server changes what the page offers.
       if (error instanceof HttpError && (error.outcome === "WRITE_OUTCOME_UNKNOWN" || isSessionLost(error))) void refresh();
       return message;

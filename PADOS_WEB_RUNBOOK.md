@@ -37,6 +37,23 @@ to open the read-only Dashboard, Projects, Memory, Database, Runs & Events, and
 System views. Corpus authorization and ingest remain available only in Corpus
 Operator.
 
+## Startup readiness
+
+A Vite dev server answers `/` with 200 a few hundred milliseconds after it starts, before it has pre-bundled the
+dependencies or transformed an entry module, so "the frontend port answers" is not "the frontend is ready". Wait for
+both of these before opening a page or driving one from a test:
+
+- the dev server answers `GET /__pados/dev-ready` with 200 and `{"ready": true, ...}` (`web/vite-dev-readiness.ts`):
+  the module scripts of all three pages and their static imports are transformed and the dependency optimizer has
+  no scan or bundle in progress. A 200 that is HTML (an older dev server's fallback page) is not ready.
+- the API answers `GET /health/ready` with 200.
+
+`scripts/dogfood/web_readiness.py` (`wait_ready`, mode `full`) implements this condition for the E2E drivers;
+Playwright's `webServer.url` points at `/__pados/dev-ready`; a launcher (`Start-PADOS-Web.ps1`, or
+`scripts/windows/Start-PADOS.ps1` on later branches) should poll the same two URLs before it opens the browser.
+`scripts/dogfood/vite_cold_start_e2e.py --pg-bin <PostgreSQL bin>` removes `web/node_modules/.vite` and pairs a browser
+on the first page load of a fresh dev server, ten times by default, asserting no reload happened while pairing.
+
 ## Existing launcher integration
 
 Inside `Start-PADOS.ps1`, enter `/web` to start the control center. Existing `/doctor` and ordinary CLI commands remain routed as before.

@@ -10,7 +10,7 @@ import { isSessionLost } from "./identity";
 import { useT } from "./i18n";
 import {
   contextSummary, createProject, listDocuments, listProjects, projectMessages, projectWork, readDocument, writeDocument,
-  type DocumentReceipt, type ProjectWork,
+  type DocumentReceipt, type DocumentReconciliation, type ProjectWork,
 } from "./product-api";
 import { candidateState, newKey } from "./product-flow";
 import { useLoad } from "./product-load";
@@ -143,6 +143,16 @@ function Knowledge({ auth, projectId, work }: { auth: ControlAuth; projectId: st
   </div>;
 }
 
+function Reconciliation({ status }: { status: DocumentReconciliation }): ReactElement | null {
+  const t = useT();
+  if (status.state === "CLEAN") return null;
+  const problems = [...status.failed, ...status.unaudited];
+  return <Blocked message={t(status.state === "PENDING" ? "docs.reconcile.pending" : "docs.reconcile.attention", { count: String(status.pending) })}>
+    {problems.length > 0 && <ul className="product-doc-list" data-testid="document-reconciliation">{problems.map((item) =>
+      <li key={`${item.code}:${item.path}`}><code>{item.path}</code> <small>{item.code}</small></li>)}</ul>}
+  </Blocked>;
+}
+
 const STARTER = "# 使用指南\n\n請先閱讀[專案說明](README.md)。\n";
 
 function Documents({ auth, onSessionLost, projectId, onSaved }: Access & { projectId: string; onSaved: () => void }): ReactElement {
@@ -170,6 +180,7 @@ function Documents({ auth, onSessionLost, projectId, onSaved }: Access & { proje
       <code>{doc.path}</code> <small>{doc.size} B · SHA-256 {(doc.sha256 || "—").slice(0, 12)}</small>
       {writable && <button className="control-button" type="button" onClick={() => void edit(doc.path)} aria-label={`${t("docs.edit")} ${doc.path}`}>{t("docs.edit")}</button>}
     </li>)}</ul>}
+    {docs.data?.reconciliation && <Reconciliation status={docs.data.reconciliation} />}
     {Boolean(loadError) && <Failed error={loadError} />}
     {docs.data && !writable && <Blocked message={t("docs.readOnly")} />}
     {docs.data && writable && <DocumentEditor key={editing ? `${editing.path}:${editing.sha}` : "new"} auth={auth} onSessionLost={onSessionLost} projectId={projectId}

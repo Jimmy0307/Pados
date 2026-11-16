@@ -28,28 +28,14 @@ async function shot(page: Page, name: string): Promise<void> {
   await page.screenshot({ path: join(env("PADOS_E2E_EVIDENCE_DIR"), `${name}.png`), fullPage: true });
 }
 
-/** Pair through the UI. The Vite dev proxy occasionally never delivers the /pair answer on a cold start (the API
- * answered 200; the browser request stays pending): then reload and pair again with a fresh code (at most 3 tries). */
+/** Pair through the UI, once: a single-use code is never retried. The dev server was ready before this page opened
+ * (webServer.url is /__pados/dev-ready), so no optimizer reload can interrupt the pairing request. */
 async function pairBrowser(page: Page, label: string): Promise<void> {
-  const nav = page.getByRole("navigation", { name: "Control center navigation" });
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    if (attempt > 1) {
-      await page.reload();
-      await page.getByRole("button", { name: "Control Center" }).click();
-    }
-    await nav.getByRole("button", { name: "專案 Projects" }).click();
-    await page.waitForLoadState("networkidle");
-    if (await page.getByText(`Paired as ${label} (device dev_`).first().isVisible()) return;
-    await page.locator("input[name=pairing-code]").fill(mintPairingCode());
-    await page.locator("input[name=device-label]").fill(label);
-    await page.getByRole("button", { name: "Pair this browser", exact: true }).click();
-    try {
-      await expect(page.getByText(`Paired as ${label} (device dev_`).first()).toBeVisible({ timeout: 20_000 });
-      return;
-    } catch (error) {
-      if (attempt === 3) throw error;
-    }
-  }
+  await page.getByRole("navigation", { name: "Control center navigation" }).getByRole("button", { name: "專案 Projects" }).click();
+  await page.locator("input[name=pairing-code]").fill(mintPairingCode());
+  await page.locator("input[name=device-label]").fill(label);
+  await page.getByRole("button", { name: "Pair this browser", exact: true }).click();
+  await expect(page.getByText(`Paired as ${label} (device dev_`).first()).toBeVisible({ timeout: 20_000 });
 }
 
 async function runCheck(page: Page): Promise<void> {
@@ -76,9 +62,12 @@ test.describe("live product work loop", () => {
     });
 
     // Pair this browser (the session is the only credential from here on).
+    const navigations: string[] = [];
+    page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations.push(frame.url()); });
     await page.goto("/operator.html");
     await page.getByRole("button", { name: "Control Center" }).click();
     await pairBrowser(page, "Playwright product flow");
+    expect(navigations, "the page was reloaded or navigated while pairing").toHaveLength(1);
 
     // 建立專案: a name and a description, no path, no id.
     await expect(page.getByTestId("project-list")).toBeVisible();
