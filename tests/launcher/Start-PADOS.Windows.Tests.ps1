@@ -1,6 +1,8 @@
 # Pester 3.4 tests for scripts/windows/Start-PADOS.ps1 (Windows PowerShell 5.1).
 # Every scenario runs against a fake checkout in $TestDrive and uses its own ports (186xx); it never starts PADOS,
-# never binds 5173 or 8088, and never touches a real .env or database.
+# never binds 5173 or 8088, and never touches a real .env or database. The start-path scenarios replace the two child
+# command lines with small PowerShell fakes (a loopback health server and a web listener) and run from a checkout
+# whose path contains spaces and non-ASCII characters.
 $ErrorActionPreference = 'Stop'
 
 $LauncherPath = (Resolve-Path (Join-Path $PSScriptRoot '..\..\scripts\windows\Start-PADOS.ps1')).Path
@@ -12,7 +14,7 @@ $BusyPort = 18614
 
 function New-FakeCheckout {
     param([string]$Path, [switch]$NoVenv, [switch]$NoNodeModules, [switch]$NoDotEnv, [switch]$IdentityOn,
-          [int]$DatabasePort = $DbPort, [string]$PasswordValue = '')
+          [string]$DatabasePort = "$DbPort", [string]$PasswordValue = '')
     Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path (Join-Path $Path 'src\pados'), (Join-Path $Path 'web') | Out-Null
     Set-Content -LiteralPath (Join-Path $Path 'pyproject.toml') -Value '[project]' -Encoding ASCII
@@ -66,10 +68,11 @@ function Write-FakePidFile([string]$Checkout, $Entries) {
 Describe 'Start-PADOS launcher: static guarantees' {
     $source = Get-Content -Raw -Encoding UTF8 $LauncherPath
 
-    It 'never runs pados init and never writes .env' {
+    It 'never runs pados init and never writes, appends to, moves or deletes .env' {
         $source | Should Not Match '"init"'
-        $source | Should Not Match "Set-Content[^\r\n]*DotEnv"
-        $source | Should Not Match "Out-File"
+        $source | Should Not Match '(Set-Content|Add-Content|Out-File|Clear-Content|Remove-Item|Move-Item|Copy-Item|Rename-Item|New-Item)[^\r\n]*(DotEnv|\.env\b)'
+        $source | Should Not Match '\[(System\.)?IO\.File\]::(Write|Append|Delete|Move|Copy|Replace|Create)'
+        $source | Should Not Match 'Out-File|Add-Content|WriteAll|AppendAll'
     }
 
     It 'reads only allowlisted .env keys, none of them secret' {
@@ -203,7 +206,8 @@ Describe 'Start-PADOS launcher: port-in-use detection' {
             $checkout = New-FakeCheckout -Path (Join-Path $TestDrive 'busyapi')
             $result = Invoke-Launcher @('-Root', $checkout, '-ApiPort', "$BusyPort", '-WebPort', "$WebPort", '-NoBrowser')
             $result.ExitCode | Should Be 1
-            $result.Output | Should Match "PORT_IN_USE: port $BusyPort is used by powershell \(PID $PID\)"
+            $name = (Get-Process -Id $PID).ProcessName
+            $result.Output | Should Match "PORT_IN_USE: port $BusyPort is used by $name \(PID $PID\)"
             $result.Output | Should Match 'run -Status or -Stop; otherwise pick a free port, for example -ApiPort'
             Join-Path $checkout 'runtime\local\pados-launcher.json' | Should Not Exist
         }
@@ -281,5 +285,216 @@ Describe 'Start-PADOS launcher: -Stop and -Status with a PID file' {
             $result.ExitCode | Should Be 1
             $result.Output | Should Match 'ALREADY_RUNNING'
         } finally { Stop-Process -Id $sleeper.Id -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Describe 'Start-PADOS launcher: closed codes and robust inputs' {
+    It 'reports a non-numeric PADOS_DB_PORT as SETTING_INVALID' {
+        $checkout = New-FakeCheckout -Path (Join-Path $TestDrive 'badport') -DatabasePort 'abc'
+        $result = Invoke-Launcher @('-DryRun', '-Root', $checkout, '-ApiPort', "$ApiPort", '-WebPort', "$WebPort")
+        $result.ExitCode | Should Be 1
+        $result.Output | Should Match 'SETTING_INVALID: PADOS_DB_PORT is not a port number'
+    }
+
+    It 'refuses a checkout path that cmd.exe would expand' {
+        $checkout = New-FakeCheckout -Path (Join-Path $TestDrive 'pct%root')
+        $result = Invoke-Launcher @('-DryRun', '-Root', $checkout, '-ApiPort', "$ApiPort", '-WebPort', "$WebPort")
+        $result.ExitCode | Should Be 1
+        $result.Output | Should Match 'ROOT_PATH_UNSUPPORTED'
+    }
+
+    It 'treats a malformed PID file as PID_FILE_INVALID and keeps it' {
+        $checkout = New-FakeCheckout -Path (Join-Path $TestDrive 'badpid')
+        New-Item -ItemType Directory -Force -Path (Join-Path $checkout 'runtime\local') | Out-Null
+        $pidFile = Join-Path $checkout 'runtime\local\pados-launcher.json'
+        Set-Content -LiteralPath $pidFile -Value '{"schema": "pados.launcher.pids.v1", "processes": [{"pid": "x"}]' -Encoding ASCII
+        $stop = Invoke-Launcher @('-Stop', '-Root', $checkout)
+        $stop.ExitCode | Should Be 1
+        $stop.Output | Should Match 'PID_FILE_INVALID'
+        (Invoke-Launcher @('-Status', '-Root', $checkout)).Output | Should Match 'PID_FILE_INVALID'
+        (Invoke-Launcher @('-DryRun', '-Root', $checkout, '-ApiPort', "$ApiPort", '-WebPort', "$WebPort")).Output |
+            Should Match 'PID_FILE_INVALID'
+        $pidFile | Should Exist
+    }
+}
+
+Describe 'Start-PADOS launcher: functions (dot-sourced)' {
+    . $LauncherPath
+
+    It 'compares start times as instants, whether the PID file gives a string (5.1) or a DateTime (7)' {
+        $me = Get-Process -Id $PID
+        $asString = [pscustomobject]@{ role = 'api'; pid = $PID; start_time = $me.StartTime.ToUniversalTime().ToString('o') }
+        $asDate = [pscustomobject]@{ role = 'api'; pid = $PID; start_time = $me.StartTime }
+        $asLocalString = [pscustomobject]@{ role = 'api'; pid = $PID; start_time = $me.StartTime.ToString('o') }
+        $wrong = [pscustomobject]@{ role = 'api'; pid = $PID; start_time = '2000-01-01T00:00:00.0000000Z' }
+        (Get-RecordedProcess $asString).State | Should Be 'RUNNING'
+        (Get-RecordedProcess $asDate).State | Should Be 'RUNNING'
+        (Get-RecordedProcess $asLocalString).State | Should Be 'RUNNING'
+        (Get-RecordedProcess $wrong).State | Should Be 'PID_REUSED'
+    }
+
+    It 'accepts only a PADOS readiness report and shows only closed values from it' {
+        (ConvertTo-HealthReport 200 '{"status":"OK"}').Status | Should Be 'NOT_PADOS_HEALTH'
+        (ConvertTo-HealthReport 200 '{"status":"OK"}').Ready | Should Be $false
+        (ConvertTo-HealthReport 200 'not json').Ready | Should Be $false
+        $body = '{"schema_version":"pados.health.v1","kind":"readiness","status":"DEGRADED","checks":[' +
+            '{"name":"corpus_database","status":"DEGRADED","reason":"CORPUS_UNAVAILABLE"},' +
+            '{"name":"chat_provider","status":"NOT_CONFIGURED","reason":"free text from somewhere"}]}'
+        $report = ConvertTo-HealthReport 200 $body
+        $report.Ready | Should Be $true
+        ($report.NotOk -join ';') | Should Be 'corpus_database=DEGRADED (CORPUS_UNAVAILABLE);chat_provider=NOT_CONFIGURED'
+    }
+
+    It 'shows only a closed code from a log, never its text' {
+        $log = Join-Path $TestDrive 'err.log'
+        Set-Content -LiteralPath $log -Encoding UTF8 -Value @('Traceback (most recent call last):',
+            '  File "x:\some\private\place.py"', 'Domain error: SAMPLE_REFUSAL_CODE: a sentence that must stay in the log')
+        Get-ClosedCodeFromLog $log 'L' | Should Be 'SAMPLE_REFUSAL_CODE (see L)'
+        Set-Content -LiteralPath $log -Encoding UTF8 -Value @('something broke at x:\some\private\place.py')
+        Get-ClosedCodeFromLog $log 'L' | Should Be 'see log L'
+    }
+}
+
+Describe 'Start-PADOS launcher: start path with fake children (checkout path with spaces and non-ASCII)' {
+    . $LauncherPath
+    $NoBrowser = $true
+    $ReadyTimeoutSeconds = 20
+    $WebReadySeconds = 10
+    $SettleMilliseconds = 500
+    $FakeApiPort = 18631
+    $FakeWebPort = 18632
+    $Fancy = New-FakeCheckout -Path (Join-Path $TestDrive ('fake root ' + [char]0x6AA2 + [char]0x67E5))
+    $Fakes = Join-Path $Fancy 'fakes'
+    New-Item -ItemType Directory -Force -Path $Fakes | Out-Null
+    $FakeApi = Join-Path $Fakes 'fake api.ps1'
+    $FakeWeb = Join-Path $Fakes 'fake web.ps1'
+    Set-Content -LiteralPath $FakeApi -Encoding UTF8 -Value @'
+param([int]$Port, [string]$Mode)
+if ($Mode -eq 'refuse') { [Console]::Error.WriteLine('Domain error: FAKE_START_REFUSED: a private sentence from the fake'); exit 2 }
+$body = '{"schema_version":"pados.health.v1","kind":"readiness","service":"pados-api","version":"0","status":"OK","checks":[]}'
+if ($Mode -eq 'notpados') { $body = '{"status":"OK"}' }
+$listener = New-Object System.Net.Sockets.TcpListener ([System.Net.IPAddress]::Loopback), $Port
+$listener.Start()
+while ($true) {
+    $client = $listener.AcceptTcpClient()
+    try {
+        $stream = $client.GetStream()
+        $reader = New-Object System.IO.StreamReader ($stream)
+        while (($line = $reader.ReadLine()) -ne $null -and $line -ne '') { }
+        $bytes = [Text.Encoding]::UTF8.GetBytes($body)
+        $head = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nContent-Length: $($bytes.Length)`r`nConnection: close`r`n`r`n")
+        $stream.Write($head, 0, $head.Length); $stream.Write($bytes, 0, $bytes.Length); $stream.Flush()
+    } catch { } finally { $client.Close() }
+}
+'@
+    Set-Content -LiteralPath $FakeWeb -Encoding UTF8 -Value @'
+param([int]$Port, [string]$Mode)
+if ($Mode -eq 'exit') { [Console]::Error.WriteLine('npm ERR! a private sentence from the fake web'); exit 1 }
+if ($Mode -eq 'listen') {
+    $listener = New-Object System.Net.Sockets.TcpListener ([System.Net.IPAddress]::Loopback), $Port
+    $listener.Start()
+}
+Start-Sleep -Seconds 300
+'@
+
+    function Get-ChildCommandLines($Paths, [int]$Api, [int]$Web) {
+        $ps = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File'
+        return [pscustomobject]@{
+            Api = "$ps `"$FakeApi`" -Port $Api -Mode $FakeApiMode"
+            Web = "$ps `"$FakeWeb`" -Port $Web -Mode $FakeWebMode"
+        }
+    }
+
+    function Invoke-FakeStart($StartPaths) {
+        $settings = Get-Settings $StartPaths
+        $records = @(Start-Stack $StartPaths $settings $FakeApiPort $FakeWebPort 6>&1)
+        return [pscustomobject]@{
+            Code = ($records | Where-Object { $_ -is [int] } | Select-Object -Last 1)
+            Text = (($records | Where-Object { $_ -isnot [int] } | ForEach-Object { "$_" }) -join "`n")
+        }
+    }
+
+    function Test-Listening([int]$Port) { return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) }
+
+    $Paths = Get-LauncherPaths $Fancy
+
+    It 'starts both children, waits for health and port ownership, records PIDs and logs, and -Stop kills the trees' {
+        $FakeApiMode = 'serve'; $FakeWebMode = 'listen'
+        $run = Invoke-FakeStart $Paths
+        $run.Code | Should Be 0
+        $run.Text | Should Match 'PADOS is running'
+        Test-Listening $FakeApiPort | Should Be $true
+        Test-Listening $FakeWebPort | Should Be $true
+        $data = Get-Content -Raw -LiteralPath $Paths.PidFile | ConvertFrom-Json
+        (@($data.processes | ForEach-Object { $_.role }) -join ',') | Should Be 'api,web,api-server,web-server'
+        $Paths.ApiOut | Should Exist
+        $Paths.WebErr | Should Exist
+        $recorded = @($data.processes | ForEach-Object { [int]$_.pid })
+        Stop-Recorded $Paths 6>$null | Should Be 0
+        Start-Sleep -Milliseconds 500
+        Test-Listening $FakeApiPort | Should Be $false
+        Test-Listening $FakeWebPort | Should Be $false
+        @($recorded | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count | Should Be 0
+        $Paths.PidFile | Should Not Exist
+    }
+
+    It 'reports a refused backend by its closed code only and stops the web child' {
+        $FakeApiMode = 'refuse'; $FakeWebMode = 'listen'
+        $run = Invoke-FakeStart $Paths
+        $run.Code | Should Be 2
+        $run.Text | Should Match 'BACKEND_START_REFUSED \(exit 2\): FAKE_START_REFUSED \(see runtime\\logs\\pados-serve\.err\.log\)'
+        $run.Text | Should Not Match 'private sentence'
+        $run.Text | Should Match 'stopping what this launcher started'
+        Start-Sleep -Milliseconds 500
+        Test-Listening $FakeWebPort | Should Be $false
+        $Paths.PidFile | Should Not Exist
+    }
+
+    It 'does not count a non-PADOS HTTP 200 as ready' {
+        $FakeApiMode = 'notpados'; $FakeWebMode = 'listen'
+        $ReadyTimeoutSeconds = 5
+        $run = Invoke-FakeStart $Paths
+        $run.Code | Should Be 2
+        $run.Text | Should Match 'HEALTH_NOT_READY after 5 s: NOT_PADOS_HEALTH'
+        Start-Sleep -Milliseconds 500
+        Test-Listening $FakeApiPort | Should Be $false
+        Test-Listening $FakeWebPort | Should Be $false
+    }
+
+    It 'does not count a web port held by another program as started' {
+        $FakeApiMode = 'serve'; $FakeWebMode = 'sleep'
+        $foreign = New-Object System.Net.Sockets.TcpListener ([System.Net.IPAddress]::Loopback), $FakeWebPort
+        $foreign.Start()
+        try {
+            $run = Invoke-FakeStart $Paths
+            $run.Code | Should Be 2
+            $run.Text | Should Match "PORT_TAKEN_BY_OTHER: port $FakeWebPort"
+        } finally { $foreign.Stop() }
+        Start-Sleep -Milliseconds 500
+        Test-Listening $FakeApiPort | Should Be $false
+        $Paths.PidFile | Should Not Exist
+    }
+
+    It 'reports a web child that exits without echoing its output, and stops the API' {
+        $FakeApiMode = 'serve'; $FakeWebMode = 'exit'
+        $run = Invoke-FakeStart $Paths
+        $run.Code | Should Be 2
+        $run.Text | Should Match 'WEB_START_FAILED \(exit 1\): see log runtime\\logs\\pados-web\.err\.log'
+        $run.Text | Should Not Match 'private sentence'
+        Start-Sleep -Milliseconds 500
+        Test-Listening $FakeApiPort | Should Be $false
+    }
+
+    It 'stops the API when starting the web child throws' {
+        $FakeApiMode = 'serve'; $FakeWebMode = 'listen'
+        $broken = $Paths.PSObject.Copy()
+        $broken.Web = Join-Path $Fancy 'no such web folder'
+        $run = Invoke-FakeStart $broken
+        $run.Code | Should Be 2
+        $run.Text | Should Match 'START_INTERRUPTED'
+        $run.Text | Should Match 'Stopped api'
+        Start-Sleep -Milliseconds 500
+        Test-Listening $FakeApiPort | Should Be $false
+        $Paths.PidFile | Should Not Exist
     }
 }

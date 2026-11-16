@@ -12,7 +12,10 @@
     command;
   - `-Status`, `-Stop` (stops only processes it started, checking PID and start time) and `-DryRun`;
   - never runs `pados init` and never edits `.env` or a database;
-  - Pester tests in `tests/launcher/Start-PADOS.Windows.Tests.ps1`: 22 passed.
+  - ready means each port is held by the launcher's own child (or a descendant) and `/health/ready` returns a
+    PADOS readiness report (`pados.health.v1`); any failure or Ctrl+C during the start stops what was started;
+    only closed codes from logs and health answers are printed;
+  - Pester tests in `tests/launcher/Start-PADOS.Windows.Tests.ps1`: 34 passed (review fixes included).
 - `docs/product/OPERATING_GUIDE_zh-TW.md`: from first start to rollback, with real UI labels, a plain-language entry for
   every common error code, and SYNTHETIC / LIVE / NOT_LIVE_VALIDATED marked per feature.
 - `docs/product/PRODUCT_ACCEPTANCE_REPORT_2026-11-16.md`: acceptance items A1–A4, B1–B4, C1–C5, D, E and F1–F5 with

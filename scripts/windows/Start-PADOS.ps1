@@ -13,8 +13,10 @@
       4. checks that PostgreSQL accepts TCP connections and that the API and web ports are free;
       5. starts `pados serve` and the Vite dev server as child processes, logs under runtime\logs\, PIDs in
          runtime\local\pados-launcher.json;
-      6. waits for /health/ready, opens http://127.0.0.1:<WebPort>/operator.html, and prints how to pair the
-         browser when identity sessions are enabled.
+      6. waits until the API port is held by its own child and /health/ready answers a PADOS readiness report,
+         and until the web port is held by its own child; then opens http://127.0.0.1:<WebPort>/operator.html and
+         prints how to pair the browser when identity sessions are enabled.
+    Any failure or interruption (including Ctrl+C) during the start stops what was started.
     It never runs `pados init`, never edits .env, and never touches a database.
 
 .EXAMPLE
@@ -45,8 +47,21 @@ $DefaultOrigins = "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:
 $EnvKeys = @("PADOS_DB_HOST", "PADOS_DB_PORT", "PADOS_API_HOST", "PADOS_IDENTITY_SESSIONS_ENABLED",
     "PADOS_IDENTITY_ALLOWED_ORIGINS")
 $LoopbackHosts = @("127.0.0.1", "localhost", "::1")
+$WebReadySeconds = 60          # how long the web dev server may take after the API is ready
+$SettleMilliseconds = 1500     # both children must still be alive this long after they answered
+$ClosedCode = '[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+'
+$HealthStates = @("OK", "DEGRADED", "NOT_READY")
+$CheckStates = @("OK", "DEGRADED", "FAILED", "NOT_CONFIGURED")
 
 function Write-Line([string]$Tag, [string]$Text) { Write-Host ("[{0}] {1}" -f $Tag, $Text) }
+
+function Get-Prop($Object, [string]$Name) {
+    # StrictMode-safe property read for parsed JSON: $null when absent.
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($property) { return $property.Value }
+    return $null
+}
 
 function Find-PadosRoot([string]$Start) {
     $dir = $Start
@@ -87,7 +102,6 @@ function Get-LauncherPaths([string]$RootPath) {
     return [pscustomobject]@{
         Root        = $RootPath
         Python      = Join-Path $RootPath ".venv\Scripts\python.exe"
-        PadosExe    = Join-Path $RootPath ".venv\Scripts\pados.exe"
         Web         = Join-Path $RootPath "web"
         NodeModules = Join-Path $RootPath "web\node_modules"
         DotEnv      = Join-Path $RootPath ".env"
@@ -101,20 +115,52 @@ function Get-LauncherPaths([string]$RootPath) {
     }
 }
 
+function Get-ListenerIds([int]$Port) {
+    if (-not (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) { return @() }
+    return @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique)
+}
+
 function Get-PortOwner([int]$Port) {
     # Returns $null when nothing listens on the port (any local address), else a short owner description.
-    $connections = $null
-    if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
-        $connections = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
-    }
-    if ($connections -and $connections.Count -gt 0) {
-        $owner = $connections[0].OwningProcess
-        $name = (Get-Process -Id $owner -ErrorAction SilentlyContinue | Select-Object -First 1).ProcessName
+    $owners = @(Get-ListenerIds $Port)
+    if ($owners.Count -gt 0) {
+        $name = (Get-Process -Id $owners[0] -ErrorAction SilentlyContinue | Select-Object -First 1).ProcessName
         if (-not $name) { $name = "unknown" }
-        return "$name (PID $owner)"
+        return "$name (PID $($owners[0]))"
     }
     $listener = New-Object System.Net.Sockets.TcpListener ([System.Net.IPAddress]::Loopback), $Port
     try { $listener.Start(); return $null } catch { return "another program" } finally { $listener.Stop() }
+}
+
+function Get-ParentMap {
+    $map = @{}
+    foreach ($item in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId -ErrorAction SilentlyContinue)) {
+        $map[[int]$item.ProcessId] = [int]$item.ParentProcessId
+    }
+    return $map
+}
+
+function Test-DescendantOf([int]$ProcessId, [int]$AncestorId, [hashtable]$ParentMap) {
+    $current = $ProcessId
+    for ($depth = 0; $depth -lt 32; $depth++) {
+        if ($current -eq $AncestorId) { return $true }
+        if (-not $ParentMap.ContainsKey($current)) { return $false }
+        $next = $ParentMap[$current]
+        if ($next -le 0 -or $next -eq $current) { return $false }
+        $current = $next
+    }
+    return $false
+}
+
+function Get-OwnedListener([int]$Port, [int]$AncestorId) {
+    # The PID listening on $Port when it is $AncestorId or one of its descendants; 0 when nothing listens;
+    # -1 when only processes this launcher did not start listen there.
+    $owners = @(Get-ListenerIds $Port)
+    if ($owners.Count -eq 0) { return 0 }
+    $map = Get-ParentMap
+    foreach ($owner in $owners) { if (Test-DescendantOf $owner $AncestorId $map) { return $owner } }
+    return -1
 }
 
 function Test-TcpReachable([string]$HostName, [int]$Port, [int]$TimeoutMs = 3000) {
@@ -134,9 +180,13 @@ function New-Check([string]$Name, [bool]$Ok, [string]$Message, [string]$Fix = ""
 function Get-Settings($Paths) {
     $dotEnv = Read-DotEnvSubset $Paths.DotEnv $EnvKeys
     $identity = (Get-EffectiveSetting $dotEnv "PADOS_IDENTITY_SESSIONS_ENABLED" "false").ToLowerInvariant()
+    $dbPort = 0
+    $dbPortValid = [int]::TryParse((Get-EffectiveSetting $dotEnv "PADOS_DB_PORT" "5432"), [ref]$dbPort) -and
+        $dbPort -ge 1 -and $dbPort -le 65535
     return [pscustomobject]@{
         DbHost          = Get-EffectiveSetting $dotEnv "PADOS_DB_HOST" "127.0.0.1"
-        DbPort          = [int](Get-EffectiveSetting $dotEnv "PADOS_DB_PORT" "5432")
+        DbPort          = $dbPort
+        DbPortValid     = $dbPortValid
         ApiHost         = Get-EffectiveSetting $dotEnv "PADOS_API_HOST" "127.0.0.1"
         IdentityEnabled = @("true", "1", "yes", "on") -contains $identity
         AllowedOrigins  = @((Get-EffectiveSetting $dotEnv "PADOS_IDENTITY_ALLOWED_ORIGINS" $DefaultOrigins).Split(",") |
@@ -164,11 +214,16 @@ function Get-RuntimeChecks($Settings, [int]$Api, [int]$Web) {
     $checks += New-Check "ports_distinct" ($Api -ne $Web) "API and web ports differ ($Api, $Web)" `
         "Choose two different ports, for example -ApiPort 8088 -WebPort 5173."
     $checks += New-Check "api_host_loopback" ($LoopbackHosts -contains $Settings.ApiHost) `
-        "PADOS_API_HOST is a loopback address ($($Settings.ApiHost))" `
+        "PADOS_API_HOST is a loopback address" `
         "Set PADOS_API_HOST=127.0.0.1 in .env (pados serve refuses any other host)."
-    $db = Test-TcpReachable $Settings.DbHost $Settings.DbPort
-    $checks += New-Check "postgresql" $db "PostgreSQL accepts connections at $($Settings.DbHost):$($Settings.DbPort)" `
-        "Start your PostgreSQL service (services.msc), or correct PADOS_DB_HOST / PADOS_DB_PORT in .env."
+    if (-not $Settings.DbPortValid) {
+        $checks += New-Check "postgresql" $false "SETTING_INVALID: PADOS_DB_PORT is not a port number" `
+            "Set PADOS_DB_PORT in .env to the port of your PostgreSQL server (for example 5432)."
+    } else {
+        $db = Test-TcpReachable $Settings.DbHost $Settings.DbPort
+        $checks += New-Check "postgresql" $db "PostgreSQL accepts connections at $($Settings.DbHost):$($Settings.DbPort)" `
+            "Start your PostgreSQL service (services.msc), or correct PADOS_DB_HOST / PADOS_DB_PORT in .env."
+    }
     foreach ($pair in @(@("api_port", $Api, "-ApiPort"), @("web_port", $Web, "-WebPort"))) {
         $owner = Get-PortOwner $pair[1]
         $message = if ($owner) { "PORT_IN_USE: port $($pair[1]) is used by $owner" } else { "Port $($pair[1]) is free" }
@@ -186,29 +241,93 @@ function Write-Checks($Checks) {
     }
 }
 
+function ConvertTo-UtcTicks($Value) {
+    # PowerShell 5.1 keeps the round-trip string from ConvertFrom-Json; PowerShell 7 turns it into a [DateTime].
+    if ($Value -is [DateTime]) { return $Value.ToUniversalTime().Ticks }
+    $parsed = [DateTime]::MinValue
+    $styles = [System.Globalization.DateTimeStyles]::RoundtripKind
+    if ([DateTime]::TryParse([string]$Value, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$parsed)) {
+        return $parsed.ToUniversalTime().Ticks
+    }
+    return $null
+}
+
+function Test-PidEntry($Entry) {
+    $id = 0
+    return ((Get-Prop $Entry "role") -is [string]) -and [int]::TryParse([string](Get-Prop $Entry "pid"), [ref]$id) -and
+        $id -gt 0 -and $null -ne (ConvertTo-UtcTicks (Get-Prop $Entry "start_time"))
+}
+
 function Read-PidFile([string]$Path) {
+    # $null when there is no PID file; an object with Invalid = $true when it cannot be trusted.
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
-    try { $data = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
-    if (-not $data -or $data.schema -ne $PidSchema) { return $null }
+    $data = $null
+    try { $data = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+    $valid = ($null -ne $data) -and ((Get-Prop $data "schema") -eq $PidSchema) -and ($null -ne (Get-Prop $data "processes"))
+    $port = 0
+    if ($valid) {
+        $valid = [int]::TryParse([string](Get-Prop $data "api_port"), [ref]$port) -and
+            [int]::TryParse([string](Get-Prop $data "web_port"), [ref]$port)
+    }
+    if ($valid) { foreach ($entry in @($data.processes)) { if (-not (Test-PidEntry $entry)) { $valid = $false } } }
+    if (-not $valid) { return [pscustomobject]@{ Invalid = $true } }
     return $data
 }
 
-function Get-RecordedProcess($Entry) {
-    # The live process for a PID file entry, or $null. A PID whose start time differs was reused by another program.
-    $process = Get-Process -Id ([int]$Entry.pid) -ErrorAction SilentlyContinue
+function Test-PidFileInvalid($Data) { return ($null -ne $Data) -and ((Get-Prop $Data "Invalid") -eq $true) }
+
+function Write-PidFileInvalid {
+    Write-Line "FAIL" "PID_FILE_INVALID: runtime\local\$PidFileName cannot be read as a launcher PID file; nothing was stopped or started."
+    Write-Host "       Fix: check in Task Manager that no PADOS python/node process from this checkout runs, then delete that file."
+}
+
+function Get-RecordedProcessOnce($Entry) {
+    $process = Get-Process -Id ([int](Get-Prop $Entry "pid")) -ErrorAction SilentlyContinue
     if (-not $process) { return [pscustomobject]@{ State = "STOPPED"; Process = $null } }
-    $started = $null
-    try { $started = $process.StartTime.ToUniversalTime().ToString("o") } catch { }
-    if ($started -ne [string]$Entry.start_time) { return [pscustomobject]@{ State = "PID_REUSED"; Process = $null } }
+    try { if ($process.HasExited) { return [pscustomobject]@{ State = "STOPPED"; Process = $null } } } catch { }
+    $actual = $null
+    try { $actual = $process.StartTime.ToUniversalTime().Ticks } catch { }
+    if ($null -eq $actual -or $actual -ne (ConvertTo-UtcTicks (Get-Prop $Entry "start_time"))) {
+        return [pscustomobject]@{ State = "PID_REUSED"; Process = $null }
+    }
     return [pscustomobject]@{ State = "RUNNING"; Process = $process }
 }
 
+function Get-RecordedProcess($Entry) {
+    # The live process for a PID file entry. A PID whose start time differs was reused by another program. A process
+    # that is still exiting (a child of a tree just stopped) can briefly look reused, so that answer is checked twice.
+    $found = Get-RecordedProcessOnce $Entry
+    if ($found.State -ne "PID_REUSED") { return $found }
+    Start-Sleep -Milliseconds 500
+    return Get-RecordedProcessOnce $Entry
+}
+
 function Stop-ProcessTree([int]$ProcessId) {
-    # npm and the venv python.exe start child processes; /T stops the whole tree.
+    # cmd.exe, npm and the venv python.exe start child processes; /T stops the whole tree.
     $null = & taskkill.exe /PID $ProcessId /T /F 2>&1
     $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if ($process) { $process | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue }
     return -not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+}
+
+function ConvertTo-HealthReport([int]$Code, [string]$Body) {
+    # Only a PADOS readiness report (pados.health.v1) counts; anything else is NOT_PADOS_HEALTH. Only closed values
+    # (state names, check names, UPPER_SNAKE reasons) are kept for display.
+    $report = $null
+    try { $report = $Body | ConvertFrom-Json } catch { }
+    $state = [string](Get-Prop $report "status")
+    $isPados = ((Get-Prop $report "schema_version") -eq "pados.health.v1") -and ((Get-Prop $report "kind") -eq "readiness") -and
+        ($HealthStates -contains $state)
+    if (-not $isPados) { return [pscustomobject]@{ Code = $Code; Status = "NOT_PADOS_HEALTH"; NotOk = @(); Ready = $false } }
+    $notOk = @()
+    foreach ($check in @(Get-Prop $report "checks")) {
+        $name = [string](Get-Prop $check "name"); $checkState = [string](Get-Prop $check "status")
+        if ($name -notmatch '^[a-z][a-z0-9_]{0,63}$' -or $CheckStates -notcontains $checkState -or $checkState -eq "OK") { continue }
+        $reason = [string](Get-Prop $check "reason")
+        $suffix = if ($reason -cmatch "^$ClosedCode$" -and $reason.Length -le 80) { " ($reason)" } else { "" }
+        $notOk += "$name=$checkState$suffix"
+    }
+    return [pscustomobject]@{ Code = $Code; Status = $state; NotOk = $notOk; Ready = ($Code -eq 200) }
 }
 
 function Get-ReadyReport([int]$Port) {
@@ -217,34 +336,34 @@ function Get-ReadyReport([int]$Port) {
         $request.Timeout = 4000
         $request.Proxy = $null
         $response = $null
-        try { $response = $request.GetResponse() } catch [System.Net.WebException] { $response = $_.Exception.Response }
+        try { $response = $request.GetResponse() } catch [System.Net.WebException] { $response = $_.Exception.Response } catch { }
         if (-not $response) { continue }
         try {
             $reader = New-Object System.IO.StreamReader ($response.GetResponseStream())
             $body = $reader.ReadToEnd()
             $code = [int]$response.StatusCode
         } finally { $response.Close() }
-        $report = $null
-        try { $report = $body | ConvertFrom-Json } catch { }
-        $state = if ($report -and $report.status) { [string]$report.status } else { "HTTP_$code" }
-        $failing = @()
-        if ($report -and $report.checks) {
-            $failing = @($report.checks | Where-Object { $_.status -ne "OK" } |
-                ForEach-Object { "$($_.name)=$($_.status)$(if ($_.reason) { " ($($_.reason))" })" })
-        }
-        return [pscustomobject]@{ Code = $code; Status = $state; NotOk = $failing }
+        return ConvertTo-HealthReport $code $body
     }
     return $null
 }
 
-function Get-LastErrorLine([string]$Path) {
-    # `pados serve` prints its refusal as "...error: <CODE>: <next step>" on standard error.
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "no output" }
-    $lines = @(Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_.Trim() })
-    $refusal = $lines | Where-Object { $_ -match "error:" } | Select-Object -Last 1
-    if ($refusal) { return $refusal.Trim() }
-    if ($lines.Count -gt 0) { return $lines[-1].Trim() }
-    return "no output"
+function Get-ClosedCodeFromLog([string]$Path, [string]$Display) {
+    # Never echoes log text: only a closed code ("...error: CODE..." as `pados serve` prints refusals, or a line that
+    # is only a code) is shown, otherwise the log path.
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "no output (see $Display)" }
+    $lines = @(Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction SilentlyContinue)
+    [array]::Reverse($lines)
+    foreach ($line in $lines) {
+        if ($line -cmatch "error:\s*($ClosedCode)") { return "$($Matches[1].Substring(0, [Math]::Min(80, $Matches[1].Length))) (see $Display)" }
+        if ($line -cmatch "^\s*($ClosedCode)\s*$") { return "$($Matches[1].Substring(0, [Math]::Min(80, $Matches[1].Length))) (see $Display)" }
+    }
+    return "see log $Display"
+}
+
+function Get-ExitText($Process) {
+    try { if ($null -ne $Process.ExitCode) { return "exit $($Process.ExitCode)" } } catch { }
+    return "exited"
 }
 
 function Write-PlanAndHints($Paths, $Settings, [int]$Api, [int]$Web) {
@@ -255,7 +374,7 @@ function Write-PlanAndHints($Paths, $Settings, [int]$Api, [int]$Web) {
     Write-Host "             logs runtime\logs\pados-serve.out.log, runtime\logs\pados-serve.err.log"
     Write-Host "  Web      : npm.cmd run dev -- --host 127.0.0.1 --port $Web --strictPort   (in web\, PADOS_WEB_BACKEND_URL=http://127.0.0.1:$Api)"
     Write-Host "             logs runtime\logs\pados-web.out.log, runtime\logs\pados-web.err.log"
-    Write-Host "  Wait     : http://127.0.0.1:$Api/health/ready (up to $ReadyTimeoutSeconds s)"
+    Write-Host "  Wait     : port $Api held by pados serve and http://127.0.0.1:$Api/health/ready (up to $ReadyTimeoutSeconds s)"
     Write-Host "  Open     : http://127.0.0.1:$Web/operator.html"
     Write-Host "  PIDs     : runtime\local\$PidFileName   (used by -Status and -Stop)"
     if ($Settings.IdentityEnabled -and ($Settings.AllowedOrigins -notcontains "http://127.0.0.1:$Web")) {
@@ -279,11 +398,20 @@ function Write-PairingHint($Settings, [int]$Api, [int]$Web) {
     }
 }
 
+function Get-ChildCommandLines($Paths, [int]$Api, [int]$Web) {
+    # Full, quoted paths: cmd.exe would otherwise search the working directory before PATH for npm.cmd.
+    $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
+    return [pscustomobject]@{
+        Api = "`"$($Paths.Python)`" -m pados.cli.main serve"
+        Web = "`"$npm`" run dev -- --host 127.0.0.1 --port $Web --strictPort"
+    }
+}
+
 function Start-Child([string]$CommandLine, [string]$WorkDir, [hashtable]$ChildEnv, [string]$OutLog, [string]$ErrLog) {
-    # Started through cmd.exe without the redirection parameters, so that Start-Process uses ShellExecute: the child inherits this
-    # process's environment but none of its handles. (With them, Windows PowerShell 5.1 lets the
-    # child inherit the launcher's own output pipe, and a caller capturing the launcher's output would wait until
-    # pados serve and Vite exit.) cmd.exe writes the logs. Start-Process in 5.1 has no -Environment either, so the
+    # Started through cmd.exe without the redirection parameters, so that Start-Process uses ShellExecute: the child
+    # inherits this process's environment but none of its handles. (With them, Windows PowerShell 5.1 lets the child
+    # inherit the launcher's own output pipe, and a caller capturing the launcher's output would wait until pados
+    # serve and Vite exit.) cmd.exe writes the logs. Start-Process in 5.1 has no -Environment either, so the
     # variables are set for the start only and then restored.
     $saved = @{}
     foreach ($name in $ChildEnv.Keys) { $saved[$name] = [Environment]::GetEnvironmentVariable($name, "Process") }
@@ -314,6 +442,7 @@ function New-PidEntry([string]$Role, [System.Diagnostics.Process]$Process) {
 function Stop-Recorded($Paths) {
     $data = Read-PidFile $Paths.PidFile
     if (-not $data) { Write-Line "INFO" "Nothing to stop: no launcher PID file at runtime\local\$PidFileName."; return 0 }
+    if (Test-PidFileInvalid $data) { Write-PidFileInvalid; return 1 }
     $failed = 0
     foreach ($entry in @($data.processes)) {
         $found = Get-RecordedProcess $entry
@@ -332,10 +461,11 @@ function Stop-Recorded($Paths) {
 function Show-Status($Paths) {
     $data = Read-PidFile $Paths.PidFile
     if (-not $data) { Write-Line "INFO" "PADOS is not running from this launcher (no PID file at runtime\local\$PidFileName)."; return 1 }
+    if (Test-PidFileInvalid $data) { Write-PidFileInvalid; return 1 }
     $running = 0
     foreach ($entry in @($data.processes)) {
         $found = Get-RecordedProcess $entry
-        Write-Line "INFO" ("{0,-4} PID {1,-7} {2}" -f $entry.role, $entry.pid, $found.State)
+        Write-Line "INFO" ("{0,-10} PID {1,-7} {2}" -f $entry.role, $entry.pid, $found.State)
         if ($found.State -eq "RUNNING") { $running++ }
     }
     $ready = Get-ReadyReport ([int]$data.api_port)
@@ -348,47 +478,95 @@ function Show-Status($Paths) {
     if ($running -eq @($data.processes).Count) { return 0 } else { return 1 }
 }
 
-function Wait-Stack($Paths, $ApiProcess, $WebProcess, [int]$Api, [int]$Web) {
-    # Returns $null when both are up and the API is ready, else the reason.
+function New-WaitResult([string]$Problem, [int]$ApiListener = 0, [int]$WebListener = 0) {
+    return [pscustomobject]@{ Problem = $Problem; ApiListener = $ApiListener; WebListener = $WebListener }
+}
+
+function Wait-ApiReady($Paths, $ApiProcess, [int]$Api) {
     $deadline = (Get-Date).AddSeconds($ReadyTimeoutSeconds)
     $last = $null
+    $listener = 0
     while ((Get-Date) -lt $deadline) {
-        if ($ApiProcess.HasExited) { return "BACKEND_START_REFUSED (exit $($ApiProcess.ExitCode)): $(Get-LastErrorLine $Paths.ApiErr)" }
-        $last = Get-ReadyReport $Api
-        if ($last -and $last.Code -eq 200) { break }
+        if ($ApiProcess.HasExited) {
+            return New-WaitResult "BACKEND_START_REFUSED ($(Get-ExitText $ApiProcess)): $(Get-ClosedCodeFromLog $Paths.ApiErr 'runtime\logs\pados-serve.err.log')"
+        }
+        $listener = Get-OwnedListener $Api $ApiProcess.Id
+        if ($listener -lt 0) { return New-WaitResult "PORT_TAKEN_BY_OTHER: port $Api is held by a process this launcher did not start" }
+        if ($listener -gt 0) {
+            $last = Get-ReadyReport $Api
+            if ($last -and $last.Ready) {
+                $notOk = if ($last.NotOk.Count) { " (" + ($last.NotOk -join ", ") + ")" } else { "" }
+                Write-Line " OK " "API ready: $($last.Status)$notOk; port $Api held by pados serve (PID $listener)"
+                return New-WaitResult $null $listener
+            }
+        }
         Start-Sleep -Milliseconds 750
     }
-    if (-not $last -or $last.Code -ne 200) {
-        $detail = if ($last) { "$($last.Status) $($last.NotOk -join ', ')" } else { "no answer" }
-        return "HEALTH_NOT_READY after $ReadyTimeoutSeconds s: $detail"
+    $detail = if ($last) { "$($last.Status) $($last.NotOk -join ', ')".Trim() } elseif ($listener -gt 0) { "no answer" } else { "port $Api not opened by pados serve" }
+    return New-WaitResult "HEALTH_NOT_READY after $ReadyTimeoutSeconds s: $detail (see runtime\logs\pados-serve.err.log)"
+}
+
+function Wait-Stack($Paths, $ApiProcess, $WebProcess, [int]$Api, [int]$Web) {
+    # Ready means: the API port is held by the API child (or a descendant) and answers a PADOS readiness report with
+    # HTTP 200; the web port is held by the web child (or a descendant); both are still alive after a short settle.
+    $apiResult = Wait-ApiReady $Paths $ApiProcess $Api
+    if ($apiResult.Problem) { return $apiResult }
+    $deadline = (Get-Date).AddSeconds($WebReadySeconds)
+    $webListener = 0
+    while ((Get-Date) -lt $deadline -and $webListener -eq 0) {
+        if ($WebProcess.HasExited) {
+            return New-WaitResult "WEB_START_FAILED ($(Get-ExitText $WebProcess)): $(Get-ClosedCodeFromLog $Paths.WebErr 'runtime\logs\pados-web.err.log')"
+        }
+        $webListener = Get-OwnedListener $Web $WebProcess.Id
+        if ($webListener -lt 0) { return New-WaitResult "PORT_TAKEN_BY_OTHER: port $Web is held by a process this launcher did not start" }
+        if ($webListener -eq 0) { Start-Sleep -Milliseconds 500 }
     }
-    Write-Line " OK " "API ready: $($last.Status)$(if ($last.NotOk.Count) { ' (' + ($last.NotOk -join ', ') + ')' })"
-    while ((Get-Date) -lt $deadline.AddSeconds(30)) {
-        if ($WebProcess.HasExited) { return "WEB_START_FAILED (exit $($WebProcess.ExitCode)): $(Get-LastErrorLine $Paths.WebErr)" }
-        if (Get-PortOwner $Web) { return $null }
-        Start-Sleep -Milliseconds 500
+    if ($webListener -le 0) { return New-WaitResult "WEB_START_FAILED: the web dev server did not open port $Web (see runtime\logs\pados-web.err.log)" }
+    Write-Line " OK " "Web dev server listening: port $Web held by its own child (PID $webListener)"
+    Start-Sleep -Milliseconds $SettleMilliseconds
+    foreach ($check in @(@($ApiProcess, $apiResult.ApiListener, "pados serve"), @($WebProcess, $webListener, "web dev server"))) {
+        if ($check[0].HasExited -or -not (Get-Process -Id $check[1] -ErrorAction SilentlyContinue)) {
+            return New-WaitResult "START_NOT_STABLE: the $($check[2]) exited right after it answered (see runtime\logs\)"
+        }
     }
-    return "WEB_START_FAILED: nothing listens on port $Web"
+    return New-WaitResult $null $apiResult.ApiListener $webListener
 }
 
 function Start-Stack($Paths, $Settings, [int]$Api, [int]$Web) {
     New-Item -ItemType Directory -Force -Path $Paths.Logs, $Paths.LocalState | Out-Null
-    $entries = @()
-    $apiProcess = Start-Child "`"$($Paths.Python)`" -m pados.cli.main serve" $Paths.Root `
-        @{ PADOS_API_PORT = "$Api" } $Paths.ApiOut $Paths.ApiErr
-    $entries += New-PidEntry "api" $apiProcess
-    Save-PidFile $Paths $Api $Web $entries
-    $webProcess = Start-Child "npm.cmd run dev -- --host 127.0.0.1 --port $Web --strictPort" $Paths.Web `
-        @{ PADOS_WEB_BACKEND_URL = "http://127.0.0.1:$Api"; PADOS_WEB_PORT = "$Web" } $Paths.WebOut $Paths.WebErr
-    $entries += New-PidEntry "web" $webProcess
-    Save-PidFile $Paths $Api $Web $entries
-    Write-Line "INFO" "Started pados serve (PID $($apiProcess.Id)) and the web dev server (PID $($webProcess.Id)); waiting..."
-    $problem = Wait-Stack $Paths $apiProcess $webProcess $Api $Web
-    if ($problem) {
-        Write-Line "FAIL" $problem
-        Write-Host "       Logs: runtime\logs\pados-serve.err.log, runtime\logs\pados-web.err.log"
-        $null = Stop-Recorded $Paths
+    $commands = Get-ChildCommandLines $Paths $Api $Web
+    $entries = New-Object System.Collections.ArrayList
+    $completed = $false
+    try {
+        $apiProcess = Start-Child $commands.Api $Paths.Root @{ PADOS_API_PORT = "$Api" } $Paths.ApiOut $Paths.ApiErr
+        [void]$entries.Add((New-PidEntry "api" $apiProcess))
+        Save-PidFile $Paths $Api $Web $entries
+        $webProcess = Start-Child $commands.Web $Paths.Web `
+            @{ PADOS_WEB_BACKEND_URL = "http://127.0.0.1:$Api"; PADOS_WEB_PORT = "$Web" } $Paths.WebOut $Paths.WebErr
+        [void]$entries.Add((New-PidEntry "web" $webProcess))
+        Save-PidFile $Paths $Api $Web $entries
+        Write-Line "INFO" "Started pados serve (PID $($apiProcess.Id)) and the web dev server (PID $($webProcess.Id)); waiting..."
+        $wait = Wait-Stack $Paths $apiProcess $webProcess $Api $Web
+        if ($wait.Problem) {
+            Write-Line "FAIL" $wait.Problem
+            return 2
+        }
+        # Also record the processes that hold the ports (python, node), so -Stop reaches them even if cmd.exe is gone.
+        foreach ($pair in @(@("api-server", $wait.ApiListener), @("web-server", $wait.WebListener))) {
+            $listening = Get-Process -Id $pair[1] -ErrorAction SilentlyContinue
+            if ($listening) { [void]$entries.Add((New-PidEntry $pair[0] $listening)) }
+        }
+        Save-PidFile $Paths $Api $Web $entries
+        $completed = $true
+    } catch {
+        Write-Line "FAIL" "START_INTERRUPTED: $($_.Exception.GetType().Name) while starting."
         return 2
+    } finally {
+        if (-not $completed) {
+            # Also reached on Ctrl+C: nothing this launcher started is left running.
+            Write-Line "INFO" "The start did not complete; stopping what this launcher started."
+            $null = Stop-Recorded $Paths
+        }
     }
     Write-Line " OK " "PADOS is running. Control Center: http://127.0.0.1:$Web/operator.html"
     Write-Host "       Stop with: .\scripts\windows\Start-PADOS.ps1 -Stop    Status: -Status"
@@ -408,7 +586,14 @@ function Invoke-Launcher {
     $paths = Get-LauncherPaths $rootPath
     if ($Stop) { return Stop-Recorded $paths }
     if ($Status) { return Show-Status $paths }
+    if ($rootPath -match '[%!]') {
+        # cmd.exe would expand % and ! in the child command lines.
+        Write-Line "FAIL" "ROOT_PATH_UNSUPPORTED: the checkout path contains % or !, which cmd.exe would expand."
+        Write-Host "       Fix: clone or move the checkout to a folder whose path has no % or ! characters."
+        return 1
+    }
     $existing = Read-PidFile $paths.PidFile
+    if (Test-PidFileInvalid $existing) { Write-PidFileInvalid; return 1 }
     if ($existing -and @($existing.processes | Where-Object { (Get-RecordedProcess $_).State -eq "RUNNING" }).Count -gt 0) {
         Write-Line "FAIL" "ALREADY_RUNNING: this launcher already started PADOS here (see -Status). Stop it first with -Stop."
         return 1

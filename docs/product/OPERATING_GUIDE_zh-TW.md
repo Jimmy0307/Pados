@@ -63,7 +63,9 @@ PADOS_IDENTITY_SESSIONS_ENABLED=true
 4. 檢查 PostgreSQL 是否接受連線、連接埠是否空著（預設 API `8088`、網頁 `5173`，可用 `-ApiPort`／`-WebPort` 改）；
 5. 以子程序啟動 `pados serve` 與 Vite 開發伺服器，記錄檔在 `runtime\logs\`（`pados-serve.*.log`、`pados-web.*.log`），
    程序編號在 `runtime\local\pados-launcher.json`；
-6. 等待 `/health/ready`，開啟 `http://127.0.0.1:5173/operator.html`，並在配對開啟時印出配對方法。
+6. 等待 API 連接埠確實由它啟動的 `pados serve` 持有、`/health/ready` 回覆 PADOS 的就緒報告，且網頁連接埠由它啟動的
+   Vite 持有；然後開啟 `http://127.0.0.1:5173/operator.html`，並在配對開啟時印出配對方法。
+   啟動途中任何失敗或按 Ctrl+C，都會停止它已啟動的程序；畫面只顯示封閉的錯誤代碼，詳情請看記錄檔。
 
 它**絕不**執行 `pados init`、**絕不**修改 `.env` 或資料庫。
 
@@ -86,7 +88,7 @@ PADOS_IDENTITY_SESSIONS_ENABLED=true
 
 `chat_provider=NOT_CONFIGURED` 是正常的：預設沒有設定聊天模型。
 
-證據：啟動器的 Pester 測試（Windows PowerShell 5.1，22 項通過）與一次完整的本機啟動測試（臨時 runtime、私有
+證據：啟動器的 Pester 測試（Windows PowerShell 5.1，34 項通過，含以假子程序、路徑含空白與中文字的啟動流程）與一次完整的本機啟動測試（臨時 runtime、私有
 PostgreSQL、自己的連接埠：啟動、就緒、`operator.html` 回應 200、配對碼、經網頁 Origin 完成配對、重複啟動被拒、
 `DEFAULT_CONTROL_TOKEN_REFUSED` 的拒絕與清理、`-Stop`），見
 [PRODUCT_ACCEPTANCE_REPORT_2026-11-16.md](PRODUCT_ACCEPTANCE_REPORT_2026-11-16.md)。**LIVE（單一主機）。**
@@ -355,6 +357,12 @@ RESTRICTED 絕不送出，預設不執行（只做健康檢查與模型探索）
 | `WEB_START_FAILED` | Vite 沒有啟動 | 看 `runtime\logs\pados-web.err.log` |
 | `ORIGIN_NOT_ALLOWED`（啟動器警告） | 您用的網頁連接埠不在 `PADOS_IDENTITY_ALLOWED_ORIGINS` | 自己把 `http://127.0.0.1:<WebPort>` 加到 `.env`，或用預設 5173 |
 | `PID_REUSED` | PID 檔中的編號已屬於別的程式 | 不會被停止；確認後可刪除 `runtime\local\pados-launcher.json` |
+| `PID_FILE_INVALID` | PID 檔損壞，啟動器不會依它停止或啟動任何東西 | 在工作管理員確認沒有這個 checkout 的 python／node 在執行，再刪除該檔 |
+| `PORT_TAKEN_BY_OTHER` | 啟動途中，連接埠被別的程式搶先占用 | 找出並關閉該程式，或換連接埠；已啟動的部分會自動停止 |
+| `START_INTERRUPTED`／`START_NOT_STABLE` | 啟動途中發生例外或被中斷／子程序回應後立即結束 | 已啟動的部分會自動停止；看 `runtime\logs\` |
+| `NOT_PADOS_HEALTH`（在 `HEALTH_NOT_READY` 中） | API 連接埠上回應的不是 PADOS | 確認沒有別的服務；看 `runtime\logs\pados-serve.err.log` |
+| `SETTING_INVALID` | `.env` 的 `PADOS_DB_PORT` 不是數字 | 自己修正 `.env` |
+| `ROOT_PATH_UNSUPPORTED` | checkout 路徑含有 `%` 或 `!`，cmd.exe 會把它們展開 | 把 checkout 放到不含這兩個字元的資料夾 |
 
 ### 配對與工作階段
 
