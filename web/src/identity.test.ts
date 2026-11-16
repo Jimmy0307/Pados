@@ -25,6 +25,7 @@ import {
   logout,
   normalizePairingCode,
   pair,
+  pairFailure,
   revokeDevice,
   revokePrompt,
   sanitizeDeviceLabel,
@@ -167,6 +168,22 @@ describe("pairing this browser", () => {
     expect(message).toContain(code);
     expect(message).toContain("request srv-1");
     expect(sent).toHaveLength(1);  // a refused pairing is not retried
+  });
+
+  it("asks for a new code when the pairing answer never arrived (the code is single-use, it is not resent)", async () => {
+    let calls = 0;
+    const dropped = (async () => { calls += 1; throw new TypeError("Failed to fetch"); }) as unknown as typeof fetch;
+    const failure = await pair("ABCDE-FGHJK", "", dropped).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(HttpError);
+    expect((failure as HttpError).outcome).toBe("WRITE_OUTCOME_UNKNOWN");
+    expect(calls).toBe(1);
+    const message = pairFailure(failure);
+    expect(message).toContain("did not reach this page");
+    expect(message).toContain("pados device pair");
+    expect(message).toContain(`request ${(failure as HttpError).requestId}`);
+    // Any other refusal keeps its own explanation.
+    const refused = new HttpError("SERVER_ERROR", 400, "PAIRING_CODE_EXPIRED", "r-1", false, "NO");
+    expect(pairFailure(refused)).toBe(identityFailure(refused));
   });
 
   it("does not reveal whether an unknown or a wrong code was sent", () => {
