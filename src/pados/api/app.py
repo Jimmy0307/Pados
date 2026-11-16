@@ -27,6 +27,9 @@ from pados.corpus.api import register_corpus_routes
 from pados.corpus.operator_config import operational_settings
 from pados.db import check_database, get_engine, session_scope
 from pados.graph import register_graph_routes
+from pados.identity import http as identity_http
+from pados.identity import scopes as identity_scopes
+from pados.identity.routes import mount_identity
 from pados.logging_config import configure_logging, get_logger
 from pados.loop import service as loop_service
 from pados.loop import acceptance as loop_acceptance
@@ -60,16 +63,28 @@ def create_app() -> FastAPI:
                   lifespan=connectivity_lifespan(settings.connectivity_config))
 
     def control_auth(
+        request: Request,
         x_pados_control_token: Annotated[
             str | None, Header(alias=control_security.CONTROL_TOKEN_HEADER)
         ] = None,
     ) -> None:
+        # The control token header alone decides when it is present (an invalid one is refused, with no cookie
+        # fallback) and keeps this dependency's full authority. Only without it, and only with
+        # PADOS_IDENTITY_SESSIONS_ENABLED, is a device session cookie tried; a valid session may then call only the
+        # (method, route template) pairs of pados.identity.scopes.SESSION_ALLOWED, anything else is
+        # SESSION_SCOPE_DENIED. With the flag off this path is never taken.
+        if x_pados_control_token is None and identity_http.session_cookie_applies(settings, request):
+            identity_http.authorize_control_session(settings, request)
+            identity_scopes.enforce_session_scope(request)
+            return
         try:
             control_security.authorize_control_request(settings, x_pados_control_token)
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     ControlAuth = Annotated[None, Depends(control_auth)]
+    # Exposed so tests can find every route guarded by this dependency (tests/identity/test_session_scopes.py).
+    app.state.pados_control_auth = control_auth
 
     def guarded(handler: Callable[[], dict[str, Any] | list[dict[str, Any]]]) -> object:
         try:
@@ -324,8 +339,9 @@ def create_app() -> FastAPI:
 
         return guarded(lambda: {"status": "ok", "messages": _list()})
 
-    @app.post("/control/work-requests")
-    def control_work_request(payload: WorkRequestCreate, _: ControlAuth) -> object:
+    def create_work_request_entry(payload: WorkRequestCreate) -> object:
+        """The one work-request creation path. Callers authorize first: ``control_auth`` for the control route, a
+        bound actor with ``contributor`` on the project for the identity actor route (design §4)."""
         control_security.assert_request_safe(payload.model_dump(), max_bytes=settings.control_request_max_bytes)
 
         def _create() -> dict[str, Any]:
@@ -340,6 +356,10 @@ def create_app() -> FastAPI:
                     session, payload, scope_version=scope_version, now=datetime.now(UTC)))
 
         return guarded(lambda: {"status": "ok", "work_request": _create()})
+
+    @app.post("/control/work-requests")
+    def control_work_request(payload: WorkRequestCreate, _: ControlAuth) -> object:
+        return create_work_request_entry(payload)
 
     @app.get("/control/work-requests/{request_id}")
     def control_get_work_request(request_id: str, _: ControlAuth) -> object:
@@ -717,6 +737,9 @@ def create_app() -> FastAPI:
     register_graph_routes(app, settings)
     register_product_loop_routes(app, settings)
     mount_remote(app, settings)
+    # Unified Identity & Session: /identity/v1 (IDENTITY_DISABLED unless PADOS_IDENTITY_SESSIONS_ENABLED). Phase 2
+    # adds OIDC sign-in and the actor surface, whose one write delegates to the work-request entry above.
+    mount_identity(app, settings, create_work_request=create_work_request_entry)
     # OP-001: outermost layer, so the request context and error envelope also cover every route above.
     install_operability(app, component="api")
     return app

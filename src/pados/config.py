@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
+import re
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 OPERATIONAL_DATABASE_DEFAULT = "pados_local_runtime"
@@ -10,6 +12,26 @@ CORPUS_DATABASE_DEFAULT = "pados_corpus_runtime"
 OPERATIONAL_REVISION_DEFAULT = "20261101_0020"
 CORPUS_REVISION_DEFAULT = "20260730_0011"
 EXCLUDED_REVISION_DEFAULT = "20260730_0012"
+IDENTITY_ALLOWED_ORIGINS_DEFAULT = (
+    "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8088,http://localhost:8088"
+)
+# An exact browser origin: scheme, host and optional port, lowercase, no path, query, user info or wildcard.
+_ORIGIN = re.compile(r"^https?://(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*"
+                     r"|\[[0-9a-f:.]+\])(?::[0-9]{1,5})?$")
+
+
+def parse_allowed_origins(value: str) -> tuple[str, ...]:
+    """Parse ``PADOS_IDENTITY_ALLOWED_ORIGINS`` (comma separated) into exact origins; anything else is refused."""
+    origins: list[str] = []
+    for raw in value.split(","):
+        origin = raw.strip()
+        if not origin:
+            continue
+        if origin != origin.lower() or not _ORIGIN.fullmatch(origin):
+            raise ValueError("PADOS_IDENTITY_ALLOWED_ORIGINS entries must be exact lowercase http(s) origins")
+        if origin not in origins:
+            origins.append(origin)
+    return tuple(origins)
 
 
 def artifact_root(settings: "Settings") -> Path:
@@ -105,6 +127,46 @@ class Settings(BaseSettings):
     herdr_config: str = Field(default="", alias="PADOS_HERDR_CONFIG")
     # Optional machine inventory (references only, never passwords); unset never affects Core readiness.
     machines_config: str = Field(default="", alias="PADOS_MACHINES_CONFIG")
+    # Unified Identity & Session phase 1 (docs/identity/UNIFIED_IDENTITY_SESSION_DESIGN.md). Off by default: off, the
+    # /identity/v1 routes answer IDENTITY_DISABLED (GET /session reports enabled:false) and session cookies are ignored.
+    identity_sessions_enabled: bool = Field(default=False, alias="PADOS_IDENTITY_SESSIONS_ENABLED")
+    identity_store_dir: str = Field(default="runtime/local/identity", alias="PADOS_IDENTITY_STORE_DIR")
+    identity_session_ttl_seconds: int = Field(
+        default=86400, ge=300, le=2592000, alias="PADOS_IDENTITY_SESSION_TTL_SECONDS"
+    )
+    identity_idle_timeout_seconds: int = Field(
+        default=7200, ge=120, le=2592000, alias="PADOS_IDENTITY_IDLE_TIMEOUT_SECONDS"
+    )
+    identity_cookie_secure: Literal["auto", "always", "never"] = Field(
+        default="auto", alias="PADOS_IDENTITY_COOKIE_SECURE"
+    )
+    identity_allowed_origins: str = Field(
+        default=IDENTITY_ALLOWED_ORIGINS_DEFAULT, alias="PADOS_IDENTITY_ALLOWED_ORIGINS"
+    )
+    # Phase 2 (design §4): OIDC sign-in and PADOS actors. Both unset by default: no provider is offered and every
+    # OIDC endpoint answers OIDC_PROVIDER_NOT_CONFIGURED. The OIDC file names environment variables, never secrets.
+    identity_oidc_config: str = Field(default="", alias="PADOS_IDENTITY_OIDC_CONFIG")
+    identity_actors_config: str = Field(default="", alias="PADOS_IDENTITY_ACTORS_CONFIG")
+
+    @field_validator("identity_cookie_secure", mode="before")
+    @classmethod
+    def _cookie_policy_lowercase(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
+
+    @field_validator("identity_allowed_origins")
+    @classmethod
+    def _origins_are_exact(cls, value: str) -> str:
+        return ",".join(parse_allowed_origins(value))
+
+    @model_validator(mode="after")
+    def _idle_within_lifetime(self) -> "Settings":
+        if self.identity_idle_timeout_seconds > self.identity_session_ttl_seconds:
+            raise ValueError("PADOS_IDENTITY_IDLE_TIMEOUT_SECONDS must not exceed PADOS_IDENTITY_SESSION_TTL_SECONDS")
+        return self
+
+    @property
+    def identity_origins(self) -> tuple[str, ...]:
+        return tuple(self.identity_allowed_origins.split(",")) if self.identity_allowed_origins else ()
 
     @property
     def database_url(self) -> str:

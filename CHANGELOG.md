@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Unified Identity & Session v1 (feature flag, off by default)
+
+- One-time device pairing (`pados device pair`) and server-side HttpOnly sessions for the Local Control Center, so a
+  paired browser no longer needs the control token on reload. The session has exactly the control-token authority and
+  never decides result acceptance (WebAuthn step-up unchanged).
+- OIDC sign-in adapter (Microsoft Entra ID, Google, generic; Authorization Code + PKCE, state, nonce, RS256) with
+  PADOS actor and project-role bindings. **NOT_LIVE_VALIDATED** against real tenants.
+- Flags, rollback, threat model and tests: `docs/identity/` (`RELEASE_NOTES_IDENTITY_V1.md`, `THREAT_MODEL.md`,
+  `SECURITY_TESTS.md`).
+
 ### 2026-11-14 release baseline (local-supervised dogfood; production NOT_READY)
 
 - PR #26: the PR #20 to #25 stack lands on `main` as merge commit `1fd5608` (tree identical to the validated RC `202df5c`). Owner-authorized; human code review of the cumulative diff not performed.

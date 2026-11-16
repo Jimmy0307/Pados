@@ -28,6 +28,12 @@ export default defineConfig(({ mode, command }) => {
           target: env.PADOS_WEB_BACKEND_URL || "http://127.0.0.1:8088",
           changeOrigin: false,
         },
+        // Browser pairing and the paired session (docs/identity): proxied unchanged, so the page stays same-origin and
+        // the session cookie, the Origin header and X-PADOS-CSRF reach the API as the browser sent them. No CORS.
+        "/identity": {
+          target: env.PADOS_WEB_BACKEND_URL || "http://127.0.0.1:8088",
+          changeOrigin: false,
+        },
       },
     },
   };
