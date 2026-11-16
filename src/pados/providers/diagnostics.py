@@ -29,8 +29,18 @@ from typing import Any
 from pados.capability.inference import registration_authorizes
 from pados.capability.seams import InferenceRequest
 from pados.compute_node.circuit import circuit_snapshot
-from pados.compute_node.gateway import EXPLANATIONS, AttemptRecorder, GatewayBackend, GatewayError, explain
-from pados.compute_node.gateway_contract import ContractError, GatewayContract, load_gateway_contract
+from pados.compute_node.gateway import (
+    EXPLANATIONS,
+    AttemptRecorder,
+    GatewayBackend,
+    GatewayError,
+    explain,
+)
+from pados.compute_node.gateway_contract import (
+    ContractError,
+    GatewayContract,
+    load_gateway_contract,
+)
 from pados.compute_node.manifest import NodeCapability
 from pados.compute_node.registry import NodeRegistration, NodeRegistry
 from pados.config import Settings
@@ -45,14 +55,26 @@ from pados.local_intelligence.runtimes import (
     RuntimeHealth,
     describe_runtime,
 )
+from pados.logging_config import get_logger
 from pados.providers.execution_binding import (
     ExecutionBindingRefused,
     ExecutionIntent,
     record_endpoint,
     resolve_bound_execution,
 )
-from pados.providers.setup import GATEWAY_KIND, ProviderSettings, ProvidersSetup, ProvidersSetupStore, SetupError
-from pados.resources.capability_profile import BindingPolicy, DeviceObservation, ModelCapabilityProfile, bind_live
+from pados.providers.setup import (
+    GATEWAY_KIND,
+    ProviderSettings,
+    ProvidersSetup,
+    ProvidersSetupStore,
+    SetupError,
+)
+from pados.resources.capability_profile import (
+    BindingPolicy,
+    DeviceObservation,
+    ModelCapabilityProfile,
+    bind_live,
+)
 
 VIEW_SCHEMA = "pados.providers.view.v1"
 DETECTED_ID = "ollama-local"
@@ -74,6 +96,44 @@ GOVERNANCE_EXPLANATIONS = {
 
 Describe = Callable[[RuntimeEndpoint, datetime], RuntimeDescriptor]
 Profiler = Callable[[], DeviceProfile]
+
+
+# Outbound diagnostics budget (final review MEDIUM-2). Sessions may call diagnostics and every call makes outbound
+# requests (a chat probe also spends inference), so the route must not become a request amplifier. Per provider: a burst
+# of connection checks refilled at one per CHECK_REFILL_SECONDS; chat probes have a smaller budget; a process-wide budget
+# caps the sum. The burst leaves room for the operator's flow (check, probe, repeated checks while a circuit opens).
+_LOG = get_logger("pados.providers.diagnostics")
+RATE_LIMITED = "PROVIDER_DIAGNOSTICS_RATE_LIMITED"
+CHECK_BURST, CHECK_REFILL_SECONDS = 10, 6.0
+PROBE_BURST, PROBE_REFILL_SECONDS = 3, 20.0
+GLOBAL_BURST, GLOBAL_REFILL_SECONDS = 30, 2.0
+_EPSILON = 1e-9
+
+
+class TokenBucket:
+    """A token bucket over caller-supplied seconds (a clock that goes backwards refills nothing)."""
+
+    def __init__(self, *, capacity: int, refill_seconds: float) -> None:
+        self.capacity = capacity
+        self.refill_seconds = refill_seconds
+        self.tokens = float(capacity)
+        self._last: float | None = None
+
+    def available(self, now: float) -> bool:
+        if self._last is not None and now > self._last:
+            self.tokens = min(float(self.capacity), self.tokens + (now - self._last) / self.refill_seconds)
+        if self._last is None or now > self._last:
+            self._last = now
+        return self.tokens >= 1.0 - _EPSILON
+
+    def spend(self) -> None:
+        self.tokens = max(0.0, self.tokens - 1.0)
+
+    def take(self, now: float) -> bool:
+        if not self.available(now):
+            return False
+        self.spend()
+        return True
 
 
 def _now() -> datetime:
@@ -104,6 +164,9 @@ class ProviderDiagnostics:
         self._last: dict[str, dict[str, Any]] = {}
         self._recorders: dict[str, AttemptRecorder] = {}
         self._lock = threading.Lock()
+        self._checks: dict[str, TokenBucket] = {}
+        self._probes: dict[str, TokenBucket] = {}
+        self._global = TokenBucket(capacity=GLOBAL_BURST, refill_seconds=GLOBAL_REFILL_SECONDS)
 
     # -- configuration --------------------------------------------------------------------------------------------
     def providers(self, setup: ProvidersSetup) -> list[tuple[ProviderSettings, str]]:
@@ -213,6 +276,8 @@ class ProviderDiagnostics:
             raise SetupError("PROVIDER_NOT_CONFIGURED", 404)
         item, source = found
         now = self._clock()
+        if item.enabled:
+            self._admit(item.provider_id, now, probe=probe_chat and item.kind == GATEWAY_KIND)
         if not item.enabled:
             result: dict[str, Any] = {"reachability": {"state": "DISABLED", "code": "PROVIDER_DISABLED",
                                                        "explanation": LOCAL_EXPLANATIONS["PROVIDER_DISABLED"]},
@@ -224,6 +289,22 @@ class ProviderDiagnostics:
         result["checked_at"] = now.isoformat()
         self._last[item.provider_id] = result
         return self.view(item, source)
+
+    def _admit(self, provider_id: str, now: datetime, *, probe: bool) -> None:
+        """Spend one unit from the process-wide and the provider budgets (and the probe budget for a chat probe), or
+        refuse with 429 before any outbound request is made."""
+        seconds = now.timestamp()
+        with self._lock:
+            buckets = [self._global, self._checks.setdefault(
+                provider_id, TokenBucket(capacity=CHECK_BURST, refill_seconds=CHECK_REFILL_SECONDS))]
+            if probe:
+                buckets.append(self._probes.setdefault(
+                    provider_id, TokenBucket(capacity=PROBE_BURST, refill_seconds=PROBE_REFILL_SECONDS)))
+            if not all([bucket.available(seconds) for bucket in buckets]):
+                _LOG.warning("providers.diagnostics_rate_limited", provider_id=provider_id, probe=probe)
+                raise SetupError(RATE_LIMITED, 429)
+            for bucket in buckets:
+                bucket.spend()
 
     def _diagnose_local(self, item: ProviderSettings, now: datetime) -> dict[str, Any]:
         assert item.endpoint is not None

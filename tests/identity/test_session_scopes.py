@@ -76,7 +76,9 @@ def test_the_deliberate_denials() -> None:
                                    ("POST", "/memory/facts/{memory_id}/promote"),
                                    ("POST", "/control/projections/render"),
                                    ("PUT", "/control/providers/{provider_id}"),
-                                   ("POST", "/control/providers/{provider_id}/enable")}
+                                   ("POST", "/control/providers/{provider_id}/enable"),
+                                   ("POST", "/control/loops/{loop_id}/pause"),
+                                   ("POST", "/control/loops/{loop_id}/resume")}
     assert all(reason.strip() for reason in SESSION_DENIED.values())
 
 

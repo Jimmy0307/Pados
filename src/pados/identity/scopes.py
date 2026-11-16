@@ -70,9 +70,7 @@ _SESSION_WRITES: Final[tuple[str, ...]] = (
     "/control/jobs/{job_id}/cancel",
     "/control/loops",
     "/control/loops/{loop_id}/cancel",
-    "/control/loops/{loop_id}/pause",
     "/control/loops/{loop_id}/result-candidate",  # submission only; acceptance stays with step-up
-    "/control/loops/{loop_id}/resume",
     "/control/loops/{loop_id}/start",
     "/control/loops/{loop_id}/step",
     "/control/projects",  # bounded: a folder under the approved workspace root, no path or id typed
@@ -100,6 +98,10 @@ SESSION_DENIED: Final[Mapping[RouteKey, str]] = MappingProxyType({
     ("PUT", "/control/providers/{provider_id}"): "operator configuration: can repoint a runtime endpoint or a gateway "
         "contract; kept to the control token (CLI)",
     ("POST", "/control/projections/render"): "writes projection files into the vault on disk",
+    ("POST", "/control/loops/{loop_id}/pause"): "with resume, a pause from a budget or human-wait stop returns the "
+        "loop to RUNNING past its iteration budget (security review 2026-11-16); the Control Center does not pause, "
+        "and the control token (CLI) still may",
+    ("POST", "/control/loops/{loop_id}/resume"): "see pause: kept to the control token (CLI)",
 })
 
 _HEAD_AS: Final = "GET"

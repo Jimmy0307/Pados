@@ -115,3 +115,22 @@ def test_detected_provider_becomes_a_setup_entry_when_toggled(world: Any) -> Non
     assert response.status_code == 200
     provider = response.json()["provider"]
     assert provider["source"] == "setup" and provider["enabled"] is False
+
+
+def test_chat_probes_are_rate_limited_with_a_closed_code(world: Any) -> None:
+    """MEDIUM-2: a probe spends inference on the gateway; past the probe budget the route answers 429 with a closed code
+    and makes no request, while a plain connection check still has budget."""
+    from pados.providers.diagnostics import PROBE_BURST, RATE_LIMITED
+
+    client, _port, contract, _key = world
+    assert client.put("/control/providers/sim-gw", headers=HEADERS, json=_gateway_body(contract, 0)).status_code == 200
+    assert client.post("/control/providers/sim-gw/enable", headers=HEADERS, json={"expected_revision": 1}).status_code == 200
+    for _ in range(PROBE_BURST):
+        ok = client.post("/control/providers/sim-gw/diagnostics", headers=HEADERS, json={"probe_chat": True})
+        assert ok.status_code == 200, ok.text
+    attempts = len(ok.json()["provider"]["recent_attempts"])
+    refused = client.post("/control/providers/sim-gw/diagnostics", headers=HEADERS, json={"probe_chat": True})
+    assert refused.status_code == 429 and RATE_LIMITED in refused.text
+    still = client.post("/control/providers/sim-gw/diagnostics", headers=HEADERS, json={})
+    assert still.status_code == 200
+    assert len(still.json()["provider"]["recent_attempts"]) >= attempts  # the refused probe added no attempt

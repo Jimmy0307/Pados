@@ -71,8 +71,12 @@ MEASURED_EXECUTION_CONFIG_MISMATCH = "MEASURED_EXECUTION_CONFIG_MISMATCH"
 MEASURED_EXECUTION_CONFIG_NOT_APPLIED = "MEASURED_EXECUTION_CONFIG_NOT_APPLIED"
 MEASURED_EXECUTION_INTENT_REQUIRED = "MEASURED_EXECUTION_INTENT_REQUIRED"
 PROVIDER_DISABLED = "PROVIDER_DISABLED"
+PROVIDER_CLASSIFICATION_NOT_ADMITTED = "PROVIDER_CLASSIFICATION_NOT_ADMITTED"
 PROVIDER_PROJECT_NOT_IN_SCOPE = "PROVIDER_PROJECT_NOT_IN_SCOPE"
 PROVIDERS_SETUP_INVALID = "PROVIDERS_SETUP_INVALID"
+# Every local model call is authorized at this classification, LOCAL_ONLY; a project's own classification is not read
+# here yet (documented in DOGFOOD_AI_ENABLEMENT_zh-TW.md section 6; tracked as a release residual).
+REQUEST_CLASSIFICATION = DataClassification.INTERNAL
 
 
 class ExecutionIntent(StrEnum):
@@ -204,6 +208,10 @@ def _owner_narrowing(settings: Settings, project_id: str, setup_loader: SetupLoa
             raise refuse(PROVIDER_DISABLED, (item.provider_id,))
         if not item.admits_project(project_id):
             raise refuse(PROVIDER_PROJECT_NOT_IN_SCOPE, (item.provider_id,))
+        # Local model calls are authorized at REQUEST_CLASSIFICATION (see _authorize); a setup ceiling below it refuses
+        # (security review 2026-11-16: the setup's max_classification was shown in the UI but not applied here).
+        if not item.max_classification.permits(REQUEST_CLASSIFICATION):
+            raise refuse(PROVIDER_CLASSIFICATION_NOT_ADMITTED, (item.provider_id,))
 
 
 def _select_profile(settings: Settings, catalog_loader: CatalogLoader) -> ModelCapabilityProfile:
@@ -244,7 +252,7 @@ def _authorize(profile: ModelCapabilityProfile, settings: Settings, intent: Exec
     except (OSError, ValueError):
         raise refuse(MODEL_AUTHORIZATION_STORE_INVALID) from None
     request = InferenceRequest(project_id=project_id, stage_id=_STAGE_ID, capability_id=intent.value,
-                               risk_level="LOW", classification=DataClassification.INTERNAL,
+                               risk_level="LOW", classification=REQUEST_CLASSIFICATION,
                                network_policy="LOCAL_ONLY", grant_hash="")
     try:
         authorized = registration_authorizes(lambda: registrations)(profile, request) is True

@@ -24,7 +24,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pados.enterprise.classification import DataClassification
-from pados.enterprise.secrets import is_secret_ref, looks_like_secret
+from pados.enterprise.secrets import is_secret_ref, looks_like_secret, reserved_env_ref
 
 GATEWAY_CONTRACT_SCHEMA = "pados.compute-node.gateway-contract.v1"
 MAX_CONTRACT_BYTES = 256 * 1024
@@ -97,6 +97,8 @@ class GatewayAuth(BaseModel):
             return self
         if self.auth_ref is None or not is_secret_ref(self.auth_ref):
             raise ValueError("SECRET_REFERENCE_REQUIRED")
+        if reserved_env_ref(self.auth_ref):
+            raise ValueError("GATEWAY_AUTH_REFERENCE_RESERVED")
         if self.scheme is AuthScheme.HEADER:
             if self.header_name is None or not _HEADER.fullmatch(self.header_name) \
                     or self.header_name.casefold() in _RESERVED_HEADERS:

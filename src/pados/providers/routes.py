@@ -9,7 +9,9 @@ work or accepts a result, and no response ever carries a key value (only the NAM
 SESSION SCOPES (as enforced by ``src/pados/identity/scopes.py``; least privilege):
   GET  /control/providers, GET /control/providers/{provider_id}  -> allowed for sessions (read only)
   POST /control/providers/{provider_id}/diagnostics              -> allowed for sessions (observes; writes only
-                                                                     content-free attempt receipts)
+                                                                     content-free attempt receipts; outbound
+                                                                     budget per provider and process-wide, 429
+                                                                     PROVIDER_DIAGNOSTICS_RATE_LIMITED past it)
   POST /control/providers/{provider_id}/disable                  -> allowed for sessions (only narrows)
   PUT  /control/providers/{provider_id}, POST .../enable         -> control token only (an endpoint or contract edit,
                                                                      or lifting a restriction the operator set)
