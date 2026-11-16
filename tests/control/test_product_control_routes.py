@@ -59,6 +59,8 @@ def world(tmp_path: Path, make_harness: Callable[..., Harness],  # noqa: F811 - 
                         else (_ for _ in ()).throw(__import__("sqlalchemy.exc").exc.NoResultFound()))
     monkeypatch.setattr(product_routes, "prior_document_write", lambda _s, _p, key: next(
         (e["payload"] for e in events if e["payload"].get("idempotency_key") == key), None))
+    monkeypatch.setattr(product_routes, "document_events", lambda _s, pid: [
+        (e["event_type"], e["payload"]) for e in events if e["project_id"] == pid])
     monkeypatch.setattr(control_service, "append_sync_event", lambda _s, pid, kind, payload: events.append(
         {"project_id": pid, "event_type": kind, "payload": payload}))
     harness = make_harness(PADOS_PRODUCT_WORKSPACE_ROOT=str(workspace),
@@ -225,6 +227,38 @@ def test_document_routes_refuse_without_a_credential(world: dict[str, Any]) -> N
     assert client.post(f"/control/projects/{PROJECT}/documents", json=DOC,
                        headers={"Origin": ORIGIN}).status_code == 403
     assert not (world["folder"] / "guide.md").exists()
+
+
+def test_the_listing_reports_reconciliation_and_an_unaudited_change(world: dict[str, Any]) -> None:
+    client = world["harness"].client()
+    url = f"/control/projects/{PROJECT}/documents"
+    assert client.post(url, json=DOC, headers=TOKEN_HEADERS).status_code == 200
+    clean = client.get(url, headers=TOKEN_HEADERS).json()["reconciliation"]
+    assert clean == {"state": "CLEAN", "pending": 0, "failed": [], "unaudited": []}
+    (world["folder"] / "guide.md").write_bytes(b"edited in another editor\n")
+    changed = client.get(url, headers=TOKEN_HEADERS).json()
+    assert changed["reconciliation"]["state"] == "ATTENTION"
+    assert changed["reconciliation"]["unaudited"] == [{"path": "guide.md", "code": "DOCUMENT_UNAUDITED_CHANGE"}]
+    assert len(world["events"]) == 1  # reported, never re-audited
+    assert [d["path"] for d in changed["documents"]] == ["guide.md"]  # the .pados journal is never listed
+
+
+def test_server_start_reconciles_documents_in_the_background(world: dict[str, Any],
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    from pados.control import product_routes
+
+    called = threading.Event()
+
+    def reconcile(settings: Any, _scope: Any) -> dict[str, int]:
+        assert settings.product_workspace_root
+        called.set()
+        return {}
+
+    monkeypatch.setattr(product_routes, "reconcile_workspace_documents", reconcile)
+    with TestClient(world["harness"].app):
+        assert called.wait(timeout=10)
 
 
 # --- projections ------------------------------------------------------------------------------------------------------
