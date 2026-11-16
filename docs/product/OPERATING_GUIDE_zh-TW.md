@@ -15,6 +15,9 @@
 Windows／Linux 驗證結果記錄在 [PRODUCT_ACCEPTANCE_REPORT_2026-11-16.md](PRODUCT_ACCEPTANCE_REPORT_2026-11-16.md) 的
 FINAL VALIDATION 一節。
 
+既有環境（舊 `main` `9b975a9`）在合併後如何升級：[LOCAL_CUTOVER_RUNBOOK_zh-TW.md](LOCAL_CUTOVER_RUNBOOK_zh-TW.md)。
+讓 `PADOS-First-Dogfood` 使用 AI 還缺哪些步驟：[DOGFOOD_AI_ENABLEMENT_zh-TW.md](DOGFOOD_AI_ENABLEMENT_zh-TW.md)。
+
 整體狀態：**production NOT_READY**。這是本機、單人、受監督的工具，不是多人或對外服務。
 Microsoft Entra ID / Google 單一登入與企業 AI 閘道都是 **NOT_LIVE_VALIDATED**；Windows Hello 與 Windows SID 綁定是
 **NOT_IMPLEMENTED**。
@@ -288,6 +291,9 @@ control token 都不能接受結果（`RESULT_ACCEPTANCE_REQUIRES_STEP_UP`）。
 M4.1 受治理流程跑一次真實任務 `REAL_TASK_DOGFOOD=PASS`：臨時的明確授權（之後移除）、receipt SUCCEEDED、
 驗證器 5/5 欄位、`semantic_authority` NONE、沒有提交給 CAS。**LIVE（單一主機、合成資料）。**
 
+以上是在臨時 runtime 上的 TEST 結果。您自己的環境要讓專案使用模型，還需要逐步完成目錄、量測、登錄、授權與聊天提供者設定，
+每一步的狀態見 [DOGFOOD_AI_ENABLEMENT_zh-TW.md](DOGFOOD_AI_ENABLEMENT_zh-TW.md)。
+
 ### 10.2 企業 AI 閘道
 
 閘道介接器（`enterprise_gateway`）以私有合約檔描述 API，金鑰只以**環境變數名稱**引用，資料分級預設上限 PUBLIC，
@@ -432,6 +438,7 @@ RESTRICTED 絕不送出，預設不執行（只做健康檢查與模型探索）
 3. **AI 提供者**：在頁面按 **停用**，或刪除 `runtime\local\providers.json`（`PADOS_PROVIDERS_SETUP`）；沒有設定項目的
    提供者行為與以前完全相同。
 4. **程式回退**：依 #38 → #37 → #36 → #35 的順序 revert（各 PR 都沒有資料庫 migration）。啟動器與本手冊可以獨立 revert。
-5. 舊的手動方式仍可用：`pados serve` 加 `cd web; npm run dev`，或根目錄的 `Start-PADOS-Web.ps1`。
+5. 從舊版升級後要回到舊版：依 [LOCAL_CUTOVER_RUNBOOK_zh-TW.md](LOCAL_CUTOVER_RUNBOOK_zh-TW.md) 的 (i) 回退。
+6. 舊的手動方式仍可用：`pados serve` 加 `cd web; npm run dev`，或根目錄的 `Start-PADOS-Web.ps1`。
 
 接受過的結果（ScopeVersion）不會因為以上任何一步而改變；回退只影響之後的操作方式。

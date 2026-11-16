@@ -35,6 +35,8 @@ for this report from the PR bodies. The owner should check that they match the m
 
 Diagram of the integrated stack: [product-convergence-2026-11-16.mmd](../architecture/public/product-convergence-2026-11-16.mmd).
 Operator guide (zh-TW): [OPERATING_GUIDE_zh-TW.md](OPERATING_GUIDE_zh-TW.md).
+Upgrading the existing environment after the merge (zh-TW): [LOCAL_CUTOVER_RUNBOOK_zh-TW.md](LOCAL_CUTOVER_RUNBOOK_zh-TW.md).
+What the owner's environment still needs for AI in `PADOS-First-Dogfood` (zh-TW): [DOGFOOD_AI_ENABLEMENT_zh-TW.md](DOGFOOD_AI_ENABLEMENT_zh-TW.md).
 
 ## Summary
 
@@ -194,3 +196,13 @@ No request carried the control-token header, and the token appears in no respons
 | B4 | PARTIAL | PARTIAL | A real WebAuthn decision needs an enrolled presence device; waiting and no-bypass are LIVE. |
 
 The status changes above are the only edits made to rows A2, B4, F3, F4 and F5.
+
+## Release preparation (2026-11-16, after FINAL VALIDATION)
+
+Three follow-ups on this documentation PR. None of them changes a status row above.
+
+| Item | Change | Evidence | Status |
+| --- | --- | --- | --- |
+| OWNER-GATE-1: `dependency review` skipped on push commits | `security.yml` runs the required `dependency review` job on every trigger. Outside a pull request it passes `base-ref` (the push's `before` commit, or the first parent when there is none) and `head-ref` (the commit) to the same pinned action v5.0.0 (`a1d282b`), whose `action.yml` documents both inputs for non-PR events. `fail-on-severity: high` and the job name are unchanged. The lane reader is unchanged: SKIPPED is still FAIL and only the commit's own run counts. The CI policy now requires the job to run on every event and to pass both refs. | `tests/release_supply_chain`: 408 collected, all pass except environment skips (POSIX-only and symlink privilege), including new policy, ref-script and lane-reader tests; `ci_policy_check.py` CI_POLICY_OK | **Effective only for pushes made after it is on `main`.** `9b975a9` and earlier keep their skipped check run and their NOT_READY verdict. The first merge after this change is the first commit that can show a real push-run review. See the baseline §7 OWNER-GATE-1 row. |
+| `remote-console-mobile` hard-coded `localhost:5173` | The spec's origin comes from `PADOS_WEB_PORT`, which `playwright.config.ts` and `vite.config.ts` already read (unset: 5173). | Run at Windows 11 on port 5199 with the Vite proxy pointed at a dead port (the spec mocks every `/remote/v1` request): **4 passed**, then **12 passed** with `--repeat-each=3` (SYNTHETIC, mocked Playwright) | The F5 note "one 5173-only spec not run" is resolved for future runs; F5 itself is not re-graded here. |
+| Cutover runbook and AI requirements | [LOCAL_CUTOVER_RUNBOOK_zh-TW.md](LOCAL_CUTOVER_RUNBOOK_zh-TW.md) (stop, clean check, backup with `pg_dump`, checkout, dependencies, no migration, preserved `.env`/token/databases, restart, rollback, the Dogfood project's document route) and [DOGFOOD_AI_ENABLEMENT_zh-TW.md](DOGFOOD_AI_ENABLEMENT_zh-TW.md) (catalog, M2 → M3 measurement, registration, explicit authorization, chat provider, scope and classification, Providers states, verification, ResultCandidate/WebAuthn) | Docs only. Facts about the owner's environment were checked read-only (key names, git state, listening processes); nothing was executed against it. `git diff 9b975a9..4671127` shows no change under `migrations` or `alembic*` and none to `requirements.lock`, `pyproject.toml` or `web/package*.json`. | Owner decides: when to cut over; whether to re-measure `qwen3:8b` or import the TEST profile; whether and how to authorize it; which path makes the first real model call. |
